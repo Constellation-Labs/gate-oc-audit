@@ -1,0 +1,23 @@
+{
+  "name": "@constellation/openclaw-audit-plugin",
+  "version": "0.1.0",
+  "description": "Tamper-evident audit trail for AI coding agent activity",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "node --import tsx --test test/*.test.ts test/**/*.test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "uuidv7": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3"
+  }
+}
