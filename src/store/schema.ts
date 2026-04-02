@@ -4,6 +4,7 @@ const PRAGMAS = [
   "PRAGMA journal_mode = WAL",
   "PRAGMA synchronous = NORMAL",
   "PRAGMA foreign_keys = ON",
+  "PRAGMA auto_vacuum = INCREMENTAL",
 ];
 
 const DDL = [

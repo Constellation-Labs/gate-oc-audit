@@ -17,7 +17,11 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.3",
+    "openclaw": "^2026.4.1",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.0"
   }
 }

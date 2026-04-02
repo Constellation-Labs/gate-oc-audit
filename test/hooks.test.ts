@@ -6,11 +6,10 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { AuditStore } from "../src/store/audit-store.js";
 import { sanitizeArgs, registerHooks } from "../src/hooks.js";
-import type { OpenClawPluginApi, HookOptions } from "../src/types/openclaw-sdk.js";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 function makeTempDb(): string {
-  const dir = mkdtempSync(join(tmpdir(), "audit-hooks-test-"));
-  return join(dir, "test.db");
+  return join(mkdtempSync(join(tmpdir(), "audit-hooks-test-")), "test.db");
 }
 
 function getEvents(dbPath: string) {
@@ -26,39 +25,39 @@ function getEvents(dbPath: string) {
   return rows;
 }
 
-type HookHandler = (...args: unknown[]) => unknown;
+type HookEntry = {
+  handler: (event: unknown, ctx: unknown) => unknown;
+  options?: { priority?: number };
+};
 
 function createMockApi() {
-  const hooks = new Map<string, { handler: HookHandler; options?: HookOptions }>();
-  const diagnostics = new Map<string, HookHandler>();
+  const hooks = new Map<string, HookEntry>();
 
-  const api = {
+  return {
     hooks,
-    diagnostics,
-    on(hook: string, handler: HookHandler, options?: HookOptions) {
-      hooks.set(hook, { handler, options });
+    on(hook: string, handler: HookEntry["handler"], opts?: HookEntry["options"]) {
+      hooks.set(hook, { handler, options: opts });
     },
-    onDiagnosticEvent(event: string, handler: HookHandler) {
-      diagnostics.set(event, handler);
-    },
+    registerHook() {},
     registerService() {},
     registerCli() {},
     registerTool() {},
-    config: { plugins: { entries: {} } },
-  } as unknown as OpenClawPluginApi & {
-    hooks: Map<string, { handler: HookHandler; options?: HookOptions }>;
-    diagnostics: Map<string, HookHandler>;
-  };
-
-  return api;
+    registerCommand() {},
+    registerHttpRoute() {},
+    pluginConfig: {},
+    config: {},
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    runtime: {},
+    registrationMode: "full",
+    id: "test",
+    name: "test",
+    source: "test",
+    resolvePath: (p: string) => p,
+  } as unknown as OpenClawPluginApi & { hooks: Map<string, HookEntry> };
 }
 
-function fireHook(api: ReturnType<typeof createMockApi>, name: string, ctx: unknown) {
-  api.hooks.get(name)!.handler(ctx);
-}
-
-function fireDiagnostic(api: ReturnType<typeof createMockApi>, name: string, ctx: unknown) {
-  api.diagnostics.get(name)!(ctx);
+function fireHook(api: ReturnType<typeof createMockApi>, name: string, event: unknown, ctx: unknown = {}) {
+  api.hooks.get(name)!.handler(event, ctx);
 }
 
 // --- sanitizeArgs ---
@@ -91,15 +90,9 @@ describe("sanitizeArgs", () => {
 
   it("redacts credential, passphrase, jwt, bearer, cookie patterns", () => {
     const result = sanitizeArgs({
-      credential: "a",
-      passphrase: "b",
-      jwtToken: "c",
-      bearerAuth: "d",
-      cookieSession: "e",
+      credential: "a", passphrase: "b", jwtToken: "c", bearerAuth: "d", cookieSession: "e",
     });
-    for (const v of Object.values(result)) {
-      assert.equal(v, "[REDACTED]");
-    }
+    for (const v of Object.values(result)) assert.equal(v, "[REDACTED]");
   });
 
   it("preserves null and undefined values", () => {
@@ -109,9 +102,7 @@ describe("sanitizeArgs", () => {
   });
 
   it("handles deeply nested objects", () => {
-    const result = sanitizeArgs({
-      level1: { level2: { level3: { password: "deep" } } },
-    });
+    const result = sanitizeArgs({ level1: { level2: { level3: { password: "deep" } } } });
     assert.equal((result.level1 as any).level2.level3.password, "[REDACTED]");
   });
 
@@ -143,10 +134,14 @@ describe("registerHooks", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("registers all 7 lifecycle hooks and 1 diagnostic", () => {
-    assert.equal(api.hooks.size, 7);
-    assert.equal(api.diagnostics.size, 1);
-    assert.ok(api.diagnostics.has("model.usage"));
+  it("registers 8 lifecycle hooks", () => {
+    assert.equal(api.hooks.size, 8);
+    for (const name of [
+      "before_agent_start", "agent_end", "before_tool_call", "after_tool_call",
+      "tool_result_persist", "message_received", "message_sent", "llm_output",
+    ]) {
+      assert.ok(api.hooks.has(name), `Missing hook: ${name}`);
+    }
   });
 
   it("registers all hooks with priority 200", () => {
@@ -157,13 +152,10 @@ describe("registerHooks", () => {
 
   describe("before_agent_start", () => {
     it("records session.start with prompt length", () => {
-      fireHook(api, "before_agent_start", {
-        sessionId: "s1",
-        userId: "u1",
-        orgId: "org1",
-        prompt: "hello world",
-        config: {},
-      });
+      fireHook(api, "before_agent_start",
+        { prompt: "hello world" },
+        { sessionId: "s1" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events.length, 1);
@@ -173,7 +165,7 @@ describe("registerHooks", () => {
     });
 
     it("handles missing optional prompt", () => {
-      fireHook(api, "before_agent_start", { sessionId: "s1", config: {} });
+      fireHook(api, "before_agent_start", {}, { sessionId: "s1" });
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
       assert.ok(!("promptLength" in meta));
     });
@@ -181,12 +173,10 @@ describe("registerHooks", () => {
 
   describe("agent_end", () => {
     it("records session.end", () => {
-      fireHook(api, "agent_end", {
-        sessionId: "s1",
-        durationMs: 5000,
-        success: true,
-        stats: { tokensUsed: 100, toolCalls: 3 },
-      });
+      fireHook(api, "agent_end",
+        { durationMs: 5000, success: true, messages: [] },
+        { sessionId: "s1" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events[0].event_type, "session.end");
@@ -198,12 +188,10 @@ describe("registerHooks", () => {
 
   describe("before_tool_call", () => {
     it("records tool.invoked with sanitized args", () => {
-      fireHook(api, "before_tool_call", {
-        sessionId: "s1",
-        toolName: "read_file",
-        params: { path: "/tmp/test", apiKey: "secret123" },
-        requestId: "r1",
-      });
+      fireHook(api, "before_tool_call",
+        { toolName: "read_file", params: { path: "/tmp/test", apiKey: "secret123" } },
+        { sessionId: "s1", toolName: "read_file" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events[0].event_type, "tool.invoked");
@@ -216,102 +204,62 @@ describe("registerHooks", () => {
 
   describe("after_tool_call", () => {
     it("records tool.result", () => {
-      fireHook(api, "after_tool_call", {
-        sessionId: "s1",
-        toolName: "bash",
-        result: "output",
-        exitCode: 0,
-        durationMs: 120,
-        requestId: "r1",
-      });
+      fireHook(api, "after_tool_call",
+        { toolName: "bash", durationMs: 120, params: {} },
+        { sessionId: "s1", toolName: "bash" },
+      );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
       assert.equal(meta.toolName, "bash");
-      assert.equal(meta.exitCode, 0);
       assert.equal(meta.durationMs, 120);
-    });
-
-    it("truncates output to 1024 chars", () => {
-      fireHook(api, "after_tool_call", {
-        sessionId: "s1",
-        toolName: "bash",
-        result: "x".repeat(2000),
-        durationMs: 100,
-        requestId: "r1",
-      });
-
-      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.truncatedOutput.length, 1024);
-    });
-
-    it("handles missing optional fields", () => {
-      fireHook(api, "after_tool_call", {
-        sessionId: "s1",
-        toolName: "bash",
-        durationMs: 50,
-        requestId: "r1",
-      });
-
-      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.ok(!("exitCode" in meta));
-      assert.ok(!("truncatedOutput" in meta));
     });
   });
 
   describe("tool_result_persist", () => {
     it("records tool.persisted", () => {
-      fireHook(api, "tool_result_persist", {
-        sessionId: "s1",
-        toolName: "write_file",
-        result: "file contents here",
-        requestId: "r1",
-      });
+      fireHook(api, "tool_result_persist",
+        { toolName: "write_file", message: { role: "tool", content: "done" } },
+        { sessionKey: "sk1", toolName: "write_file" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events[0].event_type, "tool.persisted");
-      assert.equal(JSON.parse(events[0].metadata).contentLength, 18);
+      assert.equal(JSON.parse(events[0].metadata).toolName, "write_file");
     });
   });
 
   describe("message_received", () => {
     it("records prompt.sent with truncated content", () => {
-      fireHook(api, "message_received", {
-        sessionId: "s1",
-        channel: "user",
-        content: "Please help me",
-        role: "user",
-      });
+      fireHook(api, "message_received",
+        { from: "user-123", content: "Please help me" },
+        { channelId: "telegram" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events[0].event_type, "prompt.sent");
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.contentLength, 14);
-      assert.equal(meta.truncatedPrompt, "Please help me");
+      assert.equal(meta.truncatedContent, "Please help me");
     });
 
-    it("truncates prompt to 500 chars", () => {
-      fireHook(api, "message_received", {
-        sessionId: "s1",
-        channel: "user",
-        content: "a".repeat(1000),
-        role: "user",
-      });
+    it("truncates content to 500 chars", () => {
+      fireHook(api, "message_received",
+        { from: "user", content: "a".repeat(1000) },
+        { channelId: "telegram" },
+      );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.truncatedPrompt.length, 500);
+      assert.equal(meta.truncatedContent.length, 500);
       assert.equal(meta.contentLength, 1000);
     });
   });
 
   describe("message_sent", () => {
     it("records prompt.response", () => {
-      fireHook(api, "message_sent", {
-        sessionId: "s1",
-        channel: "assistant",
-        content: "Here is the answer",
-        role: "assistant",
-        success: true,
-      });
+      fireHook(api, "message_sent",
+        { to: "user-123", content: "Here is the answer", success: true },
+        { channelId: "telegram" },
+      );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
       assert.equal(meta.success, true);
@@ -319,33 +267,32 @@ describe("registerHooks", () => {
     });
   });
 
-  describe("model.usage diagnostic", () => {
+  describe("llm_output", () => {
     it("records LLM usage", () => {
-      fireDiagnostic(api, "model.usage", {
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-        inputTokens: 1500,
-        outputTokens: 800,
-        cacheTokens: 200,
-        durationMs: 3200,
-        costUsd: 0.012,
-        sessionId: "s1",
-      });
+      fireHook(api, "llm_output",
+        {
+          runId: "r1", sessionId: "s1",
+          provider: "anthropic", model: "claude-sonnet-4-6",
+          assistantTexts: ["response"],
+          usage: { input: 1500, output: 800, cacheRead: 200 },
+        },
+        { sessionId: "s1" },
+      );
 
       const events = getEvents(dbPath);
       assert.equal(events[0].event_type, "prompt.response");
       assert.ok(events[0].description.includes("anthropic/claude-sonnet-4-6"));
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.inputTokens, 1500);
-      assert.equal(meta.costUsd, 0.012);
+      assert.equal(meta.outputTokens, 800);
+      assert.equal(meta.cacheReadTokens, 200);
     });
   });
 
   describe("fail-open", () => {
     it("does not throw when store is closed", () => {
       store.close();
-      fireHook(api, "before_agent_start", { sessionId: "s1", config: {} });
-      // No assertion needed — if it throws, the test fails
+      fireHook(api, "before_agent_start", {}, { sessionId: "s1" });
       store = new AuditStore(makeTempDb());
     });
   });

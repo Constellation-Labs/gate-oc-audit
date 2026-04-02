@@ -2,7 +2,6 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync, existsSync } from "node:fs";
 import plugin from "../src/index.js";
-import type { OpenClawPluginApi, HookOptions } from "../src/types/openclaw-sdk.js";
 
 const testDbPath = `/tmp/audit-plugin-test-${process.pid}.db`;
 
@@ -13,37 +12,31 @@ function cleanupTestDb(): void {
   }
 }
 
-function createMockApi(dbPath: string): OpenClawPluginApi & {
-  registeredHooks: string[];
-  registeredDiagnostics: string[];
-} {
+function createMockApi(dbPath: string) {
   const registeredHooks: string[] = [];
-  const registeredDiagnostics: string[] = [];
+  const registeredCli: unknown[] = [];
+  const registeredServices: unknown[] = [];
 
   return {
     registeredHooks,
-    registeredDiagnostics,
-    on(hook: string, _handler: unknown, _options?: HookOptions) {
-      registeredHooks.push(hook);
-    },
-    onDiagnosticEvent(event: string, _handler: unknown) {
-      registeredDiagnostics.push(event);
-    },
-    registerService() {},
-    registerCli() {},
+    registeredCli,
+    registeredServices,
+    on(hook: string) { registeredHooks.push(hook); },
+    registerHook() {},
+    registerService(s: unknown) { registeredServices.push(s); },
+    registerCli(r: unknown, opts?: unknown) { registeredCli.push({ r, opts }); },
     registerTool() {},
-    config: {
-      plugins: {
-        entries: {
-          "constellation-audit": {
-            config: { dbPath },
-          },
-        },
-      },
-    },
-  } as unknown as OpenClawPluginApi & {
-    registeredHooks: string[];
-    registeredDiagnostics: string[];
+    registerCommand() {},
+    registerHttpRoute() {},
+    pluginConfig: { dbPath },
+    config: {},
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    runtime: {},
+    registrationMode: "full" as const,
+    id: "constellation-audit",
+    name: "Constellation Audit Trail",
+    source: "test",
+    resolvePath: (p: string) => p,
   };
 }
 
@@ -52,24 +45,22 @@ describe("plugin entry point", () => {
     cleanupTestDb();
   });
 
-  it("exports an object with id, name, description", () => {
+  it("exports id, name, description, register", () => {
     assert.equal(plugin.id, "constellation-audit");
     assert.equal(plugin.name, "Constellation Audit Trail");
     assert.ok(plugin.description);
-  });
-
-  it("has a register function", () => {
     assert.equal(typeof plugin.register, "function");
   });
 
-  it("register calls api.on for hooks", () => {
+  it("registers hooks, CLI, and services", () => {
     const api = createMockApi(testDbPath);
+    plugin.register(api as any);
 
-    plugin.register(api);
-
-    assert.equal(api.registeredHooks.length, 7);
-    assert.equal(api.registeredDiagnostics.length, 1);
+    assert.equal(api.registeredHooks.length, 8);
     assert.ok(api.registeredHooks.includes("before_agent_start"));
-    assert.ok(api.registeredDiagnostics.includes("model.usage"));
+    assert.ok(api.registeredHooks.includes("llm_output"));
+
+    assert.equal(api.registeredCli.length, 1);
+    assert.equal(api.registeredServices.length, 1);
   });
 });

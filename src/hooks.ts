@@ -1,6 +1,6 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
-import type { OpenClawPluginApi } from "./types/openclaw-sdk.js";
 
 const SENSITIVE_KEY =
   /secret|password|token|key|auth|credential|passphrase|jwt|bearer|cookie/i;
@@ -41,89 +41,88 @@ function safeAppend(store: AuditStore, insert: AuditEventInsert): void {
 export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_agent_start",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
-        orgId: ctx.orgId,
-        userId: ctx.userId,
         eventType: "session.start",
         category: "system",
         description: "Agent session started",
-        metadata: { promptLength: ctx.prompt?.length },
+        metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "agent_end",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
         description: "Agent session ended",
-        metadata: { durationMs: ctx.durationMs, success: ctx.success },
+        metadata: { durationMs: evt.durationMs, success: evt.success },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "before_tool_call",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
         eventType: "tool.invoked",
         category: "tool",
-        description: `Tool invoked: ${ctx.toolName}`,
-        metadata: { toolName: ctx.toolName, args: sanitizeArgs(ctx.params) },
+        description: `Tool invoked: ${evt.toolName}`,
+        metadata: { toolName: evt.toolName, args: sanitizeArgs(evt.params) },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "after_tool_call",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
         eventType: "tool.result",
         category: "tool",
-        description: `Tool completed: ${ctx.toolName}`,
+        description: `Tool completed: ${evt.toolName}`,
         metadata: {
-          toolName: ctx.toolName,
-          exitCode: ctx.exitCode,
-          durationMs: ctx.durationMs,
-          truncatedOutput: ctx.result?.slice(0, 1024),
+          toolName: evt.toolName,
+          durationMs: evt.durationMs,
+          error: evt.error,
         },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
-  // tool_result_persist is synchronous in OpenClaw — append is also synchronous
-  // (better-sqlite3), so no special handling needed.
   api.on(
     "tool_result_persist",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
-        sessionId: ctx.sessionId,
+        sessionId: ctx.sessionKey,
         eventType: "tool.persisted",
         category: "tool",
-        description: `Tool result persisted: ${ctx.toolName}`,
-        metadata: { toolName: ctx.toolName, contentLength: ctx.result?.length },
+        description: `Tool result persisted: ${evt.toolName ?? "unknown"}`,
+        metadata: {
+          toolName: evt.toolName,
+          isSynthetic: evt.isSynthetic,
+        },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "message_received",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
-        sessionId: ctx.sessionId,
+        sessionId: ctx.conversationId,
         eventType: "prompt.sent",
         category: "prompt",
-        description: `Message received (${ctx.channel})`,
+        description: `Message received from ${evt.from}`,
         metadata: {
-          contentLength: ctx.content?.length,
-          truncatedPrompt: ctx.content?.slice(0, 500),
+          from: evt.from,
+          contentLength: evt.content?.length,
+          truncatedContent: evt.content?.slice(0, 500),
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -131,32 +130,39 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
 
   api.on(
     "message_sent",
-    (ctx) =>
+    (evt, ctx) =>
       safeAppend(store, {
-        sessionId: ctx.sessionId,
+        sessionId: ctx.conversationId,
         eventType: "prompt.response",
         category: "prompt",
-        description: `Message sent (${ctx.channel})`,
-        metadata: { contentLength: ctx.content?.length, success: ctx.success },
+        description: `Message sent to ${evt.to}`,
+        metadata: {
+          to: evt.to,
+          contentLength: evt.content?.length,
+          success: evt.success,
+          error: evt.error,
+        },
       }),
     { priority: AUDIT_PRIORITY },
   );
 
-  api.onDiagnosticEvent("model.usage", (evt) =>
-    safeAppend(store, {
-      sessionId: evt.sessionId,
-      eventType: "prompt.response",
-      category: "prompt",
-      description: `LLM call: ${evt.provider}/${evt.model}`,
-      metadata: {
-        provider: evt.provider,
-        model: evt.model,
-        inputTokens: evt.inputTokens,
-        outputTokens: evt.outputTokens,
-        cacheTokens: evt.cacheTokens,
-        durationMs: evt.durationMs,
-        costUsd: evt.costUsd,
-      },
-    }),
+  api.on(
+    "llm_output",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "prompt.response",
+        category: "prompt",
+        description: `LLM call: ${evt.provider}/${evt.model}`,
+        metadata: {
+          provider: evt.provider,
+          model: evt.model,
+          inputTokens: evt.usage?.input,
+          outputTokens: evt.usage?.output,
+          cacheReadTokens: evt.usage?.cacheRead,
+          cacheWriteTokens: evt.usage?.cacheWrite,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
   );
 }
