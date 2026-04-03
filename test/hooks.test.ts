@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { gunzipSync } from "node:zlib";
 import Database from "better-sqlite3";
 import { AuditStore } from "../src/store/audit-store.js";
 import { sanitizeArgs, registerHooks } from "../src/hooks.js";
@@ -229,41 +230,123 @@ describe("registerHooks", () => {
   });
 
   describe("message_received", () => {
-    it("records prompt.sent with truncated content", () => {
+    it("records message.received with sender and channel", () => {
       fireHook(api, "message_received",
         { from: "user-123", content: "Please help me" },
-        { channelId: "telegram" },
+        { channelId: "telegram", accountId: "acct-1" },
       );
 
       const events = getEvents(dbPath);
-      assert.equal(events[0].event_type, "prompt.sent");
+      assert.equal(events[0].event_type, "message.received");
+      assert.equal(events[0].category, "message");
       const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.direction, "in");
+      assert.equal(meta.sender, "user-123");
+      assert.equal(meta.channel, "telegram");
       assert.equal(meta.contentLength, 14);
       assert.equal(meta.truncatedContent, "Please help me");
     });
 
-    it("truncates content to 500 chars", () => {
+    it("truncates content to 50 chars", () => {
       fireHook(api, "message_received",
         { from: "user", content: "a".repeat(1000) },
         { channelId: "telegram" },
       );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.truncatedContent.length, 500);
+      assert.equal(meta.truncatedContent.length, 50);
       assert.equal(meta.contentLength, 1000);
+    });
+
+    it("falls back to metadata.senderId when from is empty", () => {
+      fireHook(api, "message_received",
+        { from: "", content: "hi", metadata: { senderId: "sid-1" } },
+        { channelId: "webchat" },
+      );
+
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sender, "sid-1");
+    });
+
+    it("falls back to metadata.senderName when from and senderId are empty", () => {
+      fireHook(api, "message_received",
+        { from: "", content: "hi", metadata: { senderName: "Alice" } },
+        { channelId: "webchat" },
+      );
+
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sender, "Alice");
+    });
+
+    it("falls back to metadata.senderUsername", () => {
+      fireHook(api, "message_received",
+        { from: "", content: "hi", metadata: { senderUsername: "alice42" } },
+        { channelId: "webchat" },
+      );
+
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sender, "alice42");
+    });
+
+    it("falls back to 'unknown' when no sender info available", () => {
+      fireHook(api, "message_received",
+        { from: "", content: "hi" },
+        { channelId: "tui" },
+      );
+
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sender, "unknown");
+    });
+
+    it("stores full content gzipped", () => {
+      const content = "full message content here";
+      fireHook(api, "message_received",
+        { from: "user", content },
+        { channelId: "telegram" },
+      );
+
+      const db = new Database(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Buffer | null };
+      db.close();
+
+      assert.ok(row.content_gz);
+
+      assert.equal(gunzipSync(row.content_gz).toString(), content);
     });
   });
 
   describe("message_sent", () => {
-    it("records prompt.response", () => {
+    it("records message.sent with recipient and channel", () => {
       fireHook(api, "message_sent",
         { to: "user-123", content: "Here is the answer", success: true },
+        { channelId: "telegram", accountId: "acct-1" },
+      );
+
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "message.sent");
+      assert.equal(events[0].category, "message");
+      const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.direction, "out");
+      assert.equal(meta.recipient, "user-123");
+      assert.equal(meta.channel, "telegram");
+      assert.equal(meta.success, true);
+      assert.equal(meta.contentLength, 18);
+    });
+
+    it("stores full content gzipped", () => {
+      const content = "response content";
+      fireHook(api, "message_sent",
+        { to: "user", content, success: true },
         { channelId: "telegram" },
       );
 
-      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.success, true);
-      assert.equal(meta.contentLength, 18);
+      const db = new Database(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Buffer | null };
+      db.close();
+
+      assert.ok(row.content_gz);
+
+      assert.equal(gunzipSync(row.content_gz).toString(), content);
     });
   });
 

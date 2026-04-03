@@ -1,5 +1,6 @@
 export type EventCategory =
   | "prompt"
+  | "message"
   | "tool"
   | "cron"
   | "config"
@@ -20,6 +21,8 @@ export type EventType =
   | "config.soul_changed"
   | "config.cron_changed"
   | "security.scan_result"
+  | "message.received"
+  | "message.sent"
   | "session.start"
   | "session.end";
 
@@ -35,6 +38,8 @@ export interface AuditEvent {
   category: EventCategory;
   description: string;
   metadata: Record<string, unknown>;
+  /** Full content, gzipped. Not included in the hash chain. */
+  contentGz?: Buffer;
   contentHash: string;
   previousHash: string;
   createdAt: string;
@@ -51,4 +56,6 @@ export interface AuditEventInsert {
   category: EventCategory;
   description: string;
   metadata: Record<string, unknown>;
+  /** Full content to store gzipped. */
+  content?: string;
 }

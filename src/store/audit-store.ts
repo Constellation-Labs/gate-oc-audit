@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { chmodSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { gzipSync } from "node:zlib";
 import { uuidv7 } from "uuidv7";
 
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
@@ -10,6 +11,7 @@ import { getMachineId } from "../util/machine-id.js";
 
 const GENESIS_HASH = "GENESIS";
 const MAX_METADATA_SIZE = 1024 * 1024; // 1MB
+const MAX_CONTENT_SIZE = 5 * 1024 * 1024; // 5MB
 const DB_FILE_MODE = 0o600;
 const PRUNE_BATCH_SIZE = 1000;
 
@@ -40,6 +42,7 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
+  content_gz: Buffer | null;
   content_hash: string;
   previous_hash: string;
   created_at: string;
@@ -60,6 +63,7 @@ function rowToEvent(row: EventRow): AuditEvent {
     category: row.category as EventCategory,
     description: row.description,
     metadata: JSON.parse(row.metadata),
+    contentGz: row.content_gz ?? undefined,
     contentHash: row.content_hash,
     previousHash: row.previous_hash,
     createdAt: row.created_at,
@@ -97,10 +101,10 @@ export class AuditStore {
     this.insertStmt = this.db.prepare(`
       INSERT INTO audit_events
         (id, sequence, source, machine_id, session_id, org_id, user_id,
-         event_type, category, description, metadata, content_hash, previous_hash, created_at)
+         event_type, category, description, metadata, content_gz, content_hash, previous_hash, created_at)
       VALUES
         (@id, @sequence, @source, @machineId, @sessionId, @orgId, @userId,
-         @eventType, @category, @description, @metadata, @contentHash, @previousHash, @createdAt)
+         @eventType, @category, @description, @metadata, @contentGz, @contentHash, @previousHash, @createdAt)
     `);
   }
 
@@ -142,6 +146,11 @@ export class AuditStore {
         metadataCanonical,
       });
 
+      const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
+        ? insert.content
+        : undefined;
+      const contentGz = rawContent ? gzipSync(Buffer.from(rawContent)) : null;
+
       this.insertStmt.run({
         id,
         sequence: nextSequence,
@@ -154,6 +163,7 @@ export class AuditStore {
         category: insert.category,
         description: insert.description,
         metadata: metadataCanonical,
+        contentGz,
         contentHash,
         previousHash,
         createdAt,

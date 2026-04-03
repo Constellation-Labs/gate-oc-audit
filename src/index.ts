@@ -5,7 +5,7 @@ import { cliAuditHandler, cliVerifyHandler, cliExportHandler } from "./cli.js";
 import { RetentionService } from "./services/retention.js";
 
 export default definePluginEntry({
-  id: "constellation-audit",
+  id: "@constellation-network/openclaw-audit-plugin",
   name: "Constellation Audit Trail",
   description: "Tamper-evident audit trail with Digital Evidence anchoring",
 
@@ -53,7 +53,7 @@ export default definePluginEntry({
 
     const retention = new RetentionService(store, config);
     api.registerService({
-      id: "constellation-audit-retention",
+      id: "@constellation-network/openclaw-audit-plugin:retention",
       start() {
         retention.start();
       },

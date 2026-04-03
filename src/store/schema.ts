@@ -20,6 +20,7 @@ const DDL = [
     category      TEXT NOT NULL,
     description   TEXT NOT NULL,
     metadata      TEXT NOT NULL,
+    content_gz    BLOB,
     content_hash  TEXT NOT NULL,
     previous_hash TEXT NOT NULL,
     created_at    TEXT NOT NULL,

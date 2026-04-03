@@ -1,24 +1,14 @@
-# @constellation/openclaw-audit-plugin
+# @constellation-network/openclaw-audit-plugin
 
 Tamper-evident audit trail for AI coding agent activity. Records every session, tool invocation, and prompt exchange into a local SQLite database with SHA-256 hash chain integrity, so you can verify that no events were altered or deleted after the fact.
 
 ## Installation
 
 ```bash
-npm install @constellation/openclaw-audit-plugin
+openclaw plugins install @constellation-network/openclaw-audit-plugin
 ```
 
 Requires `openclaw >= 2026.1.0` as a peer dependency.
-
-## Setup
-
-Add the plugin to your OpenClaw configuration:
-
-```json
-{
-  "plugins": ["@constellation/openclaw-audit-plugin"]
-}
-```
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 
@@ -26,9 +16,9 @@ That's it. The plugin automatically starts recording audit events when your agen
 
 ```json
 {
-  "plugins": ["@constellation/openclaw-audit-plugin"],
+  "plugins": ["@constellation-network/openclaw-audit-plugin"],
   "plugin": {
-    "constellation-audit": {
+    "@constellation-network/openclaw-audit-plugin": {
       "config": {
         "dbPath": "~/.openclaw/audit.db",
         "localRetentionDays": 365,
@@ -53,7 +43,8 @@ The plugin hooks into OpenClaw's lifecycle and captures:
 |---|---|---|
 | **Session** | `session.start`, `session.end` | Agent start/stop with duration and success status |
 | **Tool** | `tool.invoked`, `tool.result`, `tool.persisted`, `tool.denied` | Every tool call with arguments, results, and timing |
-| **Prompt** | `prompt.sent`, `prompt.response` | Inbound and outbound messages (first 500 chars) |
+| **Message** | `message.received`, `message.sent` | Inbound/outbound messages with sender fallback resolution; 50-char preview in metadata, full content stored gzipped |
+| **Prompt** | `prompt.sent`, `prompt.response` | LLM calls with model, token usage; 50-char preview in metadata, full content stored gzipped |
 
 Sensitive values (secrets, passwords, tokens, API keys, etc.) in tool arguments are automatically redacted before storage.
 
@@ -109,4 +100,20 @@ npm install
 npm run build    # Compile TypeScript to dist/
 npm test         # Run the test suite (109 tests)
 npm run clean    # Remove dist/
+```
+
+### Local install
+
+To install the plugin from a local checkout into OpenClaw:
+
+```bash
+npm run build
+openclaw plugins install --link .
+```
+
+The `--link` flag symlinks the local directory instead of copying, so changes are picked up after a rebuild and gateway restart:
+
+```bash
+npm run build
+openclaw daemon restart
 ```

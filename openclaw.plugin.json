@@ -1,0 +1,15 @@
+{
+  "id": "@constellation-network/openclaw-audit-plugin",
+  "name": "Constellation Audit Trail",
+  "description": "Tamper-evident audit trail with Digital Evidence anchoring for AI coding agent activity",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "Path to the SQLite database file for audit storage"
+      }
+    },
+    "additionalProperties": false
+  }
+}

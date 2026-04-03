@@ -6,6 +6,7 @@ const SENSITIVE_KEY =
   /secret|password|token|key|auth|credential|passphrase|jwt|bearer|cookie/i;
 
 const AUDIT_PRIORITY = 200;
+const CONTENT_PREVIEW_LENGTH = 50;
 
 function sanitize(value: unknown, seen = new WeakSet()): unknown {
   if (value === null || value === undefined) return value;
@@ -36,6 +37,21 @@ function safeAppend(store: AuditStore, insert: AuditEventInsert): void {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[audit-plugin]", message);
   }
+}
+
+/** Fallback chain for sender identity — `from` is empty on webchat/TUI connections. */
+function resolveSender(evt: { from?: string; metadata?: Record<string, unknown> }): string {
+  return (
+    evt.from ||
+    (evt.metadata?.senderId as string | undefined) ||
+    (evt.metadata?.senderName as string | undefined) ||
+    (evt.metadata?.senderUsername as string | undefined) ||
+    "unknown"
+  );
+}
+
+function resolveRecipient(evt: { to?: string }): string {
+  return evt.to || "unknown";
 }
 
 export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
@@ -113,36 +129,52 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
 
   api.on(
     "message_received",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const sender = resolveSender(evt);
       safeAppend(store, {
         sessionId: ctx.conversationId,
-        eventType: "prompt.sent",
-        category: "prompt",
-        description: `Message received from ${evt.from}`,
+        eventType: "message.received",
+        category: "message",
+        description: `Inbound from ${sender} on ${ctx.channelId}`,
         metadata: {
-          from: evt.from,
+          direction: "in",
+          sender,
+          channel: ctx.channelId,
+          accountId: ctx.accountId,
+          surface: evt.metadata?.surface as string | undefined,
           contentLength: evt.content?.length,
-          truncatedContent: evt.content?.slice(0, 500),
+          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
+          timestamp: evt.timestamp ?? Date.now(),
         },
-      }),
+        content: evt.content,
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "message_sent",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const recipient = resolveRecipient(evt);
       safeAppend(store, {
         sessionId: ctx.conversationId,
-        eventType: "prompt.response",
-        category: "prompt",
-        description: `Message sent to ${evt.to}`,
+        eventType: "message.sent",
+        category: "message",
+        description: `Outbound to ${recipient} on ${ctx.channelId}`,
         metadata: {
-          to: evt.to,
+          direction: "out",
+          recipient,
+          channel: ctx.channelId,
+          accountId: ctx.accountId,
           contentLength: evt.content?.length,
+          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
           success: evt.success,
           error: evt.error,
+          timestamp: Date.now(),
         },
-      }),
+        content: evt.content,
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -157,11 +189,13 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
         metadata: {
           provider: evt.provider,
           model: evt.model,
+          truncatedContent: evt.assistantTexts?.join("\n")?.slice(0, CONTENT_PREVIEW_LENGTH),
           inputTokens: evt.usage?.input,
           outputTokens: evt.usage?.output,
           cacheReadTokens: evt.usage?.cacheRead,
           cacheWriteTokens: evt.usage?.cacheWrite,
         },
+        content: evt.assistantTexts?.join("\n"),
       }),
     { priority: AUDIT_PRIORITY },
   );

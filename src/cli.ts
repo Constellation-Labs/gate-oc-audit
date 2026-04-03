@@ -20,7 +20,9 @@ export interface AuditExportOptions {
 function formatEvent(event: AuditEvent): string {
   const time = event.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
   const session = event.sessionId ? ` [${event.sessionId.slice(0, 8)}]` : "";
-  return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}`;
+  const meta = event.metadata as Record<string, unknown> | undefined;
+  const content = meta?.truncatedContent ? `\n    ${meta.truncatedContent}` : "";
+  return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}${content}`;
 }
 
 function toJsonLines(events: AuditEvent[]): string {

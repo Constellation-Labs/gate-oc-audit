@@ -1,5 +1,5 @@
 {
-  "name": "@constellation/openclaw-audit-plugin",
+  "name": "@constellation-network/openclaw-audit-plugin",
   "version": "0.1.0",
   "description": "Tamper-evident audit trail for AI coding agent activity",
   "type": "module",
@@ -23,5 +23,16 @@
   },
   "peerDependencies": {
     "openclaw": ">=2026.1.0"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.1.0",
+      "minGatewayVersion": "2026.1.0"
+    },
+    "build": {
+      "openclawVersion": "2026.4.1",
+      "pluginSdkVersion": "2026.4.1"
+    }
   }
 }
