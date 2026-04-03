@@ -382,4 +382,88 @@ describe("AuditStore", () => {
     });
   });
 
+  describe("prune checkpoint", () => {
+    function backdateAll(path: string): void {
+      const db = new Database(path);
+      const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
+      db.prepare("UPDATE audit_events SET created_at = ?").run(old);
+      db.close();
+    }
+
+    it("verify passes after prune + append (hard checkpoint in chain)", () => {
+      for (let i = 0; i < 5; i++) {
+        store.append(sampleInsert({ description: `old-${i}` }));
+      }
+      backdateAll(dbPath);
+
+      const deleted = store.prune(365, 500);
+      assert.equal(deleted, 5);
+
+      // New events — first one absorbs the prune checkpoint
+      store.append(sampleInsert({ description: "after-prune-1" }));
+      store.append(sampleInsert({ description: "after-prune-2" }));
+
+      const result = store.verify();
+      assert.equal(result.valid, true);
+      assert.equal(result.eventsChecked, 2);
+    });
+
+    it("verify passes after prune before append (soft checkpoint)", () => {
+      for (let i = 0; i < 5; i++) {
+        store.append(sampleInsert({ description: `old-${i}` }));
+      }
+
+      // Backdate only the first 4, keep the 5th recent
+      const db = new Database(dbPath);
+      const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
+      db.prepare("UPDATE audit_events SET created_at = ? WHERE sequence <= 4").run(old);
+      db.close();
+
+      store.prune(365, 500);
+
+      // Verify before any new append — uses soft checkpoint
+      const result = store.verify();
+      assert.equal(result.valid, true);
+      assert.equal(result.eventsChecked, 1);
+    });
+
+    it("first event after prune contains _pruneCheckpoint in metadata", () => {
+      store.append(sampleInsert({ description: "old" }));
+      backdateAll(dbPath);
+      store.prune(365, 500);
+
+      const event = store.append(sampleInsert({ description: "new" }))!;
+      assert.ok(event.metadata._pruneCheckpoint);
+      const cp = event.metadata._pruneCheckpoint as Record<string, unknown>;
+      assert.equal(typeof cp.prunedBeforeSeq, "number");
+      assert.equal(typeof cp.prunedAt, "string");
+      assert.equal(cp.eventsDeleted, 1);
+    });
+
+    it("second event after prune does not contain _pruneCheckpoint", () => {
+      store.append(sampleInsert({ description: "old" }));
+      backdateAll(dbPath);
+      store.prune(365, 500);
+
+      store.append(sampleInsert({ description: "first-after" }));
+      const second = store.append(sampleInsert({ description: "second-after" }))!;
+      assert.equal(second.metadata._pruneCheckpoint, undefined);
+    });
+
+    it("verify fails when events deleted without prune checkpoint", () => {
+      for (let i = 0; i < 5; i++) {
+        store.append(sampleInsert({ description: `event-${i}` }));
+      }
+
+      // Simulate attacker: delete events directly without going through prune()
+      const db = new Database(dbPath);
+      db.prepare("DELETE FROM audit_events WHERE sequence <= 3").run();
+      db.close();
+
+      const result = store.verify();
+      assert.equal(result.valid, false);
+      assert.ok(result.error?.includes("no matching prune checkpoint"));
+    });
+  });
+
 });

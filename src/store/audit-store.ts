@@ -42,7 +42,6 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
-  content_gz: Buffer | null;
   content_hash: string;
   previous_hash: string;
   created_at: string;
@@ -63,7 +62,6 @@ function rowToEvent(row: EventRow): AuditEvent {
     category: row.category as EventCategory,
     description: row.description,
     metadata: JSON.parse(row.metadata),
-    contentGz: row.content_gz ?? undefined,
     contentHash: row.content_hash,
     previousHash: row.previous_hash,
     createdAt: row.created_at,
@@ -79,6 +77,9 @@ export class AuditStore {
   private machineId: string;
   private degraded = false;
   private insertStmt: Database.Statement;
+
+  private pendingPruneStmt: Database.Statement;
+  private clearPruneStmt: Database.Statement;
 
   constructor(dbPath = "~/.openclaw/audit.db") {
     const resolvedPath = dbPath.replace(/^~/, process.env.HOME ?? ".");
@@ -98,6 +99,13 @@ export class AuditStore {
     this.sequence = lastRow?.sequence ?? 0;
     this.previousHash = lastRow?.content_hash ?? GENESIS_HASH;
 
+    this.pendingPruneStmt = this.db.prepare(
+      "SELECT value FROM sync_state WHERE key = 'pending_prune_checkpoint'",
+    );
+    this.clearPruneStmt = this.db.prepare(
+      "DELETE FROM sync_state WHERE key = 'pending_prune_checkpoint'",
+    );
+
     this.insertStmt = this.db.prepare(`
       INSERT INTO audit_events
         (id, sequence, source, machine_id, session_id, org_id, user_id,
@@ -113,9 +121,16 @@ export class AuditStore {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
 
+      // If a prune happened since the last append, bake the checkpoint into this
+      // event's metadata so it becomes part of the hash chain and can't be forged.
+      const pendingPrune = this.pendingPruneStmt.get() as { value: string } | undefined;
+      const metadata = pendingPrune
+        ? { ...insert.metadata, _pruneCheckpoint: JSON.parse(pendingPrune.value) }
+        : insert.metadata;
+
       let metadataCanonical: string;
       try {
-        metadataCanonical = canonicalize(insert.metadata);
+        metadataCanonical = canonicalize(metadata);
       } catch {
         console.error("[audit-plugin] Metadata is not serializable, skipping event");
         return undefined;
@@ -149,7 +164,7 @@ export class AuditStore {
       const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
         ? insert.content
         : undefined;
-      const contentGz = rawContent ? gzipSync(Buffer.from(rawContent)) : null;
+      const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
 
       this.insertStmt.run({
         id,
@@ -169,6 +184,10 @@ export class AuditStore {
         createdAt,
       });
 
+      if (pendingPrune) {
+        this.clearPruneStmt.run();
+      }
+
       this.sequence = nextSequence;
       this.previousHash = contentHash;
       this.degraded = false;
@@ -184,7 +203,7 @@ export class AuditStore {
         eventType: insert.eventType,
         category: insert.category,
         description: insert.description,
-        metadata: insert.metadata,
+        metadata,
         contentHash,
         previousHash,
         createdAt,
@@ -220,7 +239,10 @@ export class AuditStore {
 
     const rows = this.db
       .prepare(
-        `SELECT * FROM audit_events ${where} ORDER BY sequence DESC LIMIT @limit OFFSET @offset`,
+        `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
+                event_type, category, description, metadata, content_hash,
+                previous_hash, created_at, received_at, synced_at
+         FROM audit_events ${where} ORDER BY sequence DESC LIMIT @limit OFFSET @offset`,
       )
       .all({ ...params, limit, offset }) as EventRow[];
 
@@ -232,11 +254,11 @@ export class AuditStore {
   }
 
   verify(): VerifyResult {
-    const rows = this.db
+    const iter = this.db
       .prepare(
         "SELECT id, sequence, source, session_id, org_id, user_id, event_type, category, description, metadata, content_hash, previous_hash FROM audit_events ORDER BY sequence ASC",
       )
-      .all() as Array<{
+      .iterate() as IterableIterator<{
       id: string;
       sequence: number;
       source: string;
@@ -251,15 +273,35 @@ export class AuditStore {
       previous_hash: string;
     }>;
 
-    if (rows.length === 0) return { valid: true, eventsChecked: 0 };
+    // Soft checkpoint in sync_state (covers the window between prune and next append)
+    const softCheckpoint = this.db
+      .prepare("SELECT value FROM sync_state WHERE key = 'last_prune_before_seq'")
+      .get() as { value: string } | undefined;
+    const softPruneSeq = softCheckpoint ? parseInt(softCheckpoint.value, 10) : undefined;
 
-    // First event must link to GENESIS
-    if (rows[0].previous_hash !== GENESIS_HASH) {
-      return { valid: false, eventsChecked: 1, brokenAt: rows[0].sequence, error: "First event does not link to GENESIS" };
-    }
+    let i = 0;
+    let prevContentHash: string | undefined;
 
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
+    for (const row of iter) {
+      if (i === 0 && row.previous_hash !== GENESIS_HASH) {
+        // Chain doesn't start at GENESIS — check for prune evidence.
+        // Hard proof: _pruneCheckpoint baked into this event's metadata (tamper-evident).
+        // Soft proof: last_prune_before_seq in sync_state (covers pre-append window).
+        const meta = JSON.parse(row.metadata);
+        const hardCheckpoint = meta._pruneCheckpoint?.prunedBeforeSeq;
+        const hasProof =
+          (hardCheckpoint != null && hardCheckpoint <= row.sequence) ||
+          (softPruneSeq != null && softPruneSeq === row.sequence);
+
+        if (!hasProof) {
+          return {
+            valid: false,
+            eventsChecked: 1,
+            brokenAt: row.sequence,
+            error: `First event does not link to GENESIS and no matching prune checkpoint found`,
+          };
+        }
+      }
 
       const expectedHash = computeEventHash({
         id: row.id,
@@ -284,7 +326,7 @@ export class AuditStore {
         };
       }
 
-      if (i > 0 && row.previous_hash !== rows[i - 1].content_hash) {
+      if (prevContentHash !== undefined && row.previous_hash !== prevContentHash) {
         return {
           valid: false,
           eventsChecked: i + 1,
@@ -292,39 +334,70 @@ export class AuditStore {
           error: `Chain link broken at sequence ${row.sequence}`,
         };
       }
+
+      prevContentHash = row.content_hash;
+      i++;
     }
 
-    return { valid: true, eventsChecked: rows.length };
+    return { valid: true, eventsChecked: i };
   }
 
   prune(maxAgeDays: number, maxSizeMb: number): number {
     let totalDeleted = 0;
 
-    // Age-based pruning
-    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
-    const ageResult = this.db
-      .prepare("DELETE FROM audit_events WHERE created_at < @cutoff")
-      .run({ cutoff });
-    totalDeleted += ageResult.changes;
+    const doPrune = this.db.transaction(() => {
+      // Age-based pruning
+      const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+      const ageResult = this.db
+        .prepare("DELETE FROM audit_events WHERE created_at < @cutoff")
+        .run({ cutoff });
+      totalDeleted += ageResult.changes;
 
-    // Size-based pruning — delete oldest events until under limit
-    const sizeMb = this.getDbSizeMb();
+      // Size-based pruning — delete oldest events until under limit
+      if (this.getDbSizeMb() > maxSizeMb) {
+        let deleted = 0;
+        do {
+          const result = this.db
+            .prepare(
+              `DELETE FROM audit_events WHERE id IN (
+                SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
+              )`,
+            )
+            .run({ batchSize: PRUNE_BATCH_SIZE });
+          deleted = result.changes;
+          totalDeleted += deleted;
+        } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+      }
 
-    if (sizeMb > maxSizeMb) {
-      let deleted = 0;
-      do {
-        const result = this.db
-          .prepare(
-            `DELETE FROM audit_events WHERE id IN (
-              SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
-            )`,
-          )
-          .run({ batchSize: PRUNE_BATCH_SIZE });
-        deleted = result.changes;
-        totalDeleted += deleted;
-      } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+      // Write a pending prune checkpoint — the next append() will bake it into
+      // the hash chain, making it tamper-evident.
+      if (totalDeleted > 0) {
+        const minAfter = this.db
+          .prepare("SELECT MIN(sequence) as seq FROM audit_events")
+          .get() as { seq: number | null } | undefined;
 
-      // Reclaim disk space from deleted pages
+        // If all events were pruned, the next append will be at sequence + 1
+        const nextExpectedSeq = minAfter?.seq ?? this.sequence + 1;
+        const checkpoint = {
+          prunedBeforeSeq: nextExpectedSeq,
+          prunedAt: new Date().toISOString(),
+          eventsDeleted: totalDeleted,
+        };
+        this.db.prepare(
+          "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_prune_checkpoint', ?)",
+        ).run(JSON.stringify(checkpoint));
+
+        // Also keep the seq for verify() to use before the next append lands
+        this.db.prepare(
+          "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_prune_before_seq', ?)",
+        ).run(String(nextExpectedSeq));
+      }
+    });
+
+    doPrune();
+
+    // Reclaim disk space outside the transaction
+    if (totalDeleted > 0) {
       this.db.pragma("incremental_vacuum");
     }
 

@@ -59,6 +59,7 @@ export default definePluginEntry({
       },
       stop() {
         retention.stop();
+        store.close();
       },
     });
   },

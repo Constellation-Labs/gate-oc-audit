@@ -3,7 +3,7 @@ import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 
 const SENSITIVE_KEY =
-  /secret|password|token|key|auth|credential|passphrase|jwt|bearer|cookie/i;
+  /secret|password|token|api.?key|auth|credential|passphrase|jwt|bearer|cookie|private.?key/i;
 
 const AUDIT_PRIORITY = 200;
 const CONTENT_PREVIEW_LENGTH = 50;

@@ -96,6 +96,20 @@ describe("sanitizeArgs", () => {
     for (const v of Object.values(result)) assert.equal(v, "[REDACTED]");
   });
 
+  it("does not redact non-sensitive keys containing 'key'", () => {
+    const result = sanitizeArgs({ primaryKey: "pk-1", keyboardLayout: "us", hookeyPokey: "dance" });
+    assert.equal(result.primaryKey, "pk-1");
+    assert.equal(result.keyboardLayout, "us");
+    assert.equal(result.hookeyPokey, "dance");
+  });
+
+  it("redacts api_key and privateKey variants", () => {
+    const result = sanitizeArgs({ api_key: "k1", apiKey: "k2", privateKey: "k3" });
+    assert.equal(result.api_key, "[REDACTED]");
+    assert.equal(result.apiKey, "[REDACTED]");
+    assert.equal(result.privateKey, "[REDACTED]");
+  });
+
   it("preserves null and undefined values", () => {
     const result = sanitizeArgs({ a: null, b: undefined });
     assert.equal(result.a, null);

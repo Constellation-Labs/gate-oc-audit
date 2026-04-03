@@ -59,7 +59,14 @@ const DDL = [
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   )`,
+
+  `CREATE TABLE IF NOT EXISTS schema_version (
+    version     INTEGER NOT NULL,
+    applied_at  TEXT NOT NULL
+  )`,
 ];
+
+const CURRENT_SCHEMA_VERSION = 1;
 
 export function initializeSchema(db: Database.Database): void {
   for (const pragma of PRAGMAS) {
@@ -69,6 +76,17 @@ export function initializeSchema(db: Database.Database): void {
   const migrate = db.transaction(() => {
     for (const statement of DDL) {
       db.exec(statement);
+    }
+
+    const row = db.prepare("SELECT MAX(version) as v FROM schema_version").get() as { v: number | null } | undefined;
+    const current = row?.v ?? 0;
+
+    if (current < CURRENT_SCHEMA_VERSION) {
+      // Future migrations go here, gated by version number:
+      // if (current < 2) { db.exec("ALTER TABLE ..."); }
+
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());
     }
   });
 

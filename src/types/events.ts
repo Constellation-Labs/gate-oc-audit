@@ -38,8 +38,6 @@ export interface AuditEvent {
   category: EventCategory;
   description: string;
   metadata: Record<string, unknown>;
-  /** Full content, gzipped. Not included in the hash chain. */
-  contentGz?: Buffer;
   contentHash: string;
   previousHash: string;
   createdAt: string;
