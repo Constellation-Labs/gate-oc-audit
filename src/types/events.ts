@@ -4,7 +4,9 @@ export type EventCategory =
   | "tool"
   | "system"
   | "agent"
-  | "gateway";
+  | "gateway"
+  | "config"
+  | "security";
 
 export type EventType =
   | "prompt.response"
@@ -14,6 +16,7 @@ export type EventType =
   | "tool.invoked"
   | "tool.result"
   | "tool.persisted"
+  | "tool.denied"
   | "message.received"
   | "message.sending"
   | "message.sent"
@@ -32,7 +35,37 @@ export type EventType =
   | "session.start"
   | "session.end"
   | "gateway.start"
-  | "gateway.stop";
+  | "gateway.stop"
+  | "config.tool_changed"
+  | "config.skill_changed"
+  | "config.soul_changed"
+  | "config.cron_changed"
+  | "security.scan_result";
+
+export type ConfigChangeType = "added" | "modified" | "removed";
+
+export interface ConfigChangeMetadata {
+  artifactName: string;
+  artifactType: "skills" | "tools" | "soul" | "cron";
+  changeType: ConfigChangeType;
+  filePath: string;
+  contentHash: string;
+  previousHash?: string;
+  diffSummary?: string;
+}
+
+export interface ScanFinding {
+  check: string;
+  severity: "medium" | "high";
+  description: string;
+  line?: number;
+}
+
+export interface ScanResultMetadata {
+  toolName: string;
+  filePath: string;
+  findings: ScanFinding[];
+}
 
 export interface AuditEvent {
   id: string;

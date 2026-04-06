@@ -61,6 +61,6 @@ describe("plugin entry point", () => {
     assert.ok(api.registeredHooks.includes("llm_output"));
 
     assert.equal(api.registeredCli.length, 1);
-    assert.equal(api.registeredServices.length, 1);
+    assert.equal(api.registeredServices.length, 3); // retention, config-watcher, de-anchor
   });
 });

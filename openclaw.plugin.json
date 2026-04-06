@@ -8,6 +8,42 @@
       "dbPath": {
         "type": "string",
         "description": "Path to the SQLite database file for audit storage"
+      },
+      "localRetentionDays": {
+        "type": "number",
+        "description": "Auto-delete local events after N days (default: 365)"
+      },
+      "localMaxSizeMb": {
+        "type": "number",
+        "description": "Prune oldest events when DB exceeds this size in MB (default: 500)"
+      },
+      "notificationWebhook": {
+        "type": "string",
+        "description": "Webhook URL for Slack, Discord, or generic notifications on config changes and integrity violations"
+      },
+      "openclawDir": {
+        "type": "string",
+        "description": "Path to the OpenClaw configuration directory (default: ~/.openclaw)"
+      },
+      "deApiKey": {
+        "type": "string",
+        "description": "Digital Evidence API key for audit trail anchoring"
+      },
+      "deApiUrl": {
+        "type": "string",
+        "description": "Digital Evidence API URL (default: https://de-api.constellationnetwork.io/v1)"
+      },
+      "x402Payment": {
+        "type": "string",
+        "description": "x402 micropayment header value (alternative to DE API key)"
+      },
+      "deEventThreshold": {
+        "type": "number",
+        "description": "Number of events to accumulate before anchoring to DE (default: 100)"
+      },
+      "deIntervalMs": {
+        "type": "number",
+        "description": "Maximum time between DE anchoring attempts in milliseconds (default: 300000)"
       }
     },
     "additionalProperties": false

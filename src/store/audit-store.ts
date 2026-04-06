@@ -70,6 +70,38 @@ function rowToEvent(row: EventRow): AuditEvent {
   };
 }
 
+interface CheckpointRow {
+  id: string;
+  sequence_start: number;
+  sequence_end: number;
+  merkle_root: string;
+  event_count: number;
+  de_tx_hash: string | null;
+  created_at: string;
+}
+
+export interface CheckpointRecord {
+  id: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  merkleRoot: string;
+  eventCount: number;
+  deTxHash: string | null;
+  createdAt: string;
+}
+
+function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
+  return {
+    id: row.id,
+    sequenceStart: row.sequence_start,
+    sequenceEnd: row.sequence_end,
+    merkleRoot: row.merkle_root,
+    eventCount: row.event_count,
+    deTxHash: row.de_tx_hash,
+    createdAt: row.created_at,
+  };
+}
+
 export class AuditStore {
   private db: Database.Database;
   private sequence: number;
@@ -77,9 +109,20 @@ export class AuditStore {
   private machineId: string;
   private degraded = false;
   private insertStmt: Database.Statement;
-
   private pendingPruneStmt: Database.Statement;
   private clearPruneStmt: Database.Statement;
+
+  private stmts: {
+    getManifests: Database.Statement;
+    upsertManifest: Database.Statement;
+    deleteManifest: Database.Statement;
+    getCheckpoints: Database.Statement;
+    getLastCheckpoint: Database.Statement;
+    insertCheckpoint: Database.Statement;
+    getEventHashesSince: Database.Statement;
+    getEventHashesRange: Database.Statement;
+    countSince: Database.Statement;
+  };
 
   constructor(dbPath = "~/.openclaw/audit.db") {
     const resolvedPath = dbPath.replace(/^~/, process.env.HOME ?? ".");
@@ -114,6 +157,30 @@ export class AuditStore {
         (@id, @sequence, @source, @machineId, @sessionId, @orgId, @userId,
          @eventType, @category, @description, @metadata, @contentGz, @contentHash, @previousHash, @createdAt)
     `);
+
+    const CP_COLS = "id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at";
+
+    this.stmts = {
+      getManifests: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests"),
+      upsertManifest: this.db.prepare(
+        `INSERT INTO config_manifests (id, manifest_type, content_hash, file_path, captured_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, captured_at = excluded.captured_at`,
+      ),
+      deleteManifest: this.db.prepare("DELETE FROM config_manifests WHERE id = ?"),
+      getCheckpoints: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_start ASC`),
+      getLastCheckpoint: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_end DESC LIMIT 1`),
+      insertCheckpoint: this.db.prepare(
+        `INSERT INTO integrity_checkpoints (${CP_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ),
+      getEventHashesSince: this.db.prepare(
+        "SELECT sequence, content_hash FROM audit_events WHERE sequence >= ? ORDER BY sequence ASC",
+      ),
+      getEventHashesRange: this.db.prepare(
+        "SELECT sequence, content_hash FROM audit_events WHERE sequence >= ? AND sequence <= ? ORDER BY sequence ASC",
+      ),
+      countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
+    };
   }
 
   append(insert: AuditEventInsert): AuditEvent | undefined {
@@ -408,6 +475,49 @@ export class AuditStore {
     const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
     const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
     return (pageSize * pageCount) / (1024 * 1024);
+  }
+
+  // --- Config manifest operations (used by ConfigWatcher) ---
+
+  getManifests(): Array<{ id: string; contentHash: string; filePath: string | null }> {
+    return (this.stmts.getManifests.all() as Array<{ id: string; content_hash: string; file_path: string | null }>)
+      .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path }));
+  }
+
+  upsertManifest(id: string, manifestType: string, contentHash: string, filePath: string): void {
+    this.stmts.upsertManifest.run(id, manifestType, contentHash, filePath, new Date().toISOString());
+  }
+
+  deleteManifest(id: string): void {
+    this.stmts.deleteManifest.run(id);
+  }
+
+  // --- Integrity checkpoint operations (used by DeAnchorService) ---
+
+  getCheckpoints(): CheckpointRecord[] {
+    return (this.stmts.getCheckpoints.all() as CheckpointRow[]).map(rowToCheckpoint);
+  }
+
+  getLastCheckpoint(): CheckpointRecord | undefined {
+    const row = this.stmts.getLastCheckpoint.get() as CheckpointRow | undefined;
+    return row ? rowToCheckpoint(row) : undefined;
+  }
+
+  insertCheckpoint(id: string, seqStart: number, seqEnd: number, merkleRoot: string, eventCount: number, deTxHash: string | null): void {
+    this.stmts.insertCheckpoint.run(id, seqStart, seqEnd, merkleRoot, eventCount, deTxHash, new Date().toISOString());
+  }
+
+  /** Returns sequences and content hashes for events from seqStart, ordered ascending. */
+  getEventHashes(seqStart: number, seqEnd?: number): Array<{ sequence: number; contentHash: string }> {
+    const rows = seqEnd != null
+      ? this.stmts.getEventHashesRange.all(seqStart, seqEnd) as Array<{ sequence: number; content_hash: string }>
+      : this.stmts.getEventHashesSince.all(seqStart) as Array<{ sequence: number; content_hash: string }>;
+    return rows.map((r) => ({ sequence: r.sequence, contentHash: r.content_hash }));
+  }
+
+  /** Returns the count of events at or after a given sequence. */
+  countSince(seqStart: number): number {
+    return (this.stmts.countSince.get(seqStart) as { c: number }).c;
   }
 
   isDegraded(): boolean {

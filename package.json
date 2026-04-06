@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
+    "chokidar": "^4.0.0",
     "uuidv7": "^1.0.2"
   },
   "devDependencies": {
