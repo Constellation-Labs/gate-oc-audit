@@ -2,29 +2,37 @@ export type EventCategory =
   | "prompt"
   | "message"
   | "tool"
-  | "cron"
-  | "config"
-  | "security"
-  | "system";
+  | "system"
+  | "agent"
+  | "gateway";
 
 export type EventType =
-  | "prompt.sent"
   | "prompt.response"
+  | "prompt.input"
+  | "prompt.model_resolve"
+  | "prompt.build"
   | "tool.invoked"
   | "tool.result"
   | "tool.persisted"
-  | "tool.denied"
-  | "cron.executed"
-  | "cron.failed"
-  | "config.tool_changed"
-  | "config.skill_changed"
-  | "config.soul_changed"
-  | "config.cron_changed"
-  | "security.scan_result"
   | "message.received"
+  | "message.sending"
   | "message.sent"
+  | "message.claimed"
+  | "message.dispatched"
+  | "message.write"
+  | "agent.start"
+  | "agent.end"
+  | "agent.compaction_start"
+  | "agent.compaction_end"
+  | "agent.reset"
+  | "agent.subagent_spawning"
+  | "agent.subagent_spawned"
+  | "agent.subagent_delivery"
+  | "agent.subagent_ended"
   | "session.start"
-  | "session.end";
+  | "session.end"
+  | "gateway.start"
+  | "gateway.stop";
 
 export interface AuditEvent {
   id: string;

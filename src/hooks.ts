@@ -55,14 +55,44 @@ function resolveRecipient(evt: { to?: string }): string {
 }
 
 export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
+  // --- Model & prompt build ---
+
+  api.on(
+    "before_model_resolve",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "prompt.model_resolve",
+        category: "prompt",
+        description: "Model resolution requested",
+        metadata: { promptLength: evt.prompt?.length },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "before_prompt_build",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "prompt.build",
+        category: "prompt",
+        description: "Prompt build started",
+        metadata: { promptLength: evt.prompt?.length, messageCount: evt.messages?.length },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Agent lifecycle ---
+
   api.on(
     "before_agent_start",
     (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
-        eventType: "session.start",
-        category: "system",
-        description: "Agent session started",
+        eventType: "agent.start",
+        category: "agent",
+        description: "Agent run started",
         metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       }),
     { priority: AUDIT_PRIORITY },
@@ -73,9 +103,9 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     (evt, ctx) =>
       safeAppend(store, {
         sessionId: ctx.sessionId,
-        eventType: "session.end",
-        category: "system",
-        description: "Agent session ended",
+        eventType: "agent.end",
+        category: "agent",
+        description: "Agent run ended",
         metadata: { durationMs: evt.durationMs, success: evt.success },
       }),
     { priority: AUDIT_PRIORITY },
@@ -126,6 +156,31 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
       }),
     { priority: AUDIT_PRIORITY },
   );
+
+  // --- LLM I/O ---
+
+  api.on(
+    "llm_input",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "prompt.input",
+        category: "prompt",
+        description: `LLM input: ${evt.provider}/${evt.model}`,
+        metadata: {
+          provider: evt.provider,
+          model: evt.model,
+          promptLength: evt.prompt?.length,
+          historyMessageCount: evt.historyMessages?.length,
+          imagesCount: evt.imagesCount,
+          truncatedContent: evt.prompt?.slice(0, CONTENT_PREVIEW_LENGTH),
+        },
+        content: evt.prompt,
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Messages ---
 
   api.on(
     "message_received",
@@ -179,6 +234,80 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   );
 
   api.on(
+    "message_sending",
+    (evt, ctx) => {
+      const recipient = resolveRecipient(evt);
+      safeAppend(store, {
+        sessionId: ctx.conversationId,
+        eventType: "message.sending",
+        category: "message",
+        description: `Sending to ${recipient} on ${ctx.channelId}`,
+        metadata: {
+          direction: "out",
+          recipient,
+          channel: ctx.channelId,
+          contentLength: evt.content?.length,
+          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
+        },
+        content: evt.content,
+      });
+    },
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "inbound_claim",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.conversationId,
+        eventType: "message.claimed",
+        category: "message",
+        description: `Inbound claim on ${evt.channel}`,
+        metadata: {
+          channel: evt.channel,
+          senderId: evt.senderId,
+          senderName: evt.senderName,
+          isGroup: evt.isGroup,
+          contentLength: evt.content?.length,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "before_dispatch",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.conversationId,
+        eventType: "message.dispatched",
+        category: "message",
+        description: `Dispatch on ${evt.channel ?? ctx.channelId}`,
+        metadata: {
+          channel: evt.channel ?? ctx.channelId,
+          senderId: evt.senderId ?? ctx.senderId,
+          isGroup: evt.isGroup,
+          contentLength: evt.content?.length,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "before_message_write",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionKey,
+        eventType: "message.write",
+        category: "message",
+        description: "Message write",
+        metadata: {
+          agentId: ctx.agentId,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
     "llm_output",
     (evt, ctx) =>
       safeAppend(store, {
@@ -196,6 +325,197 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
           cacheWriteTokens: evt.usage?.cacheWrite,
         },
         content: evt.assistantTexts?.join("\n"),
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Compaction & reset ---
+
+  api.on(
+    "before_compaction",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "agent.compaction_start",
+        category: "agent",
+        description: "Context compaction started",
+        metadata: {
+          messageCount: evt.messageCount,
+          compactingCount: evt.compactingCount,
+          tokenCount: evt.tokenCount,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "after_compaction",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "agent.compaction_end",
+        category: "agent",
+        description: `Compacted ${evt.compactedCount} messages`,
+        metadata: {
+          messageCount: evt.messageCount,
+          compactedCount: evt.compactedCount,
+          tokenCount: evt.tokenCount,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "before_reset",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "agent.reset",
+        category: "agent",
+        description: `Session reset: ${evt.reason ?? "unknown"}`,
+        metadata: {
+          reason: evt.reason,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Sessions ---
+
+  api.on(
+    "session_start",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "session.start",
+        category: "system",
+        description: `Session started: ${evt.sessionId}`,
+        metadata: {
+          sessionKey: evt.sessionKey,
+          resumedFrom: evt.resumedFrom,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "session_end",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.sessionId,
+        eventType: "session.end",
+        category: "system",
+        description: `Session ended: ${evt.sessionId}`,
+        metadata: {
+          sessionKey: evt.sessionKey,
+          messageCount: evt.messageCount,
+          durationMs: evt.durationMs,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Subagents ---
+
+  api.on(
+    "subagent_spawning",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.requesterSessionKey,
+        eventType: "agent.subagent_spawning",
+        category: "agent",
+        description: `Subagent spawning: ${evt.agentId}`,
+        metadata: {
+          agentId: evt.agentId,
+          childSessionKey: evt.childSessionKey,
+          label: evt.label,
+          mode: evt.mode,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "subagent_spawned",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.requesterSessionKey,
+        eventType: "agent.subagent_spawned",
+        category: "agent",
+        description: `Subagent spawned: ${evt.agentId}`,
+        metadata: {
+          agentId: evt.agentId,
+          childSessionKey: evt.childSessionKey,
+          runId: evt.runId,
+          label: evt.label,
+          mode: evt.mode,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "subagent_delivery_target",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.requesterSessionKey,
+        eventType: "agent.subagent_delivery",
+        category: "agent",
+        description: `Subagent delivery target: ${evt.childSessionKey}`,
+        metadata: {
+          childSessionKey: evt.childSessionKey,
+          requesterSessionKey: evt.requesterSessionKey,
+          spawnMode: evt.spawnMode,
+          expectsCompletionMessage: evt.expectsCompletionMessage,
+          deliveryChannel: evt.requesterOrigin?.channel,
+          deliveryTo: evt.requesterOrigin?.to,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "subagent_ended",
+    (evt, ctx) =>
+      safeAppend(store, {
+        sessionId: ctx.requesterSessionKey,
+        eventType: "agent.subagent_ended",
+        category: "agent",
+        description: `Subagent ended: ${evt.outcome ?? "unknown"}`,
+        metadata: {
+          targetSessionKey: evt.targetSessionKey,
+          targetKind: evt.targetKind,
+          reason: evt.reason,
+          outcome: evt.outcome,
+          error: evt.error,
+          runId: evt.runId,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  // --- Gateway lifecycle ---
+
+  api.on(
+    "gateway_start",
+    (evt) =>
+      safeAppend(store, {
+        eventType: "gateway.start",
+        category: "gateway",
+        description: `Gateway started on port ${evt.port}`,
+        metadata: { port: evt.port },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "gateway_stop",
+    (evt) =>
+      safeAppend(store, {
+        eventType: "gateway.stop",
+        category: "gateway",
+        description: `Gateway stopped: ${evt.reason ?? "shutdown"}`,
+        metadata: { reason: evt.reason },
       }),
     { priority: AUDIT_PRIORITY },
   );

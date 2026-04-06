@@ -56,7 +56,7 @@ describe("plugin entry point", () => {
     const api = createMockApi(testDbPath);
     plugin.register(api as any);
 
-    assert.equal(api.registeredHooks.length, 8);
+    assert.equal(api.registeredHooks.length, 26);
     assert.ok(api.registeredHooks.includes("before_agent_start"));
     assert.ok(api.registeredHooks.includes("llm_output"));
 

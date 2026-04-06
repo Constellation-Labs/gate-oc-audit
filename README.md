@@ -37,16 +37,65 @@ That's it. The plugin automatically starts recording audit events when your agen
 
 ## What gets recorded
 
-The plugin hooks into OpenClaw's lifecycle and captures:
+The plugin hooks into all 26 OpenClaw lifecycle events and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
 
-| Category | Events | Description |
+Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) in tool arguments are automatically redacted before storage.
+
+### Prompt events
+
+| Event type | Hook | Metadata captured |
 |---|---|---|
-| **Session** | `session.start`, `session.end` | Agent start/stop with duration and success status |
-| **Tool** | `tool.invoked`, `tool.result`, `tool.persisted`, `tool.denied` | Every tool call with arguments, results, and timing |
-| **Message** | `message.received`, `message.sent` | Inbound/outbound messages with sender fallback resolution; 50-char preview in metadata, full content stored gzipped |
-| **Prompt** | `prompt.sent`, `prompt.response` | LLM calls with model, token usage; 50-char preview in metadata, full content stored gzipped |
+| `prompt.model_resolve` | `before_model_resolve` | prompt length |
+| `prompt.build` | `before_prompt_build` | prompt length, message count |
+| `prompt.input` | `llm_input` | provider, model, prompt length, history message count, images count, content (gzipped) |
+| `prompt.response` | `llm_output` | provider, model, token usage (input/output/cache read/write), content (gzipped) |
 
-Sensitive values (secrets, passwords, tokens, API keys, etc.) in tool arguments are automatically redacted before storage.
+### Agent events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `agent.start` | `before_agent_start` | prompt length, trigger |
+| `agent.end` | `agent_end` | duration (ms), success |
+| `agent.compaction_start` | `before_compaction` | message count, compacting count, token count |
+| `agent.compaction_end` | `after_compaction` | message count, compacted count, token count |
+| `agent.reset` | `before_reset` | reason |
+| `agent.subagent_spawning` | `subagent_spawning` | agent ID, child session key, label, mode |
+| `agent.subagent_spawned` | `subagent_spawned` | agent ID, child session key, run ID, label, mode |
+| `agent.subagent_delivery` | `subagent_delivery_target` | child/requester session keys, spawn mode, delivery channel/target |
+| `agent.subagent_ended` | `subagent_ended` | target session key, target kind, reason, outcome, error, run ID |
+
+### Tool events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `tool.invoked` | `before_tool_call` | tool name, sanitized arguments |
+| `tool.result` | `after_tool_call` | tool name, duration (ms), error |
+| `tool.persisted` | `tool_result_persist` | tool name, is synthetic |
+
+### Message events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `message.received` | `message_received` | direction, sender (with fallback chain), channel, account, surface, content length, timestamp, content (gzipped) |
+| `message.sending` | `message_sending` | direction, recipient, channel, content length, content (gzipped) |
+| `message.sent` | `message_sent` | direction, recipient, channel, account, content length, success, error, timestamp, content (gzipped) |
+| `message.claimed` | `inbound_claim` | channel, sender ID/name, is group, content length |
+| `message.dispatched` | `before_dispatch` | channel, sender ID, is group, content length |
+| `message.write` | `before_message_write` | agent ID |
+
+### Session events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `session.start` | `session_start` | session key, resumed from |
+| `session.end` | `session_end` | session key, message count, duration (ms) |
+
+### Gateway events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `gateway.start` | `gateway_start` | port |
+| `gateway.stop` | `gateway_stop` | reason |
 
 ## CLI commands
 
@@ -90,7 +139,7 @@ Run `openclaw audit verify` at any time to check chain integrity.
 ## Security notes
 
 - The database file is created with `0600` permissions (owner read/write only)
-- Sensitive keys (`secret`, `password`, `token`, `key`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`) are recursively redacted from tool arguments
+- Sensitive keys (`secret`, `password`, `token`, `apiKey`, `api_key`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) are recursively redacted from tool arguments
 - The plugin is fail-open: if the database is unavailable, events are silently dropped and the agent continues normally. A degraded-mode warning appears in `audit list` output
 
 ## Development
@@ -98,7 +147,7 @@ Run `openclaw audit verify` at any time to check chain integrity.
 ```bash
 npm install
 npm run build    # Compile TypeScript to dist/
-npm test         # Run the test suite (109 tests)
+npm test         # Run the test suite (119 tests)
 npm run clean    # Remove dist/
 ```
 

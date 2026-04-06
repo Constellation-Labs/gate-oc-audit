@@ -73,7 +73,7 @@ describe("AuditStore.query", () => {
   it("filters by category", () => {
     insert(store, { category: "system" });
     insert(store, { eventType: "tool.invoked", category: "tool" });
-    insert(store, { eventType: "prompt.sent", category: "prompt" });
+    insert(store, { eventType: "prompt.input", category: "prompt" });
 
     const events = store.query({ category: "tool" });
     assert.equal(events.length, 1);
@@ -102,7 +102,7 @@ describe("AuditStore.query", () => {
 
   it("returns empty array when no matches", () => {
     insert(store);
-    const events = store.query({ eventType: "cron.executed" });
+    const events = store.query({ eventType: "gateway.stop" });
     assert.equal(events.length, 0);
   });
 
