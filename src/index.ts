@@ -7,6 +7,7 @@ import { ConfigWatcher } from "./services/config-watcher.js";
 import { DeAnchorService } from "./services/de-anchor.js";
 import { NotificationService } from "./services/notifications.js";
 import { ToolScanner } from "./scanner.js";
+import { RateLimiter } from "./rate-limiter.js";
 
 export default definePluginEntry({
   id: "@constellation-network/openclaw-audit-plugin",
@@ -18,7 +19,35 @@ export default definePluginEntry({
     const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
     const store = new AuditStore(dbPath);
 
-    registerHooks(api, store);
+    const limiter = new RateLimiter(store, config);
+    registerHooks(api, store, limiter);
+
+    // LLM cost tracking via diagnostic events (separate subscription path)
+    import("openclaw/plugin-sdk").then(({ onDiagnosticEvent }) => {
+      if (typeof onDiagnosticEvent !== "function") return;
+      onDiagnosticEvent("model.usage", (evt: Record<string, unknown>) => {
+        try {
+          limiter.append({
+            eventType: "prompt.response",
+            category: "prompt",
+            description: `LLM usage: ${evt.provider}/${evt.model}`,
+            metadata: {
+              provider: evt.provider,
+              model: evt.model,
+              inputTokens: evt.inputTokens,
+              outputTokens: evt.outputTokens,
+              cacheTokens: evt.cacheTokens,
+              durationMs: evt.durationMs,
+              costUsd: evt.costUsd,
+            },
+          });
+        } catch {
+          // Fail-open: don't crash on diagnostic events
+        }
+      });
+    }).catch(() => {
+      // onDiagnosticEvent not available in this SDK version
+    });
 
     // --- Shared services ---
 
@@ -46,8 +75,8 @@ export default definePluginEntry({
 
       audit
         .command("verify")
-        .description("Verify Merkle chain integrity")
-        .action(() => cliVerifyHandler(store));
+        .description("Verify Merkle chain integrity and DE checkpoints")
+        .action(() => cliVerifyHandler(store, notifier));
 
       audit
         .command("export [format]")
@@ -65,11 +94,52 @@ export default definePluginEntry({
       ],
     });
 
+    // --- Agent-callable tool for DE setup ---
+
+    api.registerTool({
+      name: "audit_de_setup",
+      description: "Check Digital Evidence anchoring configuration status and provide setup instructions",
+      parameters: {},
+      handler: () => {
+        const hasApiKey = typeof config.deApiKey === "string" && config.deApiKey.length > 0;
+        const hasX402 = typeof config.x402Payment === "string" && config.x402Payment.length > 0;
+
+        if (hasApiKey || hasX402) {
+          const method = hasApiKey ? "API key" : "x402 micropayment";
+          return {
+            status: "configured",
+            method,
+            message: `Digital Evidence anchoring is active via ${method}.`,
+          };
+        }
+
+        return {
+          status: "not_configured",
+          message: [
+            "Digital Evidence anchoring is not configured.",
+            "",
+            "To enable tamper-evident audit trail anchoring:",
+            "1. Create a free account at https://evidence.constellationnetwork.io",
+            "2. Generate an API key from your dashboard",
+            "3. Add it to your plugin config:",
+            "",
+            '   "deApiKey": "your-api-key-here"',
+            "",
+            "Alternatively, use x402 micropayments with a Constellation wallet:",
+            '   "x402Payment": "your-payment-header"',
+            "",
+            "Anchoring cost: ~2 credits per fingerprint (negligible).",
+          ].join("\n"),
+        };
+      },
+    });
+
     // --- Background services ---
 
     const retention = new RetentionService(store, config);
     const configWatcher = new ConfigWatcher(store, scanner, notifier, config);
     const deAnchor = new DeAnchorService(store, config, notifier);
+    limiter.setDeAnchor(deAnchor);
 
     api.registerService({
       id: "@constellation-network/openclaw-audit-plugin:retention",
@@ -78,6 +148,7 @@ export default definePluginEntry({
       },
       stop() {
         retention.stop();
+        limiter.flush();
         // Close DB here — retention is registered first, so it stops last
         // (OpenClaw stops services in reverse registration order).
         store.close();

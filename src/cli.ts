@@ -1,5 +1,7 @@
 import type { AuditStore, QueryOptions } from "./store/audit-store.js";
 import type { AuditEvent } from "./types/events.js";
+import type { NotificationService } from "./services/notifications.js";
+import { computeMerkleRoot } from "./services/de-anchor.js";
 
 export interface AuditListOptions {
   last?: string;
@@ -88,9 +90,13 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   }
 }
 
-export function cliVerifyHandler(store: AuditStore): void {
+export function cliVerifyHandler(
+  store: AuditStore,
+  notifier?: NotificationService,
+): void {
   console.log("Verifying audit trail integrity...\n");
 
+  // 1. Hash chain verification
   const result = store.verify();
 
   if (result.valid) {
@@ -99,7 +105,44 @@ export function cliVerifyHandler(store: AuditStore): void {
     console.error(`INTEGRITY VIOLATION at sequence #${result.brokenAt}`);
     console.error(`  ${result.error}`);
     console.error(`  Checked ${result.eventsChecked} events before failure.`);
+    notifier?.notifyIntegrityViolation(
+      result.brokenAt!,
+      result.error ?? "unknown",
+    ).catch(() => {});
     process.exitCode = 1;
+  }
+
+  // 2. DE checkpoint verification (Merkle roots)
+  const checkpoints = store.getCheckpoints();
+  if (checkpoints.length > 0) {
+    console.log(`\nVerifying ${checkpoints.length} DE checkpoint(s)...`);
+    let cpValid = 0;
+    let cpPruned = 0;
+    let cpFailed = false;
+
+    for (const cp of checkpoints) {
+      const events = store.getEventHashes(cp.sequenceStart, cp.sequenceEnd);
+      if (events.length === 0) {
+        cpPruned++;
+        continue;
+      }
+      const localRoot = computeMerkleRoot(events.map((e) => e.contentHash));
+      if (localRoot !== cp.merkleRoot) {
+        console.error(`  CHECKPOINT ${cp.id}: Merkle root MISMATCH`);
+        console.error(`    Local:  ${localRoot.slice(0, 32)}...`);
+        console.error(`    Stored: ${cp.merkleRoot.slice(0, 32)}...`);
+        notifier?.notifyDeAnchorDivergence(cp.id, localRoot, cp.merkleRoot).catch(() => {});
+        cpFailed = true;
+        process.exitCode = 1;
+      } else {
+        cpValid++;
+      }
+    }
+
+    console.log(`  ${cpValid} valid, ${cpPruned} pruned (events no longer available)`);
+    if (!cpFailed) {
+      console.log("  All checkpoint Merkle roots intact.");
+    }
   }
 }
 

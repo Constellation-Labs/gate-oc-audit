@@ -149,18 +149,19 @@ describe("registerHooks", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("registers 26 lifecycle hooks", () => {
-    assert.equal(api.hooks.size, 26);
+  it("registers 29 lifecycle hooks", () => {
+    assert.equal(api.hooks.size, 29);
     for (const name of [
       "before_model_resolve", "before_prompt_build",
       "before_agent_start", "agent_end",
-      "before_tool_call", "after_tool_call", "tool_result_persist",
+      "before_tool_call", "after_tool_call", "tool_result_persist", "tool_denied",
       "llm_input", "llm_output",
       "message_received", "message_sending", "message_sent",
       "inbound_claim", "before_dispatch", "before_message_write",
       "before_compaction", "after_compaction", "before_reset",
       "session_start", "session_end",
       "subagent_spawning", "subagent_spawned", "subagent_delivery_target", "subagent_ended",
+      "cron_executed", "cron_failed",
       "gateway_start", "gateway_stop",
     ]) {
       assert.ok(api.hooks.has(name), `Missing hook: ${name}`);
@@ -278,7 +279,7 @@ describe("registerHooks", () => {
       );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.truncatedContent.length, 50);
+      assert.equal(meta.truncatedContent.length, 500);
       assert.equal(meta.contentLength, 1000);
     });
 

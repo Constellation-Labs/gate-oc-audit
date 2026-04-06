@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { chmodSync, mkdirSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { uuidv7 } from "uuidv7";
@@ -128,11 +128,7 @@ export class AuditStore {
     const resolvedPath = dbPath.replace(/^~/, process.env.HOME ?? ".");
     mkdirSync(dirname(resolvedPath), { recursive: true });
 
-    const isNew = !existsSync(resolvedPath);
-    this.db = new Database(resolvedPath);
-    if (isNew) chmodSync(resolvedPath, DB_FILE_MODE);
-
-    initializeSchema(this.db);
+    this.db = this.openOrRecover(resolvedPath);
     this.machineId = getMachineId();
 
     const lastRow = this.db
@@ -181,6 +177,44 @@ export class AuditStore {
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
     };
+  }
+
+  private openOrRecover(resolvedPath: string): Database.Database {
+    const isNew = !existsSync(resolvedPath);
+    try {
+      const db = new Database(resolvedPath);
+      if (isNew) chmodSync(resolvedPath, DB_FILE_MODE);
+      initializeSchema(db);
+      // Smoke test: verify the DB is readable
+      db.prepare("SELECT COUNT(*) FROM audit_events").get();
+      return db;
+    } catch (err) {
+      if (isNew) throw err; // Fresh DB failed — nothing to recover
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[audit-plugin] Database corrupt or unreadable: ${message}`);
+      console.error("[audit-plugin] Preserving old DB and creating fresh database");
+
+      // Preserve the old DB for forensic recovery
+      const backupPath = `${resolvedPath}.corrupt.${Date.now()}`;
+      try {
+        renameSync(resolvedPath, backupPath);
+        // Also move WAL/SHM files if they exist
+        for (const suffix of ["-wal", "-shm"]) {
+          if (existsSync(resolvedPath + suffix)) {
+            renameSync(resolvedPath + suffix, backupPath + suffix);
+          }
+        }
+        console.error(`[audit-plugin] Old database preserved at ${backupPath}`);
+      } catch {
+        console.error("[audit-plugin] Failed to rename corrupt DB, overwriting");
+      }
+
+      // Create fresh DB
+      const db = new Database(resolvedPath);
+      chmodSync(resolvedPath, DB_FILE_MODE);
+      initializeSchema(db);
+      return db;
+    }
   }
 
   append(insert: AuditEventInsert): AuditEvent | undefined {
@@ -413,27 +447,47 @@ export class AuditStore {
     let totalDeleted = 0;
 
     const doPrune = this.db.transaction(() => {
-      // Age-based pruning
+      // Age-based pruning — synced events first, then unsynced
       const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
-      const ageResult = this.db
+      const syncedResult = this.db
+        .prepare("DELETE FROM audit_events WHERE created_at < @cutoff AND synced_at IS NOT NULL")
+        .run({ cutoff });
+      totalDeleted += syncedResult.changes;
+      const unsyncedResult = this.db
         .prepare("DELETE FROM audit_events WHERE created_at < @cutoff")
         .run({ cutoff });
-      totalDeleted += ageResult.changes;
+      totalDeleted += unsyncedResult.changes;
 
-      // Size-based pruning — delete oldest events until under limit
+      // Size-based pruning — prefer synced events, then oldest overall
       if (this.getDbSizeMb() > maxSizeMb) {
         let deleted = 0;
+        // First pass: prune synced events
         do {
           const result = this.db
             .prepare(
               `DELETE FROM audit_events WHERE id IN (
-                SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
+                SELECT id FROM audit_events WHERE synced_at IS NOT NULL ORDER BY sequence ASC LIMIT @batchSize
               )`,
             )
             .run({ batchSize: PRUNE_BATCH_SIZE });
           deleted = result.changes;
           totalDeleted += deleted;
         } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+
+        // Second pass: prune oldest regardless of sync status
+        if (this.getDbSizeMb() > maxSizeMb) {
+          do {
+            const result = this.db
+              .prepare(
+                `DELETE FROM audit_events WHERE id IN (
+                  SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
+                )`,
+              )
+              .run({ batchSize: PRUNE_BATCH_SIZE });
+            deleted = result.changes;
+            totalDeleted += deleted;
+          } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+        }
       }
 
       // Write a pending prune checkpoint — the next append() will bake it into
@@ -458,6 +512,19 @@ export class AuditStore {
         this.db.prepare(
           "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_prune_before_seq', ?)",
         ).run(String(nextExpectedSeq));
+
+        // Archive orphaned checkpoints whose events have been pruned,
+        // preserving their DE transaction hashes for independent verification.
+        this.db.prepare(`
+          INSERT OR IGNORE INTO checkpoint_archive
+            (id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at, archived_at)
+          SELECT id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at, ?
+          FROM integrity_checkpoints
+          WHERE sequence_end < ?
+        `).run(new Date().toISOString(), nextExpectedSeq);
+        this.db.prepare(
+          "DELETE FROM integrity_checkpoints WHERE sequence_end < ?",
+        ).run(nextExpectedSeq);
       }
     });
 

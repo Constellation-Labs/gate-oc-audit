@@ -32,6 +32,15 @@ function fileHash(filePath: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function fileLinesCount(filePath: string): number {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    return content.split("\n").length;
+  } catch {
+    return 0;
+  }
+}
+
 export class ConfigWatcher {
   private store: AuditStore;
   private scanner: ToolScanner;
@@ -148,6 +157,20 @@ export class ConfigWatcher {
       const artifactName = basename(filePath, extname(filePath));
       const eventType = MANIFEST_TO_EVENT[manifestType];
 
+      let diffSummary: string | undefined;
+      if (effectiveChangeType === "added") {
+        const lines = fileLinesCount(resolvedPath);
+        diffSummary = `New file (${lines} lines)`;
+      } else if (effectiveChangeType === "modified") {
+        const lines = fileLinesCount(resolvedPath);
+        diffSummary = `Source updated (${lines} lines)`;
+      } else {
+        diffSummary = "File removed";
+      }
+      if (diffSummary && diffSummary.length > 2048) {
+        diffSummary = diffSummary.slice(0, 2048);
+      }
+
       const changeMeta: ConfigChangeMetadata = {
         artifactName,
         artifactType: manifestType,
@@ -157,6 +180,7 @@ export class ConfigWatcher {
           ? (existing?.contentHash ?? "")
           : this.manifest.get(resolvedPath)!.contentHash,
         previousHash: existing?.contentHash,
+        diffSummary,
       };
 
       this.store.append({

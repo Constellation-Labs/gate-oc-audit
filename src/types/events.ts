@@ -2,6 +2,7 @@ export type EventCategory =
   | "prompt"
   | "message"
   | "tool"
+  | "cron"
   | "system"
   | "agent"
   | "gateway"
@@ -36,6 +37,8 @@ export type EventType =
   | "session.end"
   | "gateway.start"
   | "gateway.stop"
+  | "cron.executed"
+  | "cron.failed"
   | "config.tool_changed"
   | "config.skill_changed"
   | "config.soul_changed"
@@ -65,6 +68,36 @@ export interface ScanResultMetadata {
   toolName: string;
   filePath: string;
   findings: ScanFinding[];
+}
+
+export interface PromptMetadata {
+  model: string;
+  provider?: string;
+  tokenCount?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  durationMs?: number;
+  costUsd?: number;
+  truncatedPrompt?: string;
+}
+
+export interface ToolMetadata {
+  toolName: string;
+  args?: Record<string, unknown>;
+  exitCode?: number;
+  durationMs?: number;
+  truncatedOutput?: string;
+  error?: string;
+}
+
+export interface CronMetadata {
+  jobId: string;
+  prompt?: string;
+  durationMs?: number;
+  result?: string;
+  error?: string;
 }
 
 export interface AuditEvent {

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { AuditStore } from "../src/store/audit-store.js";
 import { cliAuditHandler, cliVerifyHandler, cliExportHandler } from "../src/cli.js";
+import { computeMerkleRoot } from "../src/services/de-anchor.js";
 import type { AuditEventInsert } from "../src/types/events.js";
 
 function makeTempDb(): string {
@@ -130,6 +131,30 @@ describe("CLI: audit verify", () => {
     process.exitCode = 0;
     assert.ok(stderr.includes("INTEGRITY VIOLATION"));
     assert.ok(stderr.includes("sequence #3"));
+  });
+
+  it("verifies DE checkpoints and reports valid roots", () => {
+    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
+
+    // Create a valid checkpoint
+    const events = store.getEventHashes(1, 5);
+    const root = computeMerkleRoot(events.map((e) => e.contentHash));
+    store.insertCheckpoint("cp-valid", 1, 5, root, 5, null);
+
+    const { stdout } = captureConsole(() => cliVerifyHandler(store));
+    assert.ok(stdout.includes("1 valid"));
+    assert.ok(stdout.includes("checkpoint Merkle roots intact"));
+  });
+
+  it("detects mismatched DE checkpoint Merkle root", () => {
+    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
+
+    store.insertCheckpoint("cp-bad", 1, 5, "wrong-root", 5, null);
+
+    const { stderr } = captureConsole(() => cliVerifyHandler(store));
+    process.exitCode = 0;
+    assert.ok(stderr.includes("CHECKPOINT cp-bad"));
+    assert.ok(stderr.includes("MISMATCH"));
   });
 });
 

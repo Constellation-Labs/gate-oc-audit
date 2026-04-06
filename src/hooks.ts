@@ -1,12 +1,13 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
+import type { RateLimiter } from "./rate-limiter.js";
 
 const SENSITIVE_KEY =
   /secret|password|token|api.?key|auth|credential|passphrase|jwt|bearer|cookie|private.?key/i;
 
 const AUDIT_PRIORITY = 200;
-const CONTENT_PREVIEW_LENGTH = 50;
+const CONTENT_PREVIEW_LENGTH = 500;
 
 function sanitize(value: unknown, seen = new WeakSet()): unknown {
   if (value === null || value === undefined) return value;
@@ -30,9 +31,13 @@ export function sanitizeArgs(params: Record<string, unknown>): Record<string, un
   return sanitize(params) as Record<string, unknown>;
 }
 
-function safeAppend(store: AuditStore, insert: AuditEventInsert): void {
+function safeAppend(store: AuditStore, limiter: RateLimiter | undefined, insert: AuditEventInsert): void {
   try {
-    store.append(insert);
+    if (limiter) {
+      limiter.append(insert);
+    } else {
+      store.append(insert);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[audit-plugin]", message);
@@ -54,13 +59,13 @@ function resolveRecipient(evt: { to?: string }): string {
   return evt.to || "unknown";
 }
 
-export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
+export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter?: RateLimiter): void {
   // --- Model & prompt build ---
 
   api.on(
     "before_model_resolve",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "prompt.model_resolve",
         category: "prompt",
@@ -73,7 +78,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_prompt_build",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "prompt.build",
         category: "prompt",
@@ -88,7 +93,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_agent_start",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "agent.start",
         category: "agent",
@@ -101,7 +106,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "agent_end",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "agent.end",
         category: "agent",
@@ -114,7 +119,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_tool_call",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "tool.invoked",
         category: "tool",
@@ -127,7 +132,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "after_tool_call",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "tool.result",
         category: "tool",
@@ -136,6 +141,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
           toolName: evt.toolName,
           durationMs: evt.durationMs,
           error: evt.error,
+          truncatedOutput: evt.result?.slice(0, 1024),
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -144,7 +150,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "tool_result_persist",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionKey,
         eventType: "tool.persisted",
         category: "tool",
@@ -157,12 +163,28 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     { priority: AUDIT_PRIORITY },
   );
 
+  api.on(
+    "tool_denied",
+    (evt, ctx) =>
+      safeAppend(store, limiter, {
+        sessionId: ctx.sessionId,
+        eventType: "tool.denied",
+        category: "tool",
+        description: `Tool denied: ${evt.toolName}`,
+        metadata: {
+          toolName: evt.toolName,
+          reason: evt.reason,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
   // --- LLM I/O ---
 
   api.on(
     "llm_input",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "prompt.input",
         category: "prompt",
@@ -186,7 +208,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     "message_received",
     (evt, ctx) => {
       const sender = resolveSender(evt);
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.conversationId,
         eventType: "message.received",
         category: "message",
@@ -211,7 +233,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     "message_sent",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.conversationId,
         eventType: "message.sent",
         category: "message",
@@ -237,7 +259,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     "message_sending",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.conversationId,
         eventType: "message.sending",
         category: "message",
@@ -258,7 +280,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "inbound_claim",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.conversationId,
         eventType: "message.claimed",
         category: "message",
@@ -277,7 +299,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_dispatch",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.conversationId,
         eventType: "message.dispatched",
         category: "message",
@@ -295,7 +317,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_message_write",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionKey,
         eventType: "message.write",
         category: "message",
@@ -310,7 +332,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "llm_output",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "prompt.response",
         category: "prompt",
@@ -334,7 +356,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_compaction",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_start",
         category: "agent",
@@ -351,7 +373,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "after_compaction",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_end",
         category: "agent",
@@ -368,7 +390,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "before_reset",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "agent.reset",
         category: "agent",
@@ -385,7 +407,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "session_start",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "session.start",
         category: "system",
@@ -401,7 +423,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "session_end",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
@@ -420,7 +442,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "subagent_spawning",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawning",
         category: "agent",
@@ -438,7 +460,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "subagent_spawned",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawned",
         category: "agent",
@@ -457,7 +479,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "subagent_delivery_target",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_delivery",
         category: "agent",
@@ -477,7 +499,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "subagent_ended",
     (evt, ctx) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_ended",
         category: "agent",
@@ -494,12 +516,48 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
     { priority: AUDIT_PRIORITY },
   );
 
+  // --- Cron ---
+
+  api.on(
+    "cron_executed",
+    (evt, ctx) =>
+      safeAppend(store, limiter, {
+        sessionId: ctx.sessionId,
+        eventType: "cron.executed",
+        category: "cron",
+        description: `Cron executed: ${evt.jobId ?? "unknown"}`,
+        metadata: {
+          jobId: evt.jobId,
+          prompt: evt.prompt?.slice(0, 500),
+          durationMs: evt.durationMs,
+          result: evt.result?.slice(0, 1024),
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
+  api.on(
+    "cron_failed",
+    (evt, ctx) =>
+      safeAppend(store, limiter, {
+        sessionId: ctx.sessionId,
+        eventType: "cron.failed",
+        category: "cron",
+        description: `Cron failed: ${evt.jobId ?? "unknown"}`,
+        metadata: {
+          jobId: evt.jobId,
+          error: evt.error,
+        },
+      }),
+    { priority: AUDIT_PRIORITY },
+  );
+
   // --- Gateway lifecycle ---
 
   api.on(
     "gateway_start",
     (evt) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         eventType: "gateway.start",
         category: "gateway",
         description: `Gateway started on port ${evt.port}`,
@@ -511,7 +569,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore): void {
   api.on(
     "gateway_stop",
     (evt) =>
-      safeAppend(store, {
+      safeAppend(store, limiter, {
         eventType: "gateway.stop",
         category: "gateway",
         description: `Gateway stopped: ${evt.reason ?? "shutdown"}`,

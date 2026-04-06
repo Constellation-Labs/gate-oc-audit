@@ -55,6 +55,17 @@ const DDL = [
     created_at      TEXT NOT NULL
   )`,
 
+  `CREATE TABLE IF NOT EXISTS checkpoint_archive (
+    id              TEXT PRIMARY KEY,
+    sequence_start  INTEGER NOT NULL,
+    sequence_end    INTEGER NOT NULL,
+    merkle_root     TEXT NOT NULL,
+    event_count     INTEGER NOT NULL,
+    de_tx_hash      TEXT,
+    created_at      TEXT NOT NULL,
+    archived_at     TEXT NOT NULL
+  )`,
+
   `CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -66,7 +77,7 @@ const DDL = [
   )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 export function initializeSchema(db: Database.Database): void {
   for (const pragma of PRAGMAS) {
@@ -82,8 +93,9 @@ export function initializeSchema(db: Database.Database): void {
     const current = row?.v ?? 0;
 
     if (current < CURRENT_SCHEMA_VERSION) {
+      // v2: Added checkpoint_archive table (CREATE IF NOT EXISTS handles it).
       // Future migrations go here, gated by version number:
-      // if (current < 2) { db.exec("ALTER TABLE ..."); }
+      // if (current < 3) { db.exec("ALTER TABLE ..."); }
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

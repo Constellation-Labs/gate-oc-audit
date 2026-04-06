@@ -65,8 +65,7 @@ export class NotificationService {
 
   async notifyIntegrityViolation(
     sequence: number,
-    expectedHash: string,
-    actualHash: string,
+    error: string,
   ): Promise<void> {
     if (!this.webhookUrl) return;
 
@@ -80,8 +79,7 @@ export class NotificationService {
             text: [
               "*Integrity violation detected*",
               `*Sequence:* ${sequence}`,
-              `*Expected hash:* \`${expectedHash.slice(0, 16)}...\``,
-              `*Actual hash:* \`${actualHash.slice(0, 16)}...\``,
+              `*Error:* ${error}`,
               `*Detected:* ${new Date().toISOString()}`,
             ].join("\n"),
           },

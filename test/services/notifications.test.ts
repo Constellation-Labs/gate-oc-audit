@@ -80,7 +80,7 @@ describe("NotificationService", () => {
   it("sends integrity violation notification", async () => {
     const notifier = new NotificationService(`http://localhost:${port}/webhook`);
 
-    await notifier.notifyIntegrityViolation(42, "expected123", "actual456");
+    await notifier.notifyIntegrityViolation(42, "Content hash mismatch at sequence 42");
 
     assert.equal(receivedPayloads.length, 1);
     const payload = receivedPayloads[0] as { text: string };

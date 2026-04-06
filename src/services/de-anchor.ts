@@ -25,6 +25,9 @@ export class DeAnchorService {
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
 
+  // In-memory append counter — avoids DB queries on every append
+  private appendsSinceLastCheckpoint = 0;
+
   constructor(
     store: AuditStore,
     config: Record<string, unknown> = {},
@@ -60,6 +63,22 @@ export class DeAnchorService {
     }
   }
 
+  /**
+   * Called after each append to check whether the event count threshold
+   * has been reached. Triggers anchoring eagerly (async, non-blocking)
+   * so that "every N events OR M minutes, whichever comes first" holds.
+   * Uses an in-memory counter to avoid DB queries on every append.
+   */
+  notifyAppend(): void {
+    if (!this.deApiKey && !this.x402Payment) return;
+
+    this.appendsSinceLastCheckpoint++;
+    if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
+      this.appendsSinceLastCheckpoint = 0;
+      this.anchorIfNeeded().catch(() => {});
+    }
+  }
+
   async anchorIfNeeded(): Promise<void> {
     if (this.isCircuitOpen()) return;
 
@@ -82,6 +101,7 @@ export class DeAnchorService {
       this.store.insertCheckpoint(checkpointId, seqStart, seqEnd, merkleRoot, events.length, txHash);
 
       this.consecutiveFailures = 0;
+      this.appendsSinceLastCheckpoint = 0;
       console.error(
         `[audit-plugin] Anchored ${events.length} events (seq ${seqStart}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
       );
