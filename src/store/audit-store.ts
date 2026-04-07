@@ -4,10 +4,15 @@ import { dirname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { uuidv7 } from "uuidv7";
 
+import { createRequire } from "module";
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
 import { initializeSchema } from "./schema.js";
-import { canonicalize } from "../util/hash.js";
 import { getMachineId } from "../util/machine-id.js";
+
+const require2 = createRequire(import.meta.url);
+const sdk = require2("@constellation-network/digital-evidence-sdk") as {
+  canonicalize: (obj: unknown) => string;
+};
 
 const MAX_METADATA_SIZE = 1024 * 1024; // 1MB
 const MAX_CONTENT_SIZE = 5 * 1024 * 1024; // 5MB
@@ -193,7 +198,7 @@ export class AuditStore {
 
       let metadataCanonical: string;
       try {
-        metadataCanonical = canonicalize(insert.metadata);
+        metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
         console.error("[audit-plugin] Metadata is not serializable, skipping event");
         return undefined;
