@@ -194,8 +194,7 @@ export default definePluginEntry({
           proof: { type: "object", description: "Proof object for verify action" },
           conversationId: { type: "string", description: "Conversation ID for chain action" },
           epoch: { type: "number", description: "Epoch number for prune_epoch" },
-          passphrase: { type: "string", description: "Encryption passphrase for snapshots" },
-          snapshot: { type: "object", description: "Encrypted snapshot for restore" },
+          snapshot: { type: "object", description: "Snapshot object for restore" },
         },
         required: ["action"],
       },
@@ -245,13 +244,13 @@ export default definePluginEntry({
           }
           case "snapshot": {
             if (!treeKey) return { error: "tree is required" };
-            return smtService.createSnapshot(treeKey, params.passphrase as string);
+            return smtService.createSnapshot(treeKey);
           }
           case "restore_snapshot": {
             if (!treeKey) return { error: "tree is required" };
             const snapshot = params.snapshot as any;
             if (!snapshot) return { error: "snapshot is required" };
-            return smtService.restoreSnapshot(treeKey, snapshot, params.passphrase as string);
+            return smtService.restoreSnapshot(treeKey, snapshot);
           }
           default:
             return { error: `Unknown action: ${action}` };

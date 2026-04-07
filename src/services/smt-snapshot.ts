@@ -1,21 +1,13 @@
 /**
- * Encrypted Snapshot — Serialize + encrypt SMT state for DED backup
+ * SMT Snapshot — Serialize SMT state for backup and restore.
  *
  * Flow:
- *   SMT nodes Map -> JSON -> AES-256-GCM encrypt -> ciphertext blob
- *   SHA-256(ciphertext) -> documentRef for DED fingerprint
- *   Upload ciphertext as document alongside fingerprint
+ *   SMT nodes Map -> canonical JSON -> SHA-256 content hash
  *
  * Restore:
- *   Download ciphertext from DED -> decrypt -> JSON -> restore SMT nodes Map
+ *   JSON -> verify content hash -> restore SMT nodes Map
  */
 
-import {
-  createCipheriv,
-  createDecipheriv,
-  randomBytes,
-  scryptSync,
-} from "node:crypto";
 import { createRequire } from "module";
 
 const require2 = createRequire(import.meta.url);
@@ -24,19 +16,10 @@ const sdk = require2("@constellation-network/digital-evidence-sdk") as {
   hashDocument: (content: string | Buffer) => string;
 };
 
-const ALGORITHM = "aes-256-gcm";
-const IV_LENGTH = 12;
-const TAG_LENGTH = 16;
-const SALT_LENGTH = 32;
-const KEY_LENGTH = 32;
-
-export interface EncryptedSnapshot {
+export interface Snapshot {
   version: 1;
-  salt: string;
-  iv: string;
-  tag: string;
-  ciphertext: string;
   contentHash: string;
+  data: string;
   meta: {
     treeKey: string;
     entryCount: number;
@@ -44,14 +27,6 @@ export interface EncryptedSnapshot {
     root: string;
     createdAt: string;
   };
-}
-
-function deriveKey(passphrase: string, salt: Buffer): Buffer {
-  return scryptSync(passphrase, salt, KEY_LENGTH, {
-    N: 2 ** 14,
-    r: 8,
-    p: 1,
-  });
 }
 
 export function serializeSmtState(
@@ -78,68 +53,38 @@ export function deserializeSmtState(
   return { root: obj.root, nodes };
 }
 
-export function encryptSnapshot(
+export function createSnapshot(
   nodes: Map<string, string[]>,
   root: string,
-  passphrase: string,
-  meta: EncryptedSnapshot["meta"],
-): EncryptedSnapshot {
-  const plaintext = serializeSmtState(nodes, root);
-
-  const salt = randomBytes(SALT_LENGTH);
-  const key = deriveKey(passphrase, salt);
-  const iv = randomBytes(IV_LENGTH);
-
-  const cipher = createCipheriv(ALGORITHM, key, iv, {
-    authTagLength: TAG_LENGTH,
-  });
-  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  const contentHash = sdk.hashDocument(encrypted);
+  meta: Snapshot["meta"],
+): Snapshot {
+  const serialized = serializeSmtState(nodes, root);
+  const contentHash = sdk.hashDocument(serialized);
 
   return {
     version: 1,
-    salt: salt.toString("hex"),
-    iv: iv.toString("hex"),
-    tag: tag.toString("hex"),
-    ciphertext: encrypted.toString("base64"),
     contentHash,
+    data: serialized.toString("base64"),
     meta,
   };
 }
 
-export function decryptSnapshot(
-  snapshot: EncryptedSnapshot,
-  passphrase: string,
+export function restoreSnapshot(
+  snapshot: Snapshot,
 ): { root: string; nodes: Map<string, string[]> } {
-  const salt = Buffer.from(snapshot.salt, "hex");
-  const key = deriveKey(passphrase, salt);
-  const iv = Buffer.from(snapshot.iv, "hex");
-  const tag = Buffer.from(snapshot.tag, "hex");
-  const ciphertext = Buffer.from(snapshot.ciphertext, "base64");
+  const raw = Buffer.from(snapshot.data, "base64");
 
-  const computedHash = sdk.hashDocument(ciphertext);
+  const computedHash = sdk.hashDocument(raw);
   if (computedHash !== snapshot.contentHash) {
     throw new Error(
       `Content hash mismatch: expected ${snapshot.contentHash}, got ${computedHash}`,
     );
   }
 
-  const decipher = createDecipheriv(ALGORITHM, key, iv, {
-    authTagLength: TAG_LENGTH,
-  });
-  decipher.setAuthTag(tag);
-
-  const decrypted = Buffer.concat([
-    decipher.update(ciphertext),
-    decipher.final(),
-  ]);
-
-  return deserializeSmtState(decrypted);
+  return deserializeSmtState(raw);
 }
 
-export function getSnapshotBlob(snapshot: EncryptedSnapshot): {
+export function getSnapshotBlob(snapshot: Snapshot): {
   blob: Buffer;
   contentHash: string;
   mimeType: string;

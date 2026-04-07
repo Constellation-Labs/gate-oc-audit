@@ -2,14 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { SmtStore } from "../../src/store/smt-store.js";
 import {
-  encryptSnapshot,
-  decryptSnapshot,
+  createSnapshot,
+  restoreSnapshot,
   getSnapshotBlob,
   serializeSmtState,
   deserializeSmtState,
 } from "../../src/services/smt-snapshot.js";
 
-describe("SMT Snapshot Crypto", () => {
+describe("SMT Snapshot", () => {
   describe("serialize/deserialize", () => {
     it("round-trips SMT state", () => {
       const nodes = new Map<string, string[]>();
@@ -26,17 +26,16 @@ describe("SMT Snapshot Crypto", () => {
     });
   });
 
-  describe("encrypt/decrypt", () => {
-    it("round-trips with correct passphrase", () => {
+  describe("create/restore", () => {
+    it("round-trips SMT state", () => {
       const store = new SmtStore();
       store.add("aa01", "bb01");
       store.add("aa02", "bb02");
 
       const nodes = store.getNodes();
       const root = store.getRoot();
-      const passphrase = "test-passphrase-123";
 
-      const encrypted = encryptSnapshot(nodes, root, passphrase, {
+      const snapshot = createSnapshot(nodes, root, {
         treeKey: "test-tree",
         entryCount: 2,
         nodeCount: nodes.size,
@@ -44,34 +43,30 @@ describe("SMT Snapshot Crypto", () => {
         createdAt: new Date().toISOString(),
       });
 
-      assert.equal(encrypted.version, 1);
-      assert.ok(encrypted.salt);
-      assert.ok(encrypted.iv);
-      assert.ok(encrypted.tag);
-      assert.ok(encrypted.ciphertext);
-      assert.ok(encrypted.contentHash);
-      assert.equal(encrypted.meta.treeKey, "test-tree");
-      assert.equal(encrypted.meta.entryCount, 2);
+      assert.equal(snapshot.version, 1);
+      assert.ok(snapshot.data);
+      assert.ok(snapshot.contentHash);
+      assert.equal(snapshot.meta.treeKey, "test-tree");
+      assert.equal(snapshot.meta.entryCount, 2);
 
-      const decrypted = decryptSnapshot(encrypted, passphrase);
-      assert.equal(decrypted.root, root);
-      assert.equal(decrypted.nodes.size, nodes.size);
+      const restored = restoreSnapshot(snapshot);
+      assert.equal(restored.root, root);
+      assert.equal(restored.nodes.size, nodes.size);
 
-      // Verify SMT can be restored from decrypted state
+      // Verify SMT can be restored from snapshot state
       const store2 = new SmtStore();
-      store2.restoreFromState(decrypted.nodes, decrypted.root);
+      store2.restoreFromState(restored.nodes, restored.root);
       assert.equal(store2.getRoot(), root);
       assert.equal(store2.get("aa01"), "bb01");
     });
 
-    it("fails with wrong passphrase", () => {
+    it("detects tampered data", () => {
       const store = new SmtStore();
       store.add("aa01", "bb01");
 
-      const encrypted = encryptSnapshot(
+      const snapshot = createSnapshot(
         store.getNodes(),
         store.getRoot(),
-        "correct-passphrase",
         {
           treeKey: "t",
           entryCount: 1,
@@ -81,32 +76,9 @@ describe("SMT Snapshot Crypto", () => {
         },
       );
 
-      assert.throws(() => {
-        decryptSnapshot(encrypted, "wrong-passphrase");
-      });
-    });
-
-    it("detects tampered ciphertext", () => {
-      const store = new SmtStore();
-      store.add("aa01", "bb01");
-
-      const encrypted = encryptSnapshot(
-        store.getNodes(),
-        store.getRoot(),
-        "pass",
-        {
-          treeKey: "t",
-          entryCount: 1,
-          nodeCount: 1,
-          root: store.getRoot(),
-          createdAt: new Date().toISOString(),
-        },
-      );
-
-      // Tamper with contentHash
-      const tampered = { ...encrypted, contentHash: "0".repeat(64) };
+      const tampered = { ...snapshot, contentHash: "0".repeat(64) };
       assert.throws(
-        () => decryptSnapshot(tampered, "pass"),
+        () => restoreSnapshot(tampered),
         /Content hash mismatch/,
       );
     });
@@ -117,10 +89,9 @@ describe("SMT Snapshot Crypto", () => {
       const store = new SmtStore();
       store.add("aa01", "bb01");
 
-      const encrypted = encryptSnapshot(
+      const snapshot = createSnapshot(
         store.getNodes(),
         store.getRoot(),
-        "pass",
         {
           treeKey: "t",
           entryCount: 1,
@@ -130,7 +101,7 @@ describe("SMT Snapshot Crypto", () => {
         },
       );
 
-      const { blob, contentHash, mimeType } = getSnapshotBlob(encrypted);
+      const { blob, contentHash, mimeType } = getSnapshotBlob(snapshot);
       assert.ok(Buffer.isBuffer(blob));
       assert.ok(blob.length > 0);
       assert.equal(contentHash.length, 64);

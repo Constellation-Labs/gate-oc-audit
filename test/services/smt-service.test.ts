@@ -143,4 +143,5 @@ describe("SmtService", () => {
       service.onEventAppended({} as any);
     });
   });
+
 });

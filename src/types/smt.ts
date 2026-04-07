@@ -62,5 +62,4 @@ export interface SmtConfig {
   epochDurationMs: number;
   pruneAfterEpochs: number;
   storageCapBytes: number;
-  snapshotPassphrase: string;
 }
