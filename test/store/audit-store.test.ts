@@ -3,9 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
 import { AuditStore } from "../../src/store/audit-store.js";
-import { computeEventHash, canonicalize } from "../../src/util/hash.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
 
 function makeTempDb(): string {
@@ -51,9 +49,7 @@ describe("AuditStore", () => {
       assert.equal(event.source, "openclaw-plugin");
       assert.equal(event.eventType, "session.start");
       assert.equal(event.category, "system");
-      assert.equal(event.previousHash, "GENESIS");
       assert.ok(event.id);
-      assert.ok(event.contentHash);
       assert.ok(event.createdAt);
       assert.ok(event.machineId);
     });
@@ -113,88 +109,6 @@ describe("AuditStore", () => {
     });
   });
 
-  describe("hash chain", () => {
-    it("first event has GENESIS as previousHash", () => {
-      const event = store.append(sampleInsert())!;
-      assert.equal(event.previousHash, "GENESIS");
-    });
-
-    it("links each event to the previous event's contentHash", () => {
-      const e1 = store.append(sampleInsert())!;
-      const e2 = store.append(sampleInsert({ description: "second" }))!;
-      const e3 = store.append(sampleInsert({ description: "third" }))!;
-
-      assert.equal(e2.previousHash, e1.contentHash);
-      assert.equal(e3.previousHash, e2.contentHash);
-    });
-
-    it("produces different contentHash for different metadata", () => {
-      const e1 = store.append(sampleInsert({ metadata: { a: 1 } }))!;
-      const e2 = store.append(sampleInsert({ metadata: { a: 2 } }))!;
-
-      assert.notEqual(e1.contentHash, e2.contentHash);
-    });
-
-    it("metadata key order does not affect contentHash", () => {
-      const e1 = store.append(sampleInsert({ metadata: { x: 1, y: 2 } }))!;
-
-      // Recompute with reversed key order — should produce the same hash
-      const recomputed = computeEventHash({
-        id: e1.id,
-        sequence: e1.sequence,
-        previousHash: e1.previousHash,
-        source: e1.source,
-        sessionId: e1.sessionId,
-        eventType: e1.eventType,
-        category: e1.category,
-        description: e1.description,
-        metadataCanonical: canonicalize({ y: 2, x: 1 }),
-      });
-
-      assert.equal(e1.contentHash, recomputed);
-    });
-
-    it("produces different contentHash when non-metadata fields differ", () => {
-      const store2 = new AuditStore(makeTempDb());
-      const e1 = store.append(sampleInsert({ eventType: "session.start" }))!;
-      const e2 = store2.append(sampleInsert({ eventType: "session.end" }))!;
-
-      assert.notEqual(e1.contentHash, e2.contentHash);
-      store2.close();
-    });
-
-    it("contentHash in DB matches recomputed hash", () => {
-      const insert = sampleInsert({ userId: "u1", orgId: "org1" });
-      const event = store.append(insert)!;
-
-      const recomputed = computeEventHash({
-        id: event.id,
-        sequence: event.sequence,
-        previousHash: event.previousHash,
-        source: event.source,
-        sessionId: event.sessionId,
-        orgId: event.orgId,
-        userId: event.userId,
-        eventType: event.eventType,
-        category: event.category,
-        description: event.description,
-        metadataCanonical: canonicalize(event.metadata),
-      });
-
-      assert.equal(event.contentHash, recomputed);
-
-      // Also verify against what's stored in the DB
-      const db = new Database(dbPath);
-      const row = db.prepare("SELECT content_hash, metadata FROM audit_events WHERE id = ?").get(event.id) as {
-        content_hash: string;
-        metadata: string;
-      };
-      db.close();
-
-      assert.equal(row.content_hash, recomputed);
-    });
-  });
-
   describe("persistence across restarts", () => {
     it("resumes sequence from last stored event", () => {
       store.append(sampleInsert());
@@ -209,19 +123,6 @@ describe("AuditStore", () => {
       store = new AuditStore(makeTempDb());
     });
 
-    it("resumes hash chain from last stored event", () => {
-      store.append(sampleInsert());
-      store.append(sampleInsert({ description: "second" }));
-      const lastHash = store.append(sampleInsert({ description: "third" }))!.contentHash;
-      store.close();
-
-      const store2 = new AuditStore(dbPath);
-      const e4 = store2.append(sampleInsert({ description: "fourth" }))!;
-      assert.equal(e4.previousHash, lastHash);
-      store2.close();
-
-      store = new AuditStore(makeTempDb());
-    });
   });
 
   describe("degraded mode", () => {
@@ -277,7 +178,7 @@ describe("AuditStore", () => {
   });
 
   describe("many events", () => {
-    it("handles 100 rapid inserts with correct chain", () => {
+    it("handles 100 rapid inserts with correct sequence", () => {
       const events = [];
       for (let i = 0; i < 100; i++) {
         const e = store.append(sampleInsert({ description: `event-${i}`, metadata: { i } }))!;
@@ -285,10 +186,6 @@ describe("AuditStore", () => {
         events.push(e);
       }
 
-      assert.equal(events[0].previousHash, "GENESIS");
-      for (let i = 1; i < events.length; i++) {
-        assert.equal(events[i].previousHash, events[i - 1].contentHash);
-      }
       assert.equal(events[events.length - 1].sequence, 100);
     });
   });
@@ -321,148 +218,6 @@ describe("AuditStore", () => {
 
       newStore.close();
       cleanupDb(newPath);
-    });
-  });
-
-  describe("tamper detection", () => {
-    it("hash chain detects event reordering", () => {
-      const e1 = store.append(sampleInsert({ description: "first", metadata: { i: 1 } }))!;
-      const e2 = store.append(sampleInsert({ description: "second", metadata: { i: 2 } }))!;
-
-      const fakeHash = computeEventHash({
-        id: e2.id,
-        sequence: e1.sequence, // swapped
-        previousHash: e2.previousHash,
-        source: e2.source,
-        sessionId: e2.sessionId,
-        eventType: e2.eventType,
-        category: e2.category,
-        description: e2.description,
-        metadataCanonical: canonicalize(e2.metadata),
-      });
-
-      assert.notEqual(fakeHash, e2.contentHash);
-    });
-
-    it("hash chain detects ID replacement", () => {
-      const e1 = store.append(sampleInsert())!;
-
-      const fakeHash = computeEventHash({
-        id: "00000000-0000-7000-8000-ffffffffffff",
-        sequence: e1.sequence,
-        previousHash: e1.previousHash,
-        source: e1.source,
-        sessionId: e1.sessionId,
-        eventType: e1.eventType,
-        category: e1.category,
-        description: e1.description,
-        metadataCanonical: canonicalize(e1.metadata),
-      });
-
-      assert.notEqual(fakeHash, e1.contentHash);
-    });
-
-    it("hash commits to full chain history via previousHash", () => {
-      store.append(sampleInsert({ metadata: { i: 1 } }))!;
-      const e2 = store.append(sampleInsert({ metadata: { i: 2 } }))!;
-
-      const fakeHash = computeEventHash({
-        id: e2.id,
-        sequence: e2.sequence,
-        previousHash: "tampered_previous_hash",
-        source: e2.source,
-        sessionId: e2.sessionId,
-        eventType: e2.eventType,
-        category: e2.category,
-        description: e2.description,
-        metadataCanonical: canonicalize(e2.metadata),
-      });
-
-      assert.notEqual(fakeHash, e2.contentHash);
-    });
-  });
-
-  describe("prune checkpoint", () => {
-    function backdateAll(path: string): void {
-      const db = new Database(path);
-      const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
-      db.prepare("UPDATE audit_events SET created_at = ?").run(old);
-      db.close();
-    }
-
-    it("verify passes after prune + append (hard checkpoint in chain)", () => {
-      for (let i = 0; i < 5; i++) {
-        store.append(sampleInsert({ description: `old-${i}` }));
-      }
-      backdateAll(dbPath);
-
-      const deleted = store.prune(365, 500);
-      assert.equal(deleted, 5);
-
-      // New events — first one absorbs the prune checkpoint
-      store.append(sampleInsert({ description: "after-prune-1" }));
-      store.append(sampleInsert({ description: "after-prune-2" }));
-
-      const result = store.verify();
-      assert.equal(result.valid, true);
-      assert.equal(result.eventsChecked, 2);
-    });
-
-    it("verify passes after prune before append (soft checkpoint)", () => {
-      for (let i = 0; i < 5; i++) {
-        store.append(sampleInsert({ description: `old-${i}` }));
-      }
-
-      // Backdate only the first 4, keep the 5th recent
-      const db = new Database(dbPath);
-      const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
-      db.prepare("UPDATE audit_events SET created_at = ? WHERE sequence <= 4").run(old);
-      db.close();
-
-      store.prune(365, 500);
-
-      // Verify before any new append — uses soft checkpoint
-      const result = store.verify();
-      assert.equal(result.valid, true);
-      assert.equal(result.eventsChecked, 1);
-    });
-
-    it("first event after prune contains _pruneCheckpoint in metadata", () => {
-      store.append(sampleInsert({ description: "old" }));
-      backdateAll(dbPath);
-      store.prune(365, 500);
-
-      const event = store.append(sampleInsert({ description: "new" }))!;
-      assert.ok(event.metadata._pruneCheckpoint);
-      const cp = event.metadata._pruneCheckpoint as Record<string, unknown>;
-      assert.equal(typeof cp.prunedBeforeSeq, "number");
-      assert.equal(typeof cp.prunedAt, "string");
-      assert.equal(cp.eventsDeleted, 1);
-    });
-
-    it("second event after prune does not contain _pruneCheckpoint", () => {
-      store.append(sampleInsert({ description: "old" }));
-      backdateAll(dbPath);
-      store.prune(365, 500);
-
-      store.append(sampleInsert({ description: "first-after" }));
-      const second = store.append(sampleInsert({ description: "second-after" }))!;
-      assert.equal(second.metadata._pruneCheckpoint, undefined);
-    });
-
-    it("verify fails when events deleted without prune checkpoint", () => {
-      for (let i = 0; i < 5; i++) {
-        store.append(sampleInsert({ description: `event-${i}` }));
-      }
-
-      // Simulate attacker: delete events directly without going through prune()
-      const db = new Database(dbPath);
-      db.prepare("DELETE FROM audit_events WHERE sequence <= 3").run();
-      db.close();
-
-      const result = store.verify();
-      assert.equal(result.valid, false);
-      assert.ok(result.error?.includes("no matching prune checkpoint"));
     });
   });
 

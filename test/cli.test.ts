@@ -3,10 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
 import { AuditStore } from "../src/store/audit-store.js";
 import { cliAuditHandler, cliVerifyHandler, cliExportHandler } from "../src/cli.js";
-import { computeMerkleRoot } from "../src/services/de-anchor.js";
 import type { AuditEventInsert } from "../src/types/events.js";
 
 function makeTempDb(): string {
@@ -100,6 +98,15 @@ describe("CLI: audit verify", () => {
   let dbPath: string;
   let store: AuditStore;
 
+  const mockSmtService = {
+    listTrees: () => [],
+    getRoot: () => null,
+    createProof: () => null,
+    verifyProof: () => false,
+    computeRawHash: () => "aa".repeat(32),
+    computeCensoredHash: () => "bb".repeat(32),
+  } as any;
+
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
@@ -110,51 +117,11 @@ describe("CLI: audit verify", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("reports OK for intact chain", () => {
+  it("reports status for empty SMT", () => {
     for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
 
-    const { stdout } = captureConsole(() => cliVerifyHandler(store));
-    assert.ok(stdout.includes("OK"));
-    assert.ok(stdout.includes("5 events verified"));
-  });
-
-  it("reports violation for tampered chain", () => {
-    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
-
-    const db = new Database(dbPath);
-    db.prepare(
-      "UPDATE audit_events SET metadata = '{\"tampered\":true}' WHERE sequence = 3",
-    ).run();
-    db.close();
-
-    const { stderr } = captureConsole(() => cliVerifyHandler(store));
-    process.exitCode = 0;
-    assert.ok(stderr.includes("INTEGRITY VIOLATION"));
-    assert.ok(stderr.includes("sequence #3"));
-  });
-
-  it("verifies DE checkpoints and reports valid roots", () => {
-    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
-
-    // Create a valid checkpoint
-    const events = store.getEventHashes(1, 5);
-    const root = computeMerkleRoot(events.map((e) => e.contentHash));
-    store.insertCheckpoint("cp-valid", 1, 5, root, 5, null);
-
-    const { stdout } = captureConsole(() => cliVerifyHandler(store));
-    assert.ok(stdout.includes("1 valid"));
-    assert.ok(stdout.includes("checkpoint Merkle roots intact"));
-  });
-
-  it("detects mismatched DE checkpoint Merkle root", () => {
-    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
-
-    store.insertCheckpoint("cp-bad", 1, 5, "wrong-root", 5, null);
-
-    const { stderr } = captureConsole(() => cliVerifyHandler(store));
-    process.exitCode = 0;
-    assert.ok(stderr.includes("CHECKPOINT cp-bad"));
-    assert.ok(stderr.includes("MISMATCH"));
+    const { stdout } = captureConsole(() => cliVerifyHandler(mockSmtService, store));
+    assert.ok(stdout.includes("No SMT trees found"));
   });
 });
 

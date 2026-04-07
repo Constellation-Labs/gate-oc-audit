@@ -5,14 +5,20 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
     "test": "node --import tsx --test test/*.test.ts test/**/*.test.ts"
   },
   "dependencies": {
+    "@constellation-network/digital-evidence-sdk": "^0.3.2",
+    "@zk-kit/smt": "^1.0.2",
     "better-sqlite3": "^12.8.0",
     "chokidar": "^4.0.0",
+    "level": "^8.0.1",
     "uuidv7": "^1.0.2"
   },
   "devDependencies": {
@@ -26,7 +32,9 @@
     "openclaw": ">=2026.1.0"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.1.0",
       "minGatewayVersion": "2026.1.0"

@@ -136,6 +136,10 @@ Each event's `contentHash` is a SHA-256 digest over its ID, sequence number, pre
 
 Run `openclaw audit verify` at any time to check chain integrity.
 
+## Known security audit warnings
+
+Running `openclaw security audit --deep` may report a `potential-exfiltration` warning for `src/scanner.ts` and `dist/scanner.js`. This is a false positive: the built-in tool scanner uses `readFileSync` to read local skill/tool files for code-safety analysis, not to exfiltrate data. The warning is triggered because the deep audit heuristic detects filesystem reads in the same package as other code. It is safe to ignore.
+
 ## Security notes
 
 - The database file is created with `0600` permissions (owner read/write only)

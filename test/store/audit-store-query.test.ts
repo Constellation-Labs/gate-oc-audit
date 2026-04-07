@@ -137,63 +137,6 @@ describe("AuditStore.count", () => {
   });
 });
 
-describe("AuditStore.verify", () => {
-  let dbPath: string;
-  let store: AuditStore;
-
-  beforeEach(() => {
-    dbPath = makeTempDb();
-    store = new AuditStore(dbPath);
-  });
-
-  afterEach(() => {
-    store.close();
-    rmSync(dirname(dbPath), { recursive: true, force: true });
-  });
-
-  it("returns valid for empty store", () => {
-    const result = store.verify();
-    assert.equal(result.valid, true);
-    assert.equal(result.eventsChecked, 0);
-  });
-
-  it("returns valid for intact chain", () => {
-    for (let i = 0; i < 10; i++) insert(store, { metadata: { i } });
-    const result = store.verify();
-    assert.equal(result.valid, true);
-    assert.equal(result.eventsChecked, 10);
-  });
-
-  it("detects tampered content_hash", () => {
-    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
-
-    // Tamper with the 3rd event's metadata directly in the DB
-    const db = new Database(dbPath);
-    db.prepare(
-      "UPDATE audit_events SET metadata = '{\"tampered\":true}' WHERE sequence = 3",
-    ).run();
-    db.close();
-
-    const result = store.verify();
-    assert.equal(result.valid, false);
-    assert.equal(result.brokenAt, 3);
-  });
-
-  it("detects broken chain link", () => {
-    for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
-
-    const db = new Database(dbPath);
-    db.prepare(
-      "UPDATE audit_events SET previous_hash = 'tampered', content_hash = 'tampered' WHERE sequence = 3",
-    ).run();
-    db.close();
-
-    const result = store.verify();
-    assert.equal(result.valid, false);
-    assert.ok(result.brokenAt! <= 3);
-  });
-});
-
 describe("AuditStore.prune", () => {
   let dbPath: string;
   let store: AuditStore;

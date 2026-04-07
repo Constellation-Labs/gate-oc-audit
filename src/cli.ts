@@ -1,7 +1,7 @@
 import type { AuditStore, QueryOptions } from "./store/audit-store.js";
 import type { AuditEvent } from "./types/events.js";
 import type { NotificationService } from "./services/notifications.js";
-import { computeMerkleRoot } from "./services/de-anchor.js";
+import type { SmtService } from "./services/smt-service.js";
 
 export interface AuditListOptions {
   last?: string;
@@ -91,57 +91,76 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
 }
 
 export function cliVerifyHandler(
+  smtService: SmtService,
   store: AuditStore,
   notifier?: NotificationService,
 ): void {
   console.log("Verifying audit trail integrity...\n");
 
-  // 1. Hash chain verification
-  const result = store.verify();
-
-  if (result.valid) {
-    console.log(`OK — ${result.eventsChecked} events verified, chain is intact.`);
+  // 1. SMT verification — check trees and sample proofs
+  const trees = smtService.listTrees();
+  if (trees.length === 0) {
+    console.log("No SMT trees found. Events may not have been committed yet.");
   } else {
-    console.error(`INTEGRITY VIOLATION at sequence #${result.brokenAt}`);
-    console.error(`  ${result.error}`);
-    console.error(`  Checked ${result.eventsChecked} events before failure.`);
-    notifier?.notifyIntegrityViolation(
-      result.brokenAt!,
-      result.error ?? "unknown",
-    ).catch(() => {});
-    process.exitCode = 1;
+    let allValid = true;
+
+    for (const tree of trees) {
+      console.log(`SMT tree "${tree.key}": root=${tree.root.slice(0, 16)}..., ${tree.entryCount} entries, ${tree.size} nodes`);
+
+      // Sample recent events and verify their proofs
+      const recentEvents = store.query({ limit: 10 });
+      let verified = 0;
+      let failed = 0;
+
+      for (const event of recentEvents) {
+        const rawHash = smtService.computeRawHash(event);
+        const proof = smtService.createProof(rawHash, tree.key);
+        if (proof && proof.membership && smtService.verifyProof(proof)) {
+          verified++;
+        } else if (proof && !proof.membership) {
+          // Event not in this tree — may be in a different tree
+        } else {
+          failed++;
+          allValid = false;
+        }
+      }
+
+      if (verified > 0) {
+        console.log(`  Sampled ${verified} event proof(s) — all valid.`);
+      }
+      if (failed > 0) {
+        console.error(`  WARNING: ${failed} proof verification(s) failed.`);
+        notifier?.notifyIntegrityViolation(0, `${failed} SMT proof verification(s) failed`).catch(() => {});
+        process.exitCode = 1;
+      }
+    }
+
+    if (allValid && trees.some((t) => t.entryCount > 0)) {
+      console.log(`\nOK — ${trees.length} tree(s), all sampled proofs valid.`);
+    }
   }
 
-  // 2. DE checkpoint verification (Merkle roots)
+  // 2. DE checkpoint verification
   const checkpoints = store.getCheckpoints();
   if (checkpoints.length > 0) {
     console.log(`\nVerifying ${checkpoints.length} DE checkpoint(s)...`);
     let cpValid = 0;
-    let cpPruned = 0;
     let cpFailed = false;
 
     for (const cp of checkpoints) {
-      const events = store.getEventHashes(cp.sequenceStart, cp.sequenceEnd);
-      if (events.length === 0) {
-        cpPruned++;
-        continue;
-      }
-      const localRoot = computeMerkleRoot(events.map((e) => e.contentHash));
-      if (localRoot !== cp.merkleRoot) {
-        console.error(`  CHECKPOINT ${cp.id}: Merkle root MISMATCH`);
-        console.error(`    Local:  ${localRoot.slice(0, 32)}...`);
-        console.error(`    Stored: ${cp.merkleRoot.slice(0, 32)}...`);
-        notifier?.notifyDeAnchorDivergence(cp.id, localRoot, cp.merkleRoot).catch(() => {});
-        cpFailed = true;
-        process.exitCode = 1;
-      } else {
+      // The smt_root column stores the SMT root at checkpoint time.
+      // We verify it was anchored to DE (not recomputable since SMT root evolves).
+      if (cp.deTxHash) {
         cpValid++;
+      } else {
+        console.error(`  CHECKPOINT ${cp.id}: No DE transaction hash (submission may have failed)`);
+        cpFailed = true;
       }
     }
 
-    console.log(`  ${cpValid} valid, ${cpPruned} pruned (events no longer available)`);
+    console.log(`  ${cpValid} anchored to DE`);
     if (!cpFailed) {
-      console.log("  All checkpoint Merkle roots intact.");
+      console.log("  All checkpoints have DE transaction hashes.");
     }
   }
 }
@@ -157,5 +176,82 @@ export function cliExportHandler(store: AuditStore, format?: string, opts: Audit
     console.log(toCsv(events));
   } else {
     console.log(toJsonLines(events));
+  }
+}
+
+export function cliSmtHandler(
+  smtService: SmtService,
+  action: string,
+  opts: Record<string, string>,
+): void {
+  switch (action) {
+    case "root": {
+      const result = smtService.getRoot(opts.tree);
+      if (!result) {
+        console.log("No SMT tree found.");
+        return;
+      }
+      console.log(`Root: ${result.root}`);
+      console.log(`Entries: ${result.entryCount}`);
+      break;
+    }
+    case "proof": {
+      const proof = smtService.createProof(opts.hash, opts.tree);
+      if (!proof) {
+        console.error("Tree not found or hash not provided.");
+        process.exitCode = 1;
+        return;
+      }
+      console.log(JSON.stringify(proof, null, 2));
+      break;
+    }
+    case "verify-proof": {
+      try {
+        const proof = JSON.parse(opts.proof);
+        const valid = smtService.verifyProof(proof);
+        if (valid) {
+          console.log("OK — proof is valid.");
+        } else {
+          console.error("INVALID — proof verification failed.");
+          process.exitCode = 1;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        console.error(`Failed to parse proof: ${msg}`);
+        process.exitCode = 1;
+      }
+      break;
+    }
+    case "trees": {
+      const trees = smtService.listTrees();
+      if (trees.length === 0) {
+        console.log("No SMT trees.");
+        return;
+      }
+      for (const tree of trees) {
+        console.log(`${tree.key}: root=${tree.root.slice(0, 16)}..., ${tree.entryCount} entries, ${tree.size} nodes`);
+      }
+      break;
+    }
+    case "chain": {
+      const treeKey = opts.tree;
+      if (!treeKey) {
+        console.error("--tree is required for chain command.");
+        process.exitCode = 1;
+        return;
+      }
+      const chain = smtService.getChain(treeKey, opts.conversationId);
+      if (chain.length === 0) {
+        console.log("No chain entries found.");
+        return;
+      }
+      for (const entry of chain) {
+        console.log(`#${entry.seqNo} ${new Date(entry.timestamp * 1000).toISOString()} ${entry.rawHash.slice(0, 16)}... [${entry.auditEventId}]`);
+      }
+      break;
+    }
+    default:
+      console.error(`Unknown SMT action: ${action}`);
+      process.exitCode = 1;
   }
 }

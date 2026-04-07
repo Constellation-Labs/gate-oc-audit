@@ -45,7 +45,7 @@ export class ConfigWatcher {
   private store: AuditStore;
   private scanner: ToolScanner;
   private notifier: NotificationService;
-  private watcher: { close(): Promise<void> } | undefined;
+  private watcher: { close(): Promise<void>; on(event: string, listener: (...args: any[]) => void): any } | undefined;
   private manifest = new Map<string, ManifestEntry>();
   private watchedDirs: WatchedDir[];
   private openclawDir: string;
