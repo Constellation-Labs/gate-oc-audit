@@ -126,15 +126,15 @@ openclaw audit export csv      # CSV format
 openclaw audit export --type tool.invoked --limit 100
 ```
 
-## How the hash chain works
+## How the Sparse Merkle Tree works
 
-Each event's `contentHash` is a SHA-256 digest over its ID, sequence number, previous hash, and all event fields. The first event links to a `GENESIS` sentinel. This means:
+Every audit event is committed as dual-hash (raw + censored) leaves in a Sparse Merkle Tree. The raw hash covers all event fields; the censored hash covers only the event type, category, and timestamp (for privacy-preserving verification).
 
-- Deleting an event breaks the chain (the next event's `previousHash` won't match)
-- Modifying any field changes the hash
-- Reordering events is detectable via sequence numbers embedded in the hash
+- Inserting an event changes the SMT root, creating a tamper-evident chain of state transitions
+- Deleting or modifying an event is detectable via inclusion/exclusion proofs
+- The SMT root can be anchored to the Constellation Digital Evidence network for independent verification
 
-Run `openclaw audit verify` at any time to check chain integrity.
+Run `openclaw audit verify` at any time to check SMT integrity and DE checkpoint consistency.
 
 ## Known security audit warnings
 
@@ -151,7 +151,7 @@ Running `openclaw security audit --deep` may report a `potential-exfiltration` w
 ```bash
 npm install
 npm run build    # Compile TypeScript to dist/
-npm test         # Run the test suite (119 tests)
+npm test         # Run the test suite
 npm run clean    # Remove dist/
 ```
 

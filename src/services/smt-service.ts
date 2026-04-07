@@ -3,7 +3,7 @@
  *
  * Every event appended to the audit store is also committed as dual-hash
  * (raw + censored) SMT leaves. Provides proof generation, epoch pruning,
- * encrypted snapshots, and background checkpointing.
+ * snapshots, and background checkpointing.
  */
 
 import { createRequire } from "module";
