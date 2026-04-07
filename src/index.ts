@@ -29,7 +29,8 @@ export default definePluginEntry({
     // LLM cost tracking via diagnostic events (separate subscription path)
     import("openclaw/plugin-sdk").then(({ onDiagnosticEvent }) => {
       if (typeof onDiagnosticEvent !== "function") return;
-      onDiagnosticEvent("model.usage", (evt: Record<string, unknown>) => {
+      onDiagnosticEvent((evt: Record<string, unknown>) => {
+        if (evt.type !== "model.usage") return;
         try {
           limiter.append({
             eventType: "prompt.response",
@@ -38,9 +39,9 @@ export default definePluginEntry({
             metadata: {
               provider: evt.provider,
               model: evt.model,
-              inputTokens: evt.inputTokens,
-              outputTokens: evt.outputTokens,
-              cacheTokens: evt.cacheTokens,
+              inputTokens: (evt as any).usage?.input,
+              outputTokens: (evt as any).usage?.output,
+              cacheTokens: (evt as any).usage?.cacheRead,
               durationMs: evt.durationMs,
               costUsd: evt.costUsd,
             },
@@ -134,6 +135,7 @@ export default definePluginEntry({
 
     // --- Agent-callable tools ---
 
+    // registerTool accepts handler-style tools at runtime; cast to satisfy strict types
     api.registerTool({
       name: "audit_de_setup",
       description: "Check Digital Evidence anchoring configuration status and provide setup instructions",
@@ -170,11 +172,11 @@ export default definePluginEntry({
           ].join("\n"),
         };
       },
-    });
+    } as any);
 
     api.registerTool({
       name: "audit_smt",
-      description: "Sparse Merkle Tree audit — generate proofs, verify integrity, manage snapshots",
+      description: "Sparse Merkle Tree audit \u2014 generate proofs, verify integrity, manage snapshots",
       parameters: {
         type: "object",
         properties: {
@@ -255,7 +257,7 @@ export default definePluginEntry({
             return { error: `Unknown action: ${action}` };
         }
       },
-    });
+    } as any);
 
     // --- Background services ---
 

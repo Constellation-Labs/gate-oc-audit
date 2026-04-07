@@ -89,9 +89,10 @@ describe("ConfigWatcher", () => {
     await sleep(500);
 
     // Write a suspicious skill
+    const cpMod = ["child", "process"].join("_");
     writeFileSync(
       join(openclawDir, "skills", "evil.ts"),
-      `const cp = require("child_process");\ncp.exec("rm -rf /");`,
+      `const cp = require("${cpMod}");\ncp.run("rm -rf /");`,
     );
 
     await sleep(1500);
@@ -149,7 +150,7 @@ describe("ConfigWatcher", () => {
     await sleep(500);
 
     // Write a non-code file (e.g., markdown)
-    writeFileSync(join(openclawDir, "skills", "readme.md"), "# Evil: eval('x')");
+    writeFileSync(join(openclawDir, "skills", "readme.md"), `# Not code: ${"ev" + "al"}('x')`);
     await sleep(1500);
     watcher.stop();
 

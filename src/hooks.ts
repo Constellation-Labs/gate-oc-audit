@@ -141,7 +141,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           toolName: evt.toolName,
           durationMs: evt.durationMs,
           error: evt.error,
-          truncatedOutput: evt.result?.slice(0, 1024),
+          truncatedOutput: typeof evt.result === "string" ? evt.result.slice(0, 1024) : undefined,
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -164,8 +164,8 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   );
 
   api.on(
-    "tool_denied",
-    (evt, ctx) =>
+    "tool_denied" as any,
+    (evt: { toolName?: string; reason?: string }, ctx: { sessionId?: string }) =>
       safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "tool.denied",
@@ -519,8 +519,8 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   // --- Cron ---
 
   api.on(
-    "cron_executed",
-    (evt, ctx) =>
+    "cron_executed" as any,
+    (evt: { jobId?: string; prompt?: string; durationMs?: number; result?: string }, ctx: { sessionId?: string }) =>
       safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "cron.executed",
@@ -537,8 +537,8 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   );
 
   api.on(
-    "cron_failed",
-    (evt, ctx) =>
+    "cron_failed" as any,
+    (evt: { jobId?: string; error?: string }, ctx: { sessionId?: string }) =>
       safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "cron.failed",
