@@ -6,10 +6,9 @@ import { uuidv7 } from "uuidv7";
 
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
 import { initializeSchema } from "./schema.js";
-import { computeEventHash, canonicalize } from "../util/hash.js";
+import { canonicalize } from "../util/hash.js";
 import { getMachineId } from "../util/machine-id.js";
 
-const GENESIS_HASH = "GENESIS";
 const MAX_METADATA_SIZE = 1024 * 1024; // 1MB
 const MAX_CONTENT_SIZE = 5 * 1024 * 1024; // 5MB
 const DB_FILE_MODE = 0o600;
@@ -21,13 +20,6 @@ export interface QueryOptions {
   eventType?: string;
   category?: string;
   sessionId?: string;
-}
-
-export interface VerifyResult {
-  valid: boolean;
-  eventsChecked: number;
-  brokenAt?: number;
-  error?: string;
 }
 
 interface EventRow {
@@ -42,8 +34,6 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
-  content_hash: string;
-  previous_hash: string;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
@@ -62,8 +52,6 @@ function rowToEvent(row: EventRow): AuditEvent {
     category: row.category as EventCategory,
     description: row.description,
     metadata: JSON.parse(row.metadata),
-    contentHash: row.content_hash,
-    previousHash: row.previous_hash,
     createdAt: row.created_at,
     receivedAt: row.received_at ?? undefined,
     syncedAt: row.synced_at ?? undefined,
@@ -74,7 +62,7 @@ interface CheckpointRow {
   id: string;
   sequence_start: number;
   sequence_end: number;
-  merkle_root: string;
+  smt_root: string;
   event_count: number;
   de_tx_hash: string | null;
   created_at: string;
@@ -84,7 +72,7 @@ export interface CheckpointRecord {
   id: string;
   sequenceStart: number;
   sequenceEnd: number;
-  merkleRoot: string;
+  smtRoot: string;
   eventCount: number;
   deTxHash: string | null;
   createdAt: string;
@@ -95,7 +83,7 @@ function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
     id: row.id,
     sequenceStart: row.sequence_start,
     sequenceEnd: row.sequence_end,
-    merkleRoot: row.merkle_root,
+    smtRoot: row.smt_root,
     eventCount: row.event_count,
     deTxHash: row.de_tx_hash,
     createdAt: row.created_at,
@@ -105,12 +93,9 @@ function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
 export class AuditStore {
   private db: Database.Database;
   private sequence: number;
-  private previousHash: string;
   private machineId: string;
   private degraded = false;
   private insertStmt: Database.Statement;
-  private pendingPruneStmt: Database.Statement;
-  private clearPruneStmt: Database.Statement;
 
   private stmts: {
     getManifests: Database.Statement;
@@ -119,8 +104,6 @@ export class AuditStore {
     getCheckpoints: Database.Statement;
     getLastCheckpoint: Database.Statement;
     insertCheckpoint: Database.Statement;
-    getEventHashesSince: Database.Statement;
-    getEventHashesRange: Database.Statement;
     countSince: Database.Statement;
   };
 
@@ -132,29 +115,21 @@ export class AuditStore {
     this.machineId = getMachineId();
 
     const lastRow = this.db
-      .prepare("SELECT sequence, content_hash FROM audit_events ORDER BY sequence DESC LIMIT 1")
-      .get() as { sequence: number; content_hash: string } | undefined;
+      .prepare("SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1")
+      .get() as { sequence: number } | undefined;
 
     this.sequence = lastRow?.sequence ?? 0;
-    this.previousHash = lastRow?.content_hash ?? GENESIS_HASH;
-
-    this.pendingPruneStmt = this.db.prepare(
-      "SELECT value FROM sync_state WHERE key = 'pending_prune_checkpoint'",
-    );
-    this.clearPruneStmt = this.db.prepare(
-      "DELETE FROM sync_state WHERE key = 'pending_prune_checkpoint'",
-    );
 
     this.insertStmt = this.db.prepare(`
       INSERT INTO audit_events
         (id, sequence, source, machine_id, session_id, org_id, user_id,
-         event_type, category, description, metadata, content_gz, content_hash, previous_hash, created_at)
+         event_type, category, description, metadata, content_gz, created_at)
       VALUES
         (@id, @sequence, @source, @machineId, @sessionId, @orgId, @userId,
-         @eventType, @category, @description, @metadata, @contentGz, @contentHash, @previousHash, @createdAt)
+         @eventType, @category, @description, @metadata, @contentGz, @createdAt)
     `);
 
-    const CP_COLS = "id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at";
+    const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
 
     this.stmts = {
       getManifests: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests"),
@@ -168,12 +143,6 @@ export class AuditStore {
       getLastCheckpoint: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_end DESC LIMIT 1`),
       insertCheckpoint: this.db.prepare(
         `INSERT INTO integrity_checkpoints (${CP_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ),
-      getEventHashesSince: this.db.prepare(
-        "SELECT sequence, content_hash FROM audit_events WHERE sequence >= ? ORDER BY sequence ASC",
-      ),
-      getEventHashesRange: this.db.prepare(
-        "SELECT sequence, content_hash FROM audit_events WHERE sequence >= ? AND sequence <= ? ORDER BY sequence ASC",
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
     };
@@ -222,16 +191,9 @@ export class AuditStore {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
 
-      // If a prune happened since the last append, bake the checkpoint into this
-      // event's metadata so it becomes part of the hash chain and can't be forged.
-      const pendingPrune = this.pendingPruneStmt.get() as { value: string } | undefined;
-      const metadata = pendingPrune
-        ? { ...insert.metadata, _pruneCheckpoint: JSON.parse(pendingPrune.value) }
-        : insert.metadata;
-
       let metadataCanonical: string;
       try {
-        metadataCanonical = canonicalize(metadata);
+        metadataCanonical = canonicalize(insert.metadata);
       } catch {
         console.error("[audit-plugin] Metadata is not serializable, skipping event");
         return undefined;
@@ -244,23 +206,8 @@ export class AuditStore {
         return undefined;
       }
 
-      const previousHash = this.previousHash;
       const nextSequence = this.sequence + 1;
       const createdAt = new Date().toISOString();
-
-      const contentHash = computeEventHash({
-        id,
-        sequence: nextSequence,
-        previousHash,
-        source,
-        sessionId: insert.sessionId,
-        orgId: insert.orgId,
-        userId: insert.userId,
-        eventType: insert.eventType,
-        category: insert.category,
-        description: insert.description,
-        metadataCanonical,
-      });
 
       const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
         ? insert.content
@@ -280,17 +227,10 @@ export class AuditStore {
         description: insert.description,
         metadata: metadataCanonical,
         contentGz,
-        contentHash,
-        previousHash,
         createdAt,
       });
 
-      if (pendingPrune) {
-        this.clearPruneStmt.run();
-      }
-
       this.sequence = nextSequence;
-      this.previousHash = contentHash;
       this.degraded = false;
 
       return {
@@ -304,9 +244,7 @@ export class AuditStore {
         eventType: insert.eventType,
         category: insert.category,
         description: insert.description,
-        metadata,
-        contentHash,
-        previousHash,
+        metadata: insert.metadata,
         createdAt,
       };
     } catch (err) {
@@ -341,8 +279,8 @@ export class AuditStore {
     const rows = this.db
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
-                event_type, category, description, metadata, content_hash,
-                previous_hash, created_at, received_at, synced_at
+                event_type, category, description, metadata,
+                created_at, received_at, synced_at
          FROM audit_events ${where} ORDER BY sequence DESC LIMIT @limit OFFSET @offset`,
       )
       .all({ ...params, limit, offset }) as EventRow[];
@@ -352,95 +290,6 @@ export class AuditStore {
 
   count(): number {
     return (this.db.prepare("SELECT COUNT(*) as c FROM audit_events").get() as { c: number }).c;
-  }
-
-  verify(): VerifyResult {
-    const iter = this.db
-      .prepare(
-        "SELECT id, sequence, source, session_id, org_id, user_id, event_type, category, description, metadata, content_hash, previous_hash FROM audit_events ORDER BY sequence ASC",
-      )
-      .iterate() as IterableIterator<{
-      id: string;
-      sequence: number;
-      source: string;
-      session_id: string | null;
-      org_id: string | null;
-      user_id: string | null;
-      event_type: string;
-      category: string;
-      description: string;
-      metadata: string;
-      content_hash: string;
-      previous_hash: string;
-    }>;
-
-    // Soft checkpoint in sync_state (covers the window between prune and next append)
-    const softCheckpoint = this.db
-      .prepare("SELECT value FROM sync_state WHERE key = 'last_prune_before_seq'")
-      .get() as { value: string } | undefined;
-    const softPruneSeq = softCheckpoint ? parseInt(softCheckpoint.value, 10) : undefined;
-
-    let i = 0;
-    let prevContentHash: string | undefined;
-
-    for (const row of iter) {
-      if (i === 0 && row.previous_hash !== GENESIS_HASH) {
-        // Chain doesn't start at GENESIS — check for prune evidence.
-        // Hard proof: _pruneCheckpoint baked into this event's metadata (tamper-evident).
-        // Soft proof: last_prune_before_seq in sync_state (covers pre-append window).
-        const meta = JSON.parse(row.metadata);
-        const hardCheckpoint = meta._pruneCheckpoint?.prunedBeforeSeq;
-        const hasProof =
-          (hardCheckpoint != null && hardCheckpoint <= row.sequence) ||
-          (softPruneSeq != null && softPruneSeq === row.sequence);
-
-        if (!hasProof) {
-          return {
-            valid: false,
-            eventsChecked: 1,
-            brokenAt: row.sequence,
-            error: `First event does not link to GENESIS and no matching prune checkpoint found`,
-          };
-        }
-      }
-
-      const expectedHash = computeEventHash({
-        id: row.id,
-        sequence: row.sequence,
-        previousHash: row.previous_hash,
-        source: row.source,
-        sessionId: row.session_id ?? undefined,
-        orgId: row.org_id ?? undefined,
-        userId: row.user_id ?? undefined,
-        eventType: row.event_type,
-        category: row.category,
-        description: row.description,
-        metadataCanonical: row.metadata,
-      });
-
-      if (row.content_hash !== expectedHash) {
-        return {
-          valid: false,
-          eventsChecked: i + 1,
-          brokenAt: row.sequence,
-          error: `Content hash mismatch at sequence ${row.sequence}`,
-        };
-      }
-
-      if (prevContentHash !== undefined && row.previous_hash !== prevContentHash) {
-        return {
-          valid: false,
-          eventsChecked: i + 1,
-          brokenAt: row.sequence,
-          error: `Chain link broken at sequence ${row.sequence}`,
-        };
-      }
-
-      prevContentHash = row.content_hash;
-      i++;
-    }
-
-    return { valid: true, eventsChecked: i };
   }
 
   prune(maxAgeDays: number, maxSizeMb: number): number {
@@ -461,7 +310,6 @@ export class AuditStore {
       // Size-based pruning — prefer synced events, then oldest overall
       if (this.getDbSizeMb() > maxSizeMb) {
         let deleted = 0;
-        // First pass: prune synced events
         do {
           const result = this.db
             .prepare(
@@ -474,7 +322,6 @@ export class AuditStore {
           totalDeleted += deleted;
         } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
 
-        // Second pass: prune oldest regardless of sync status
         if (this.getDbSizeMb() > maxSizeMb) {
           do {
             const result = this.db
@@ -490,35 +337,17 @@ export class AuditStore {
         }
       }
 
-      // Write a pending prune checkpoint — the next append() will bake it into
-      // the hash chain, making it tamper-evident.
+      // Archive orphaned checkpoints whose events have been pruned
       if (totalDeleted > 0) {
         const minAfter = this.db
           .prepare("SELECT MIN(sequence) as seq FROM audit_events")
           .get() as { seq: number | null } | undefined;
-
-        // If all events were pruned, the next append will be at sequence + 1
         const nextExpectedSeq = minAfter?.seq ?? this.sequence + 1;
-        const checkpoint = {
-          prunedBeforeSeq: nextExpectedSeq,
-          prunedAt: new Date().toISOString(),
-          eventsDeleted: totalDeleted,
-        };
-        this.db.prepare(
-          "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_prune_checkpoint', ?)",
-        ).run(JSON.stringify(checkpoint));
 
-        // Also keep the seq for verify() to use before the next append lands
-        this.db.prepare(
-          "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_prune_before_seq', ?)",
-        ).run(String(nextExpectedSeq));
-
-        // Archive orphaned checkpoints whose events have been pruned,
-        // preserving their DE transaction hashes for independent verification.
         this.db.prepare(`
           INSERT OR IGNORE INTO checkpoint_archive
-            (id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at, archived_at)
-          SELECT id, sequence_start, sequence_end, merkle_root, event_count, de_tx_hash, created_at, ?
+            (id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at, archived_at)
+          SELECT id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at, ?
           FROM integrity_checkpoints
           WHERE sequence_end < ?
         `).run(new Date().toISOString(), nextExpectedSeq);
@@ -570,16 +399,8 @@ export class AuditStore {
     return row ? rowToCheckpoint(row) : undefined;
   }
 
-  insertCheckpoint(id: string, seqStart: number, seqEnd: number, merkleRoot: string, eventCount: number, deTxHash: string | null): void {
-    this.stmts.insertCheckpoint.run(id, seqStart, seqEnd, merkleRoot, eventCount, deTxHash, new Date().toISOString());
-  }
-
-  /** Returns sequences and content hashes for events from seqStart, ordered ascending. */
-  getEventHashes(seqStart: number, seqEnd?: number): Array<{ sequence: number; contentHash: string }> {
-    const rows = seqEnd != null
-      ? this.stmts.getEventHashesRange.all(seqStart, seqEnd) as Array<{ sequence: number; content_hash: string }>
-      : this.stmts.getEventHashesSince.all(seqStart) as Array<{ sequence: number; content_hash: string }>;
-    return rows.map((r) => ({ sequence: r.sequence, contentHash: r.content_hash }));
+  insertCheckpoint(id: string, seqStart: number, seqEnd: number, smtRoot: string, eventCount: number, deTxHash: string | null): void {
+    this.stmts.insertCheckpoint.run(id, seqStart, seqEnd, smtRoot, eventCount, deTxHash, new Date().toISOString());
   }
 
   /** Returns the count of events at or after a given sequence. */

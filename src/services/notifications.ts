@@ -105,8 +105,8 @@ export class NotificationService {
             text: [
               "*Digital Evidence anchor divergence*",
               `*Checkpoint:* \`${checkpointId}\``,
-              `*Local root:* \`${localRoot.slice(0, 16)}...\``,
-              `*DE root:* \`${deRoot.slice(0, 16)}...\``,
+              `*Local root:* \`${localRoot.length > 20 ? localRoot.slice(0, 16) + "..." : localRoot}\``,
+              `*DE root:* \`${deRoot.length > 20 ? deRoot.slice(0, 16) + "..." : deRoot}\``,
               `*Detected:* ${new Date().toISOString()}`,
             ].join("\n"),
           },

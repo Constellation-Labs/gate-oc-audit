@@ -31,7 +31,7 @@ describe("initializeSchema", () => {
       .all() as { name: string }[];
 
     const names = tables.map((t) => t.name);
-    for (const expected of ["audit_events", "config_manifests", "integrity_checkpoints", "sync_state"]) {
+    for (const expected of ["audit_events", "config_manifests", "integrity_checkpoints", "checkpoint_archive"]) {
       assert.ok(names.includes(expected), `Missing table: ${expected}`);
     }
   });

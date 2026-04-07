@@ -1,6 +1,7 @@
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEvent, AuditEventInsert } from "./types/events.js";
 import type { DeAnchorService } from "./services/de-anchor.js";
+import type { SmtService } from "./services/smt-service.js";
 
 const DEFAULT_MAX_EVENTS_PER_SEC = 100;
 const DEFAULT_BUFFER_CAPACITY = 10_000;
@@ -21,6 +22,7 @@ interface CoalescedGroup {
 export class RateLimiter {
   private store: AuditStore;
   private deAnchor: DeAnchorService | undefined;
+  private smtService: SmtService | undefined;
   private maxPerSec: number;
   private bufferCapacity: number;
   private buffer: AuditEventInsert[] = [];
@@ -42,6 +44,10 @@ export class RateLimiter {
     this.deAnchor = deAnchor;
   }
 
+  setSmtService(smt: SmtService): void {
+    this.smtService = smt;
+  }
+
   append(insert: AuditEventInsert): AuditEvent | undefined {
     const now = Date.now();
 
@@ -55,7 +61,10 @@ export class RateLimiter {
     if (this.windowEvents < this.maxPerSec && this.buffer.length === 0) {
       this.windowEvents++;
       const result = this.store.append(insert);
-      if (result) this.deAnchor?.notifyAppend();
+      if (result) {
+        this.smtService?.onEventAppended(result);
+        this.deAnchor?.notifyAppend();
+      }
       return result;
     }
 
@@ -91,7 +100,10 @@ export class RateLimiter {
     let drained = 0;
     while (drained < this.buffer.length && this.windowEvents < this.maxPerSec) {
       const result = this.store.append(this.buffer[drained]);
-      if (result) this.deAnchor?.notifyAppend();
+      if (result) {
+        this.smtService?.onEventAppended(result);
+        this.deAnchor?.notifyAppend();
+      }
       this.windowEvents++;
       drained++;
     }
@@ -196,7 +208,11 @@ export class RateLimiter {
       this.drainTimer = undefined;
     }
     for (const event of this.buffer) {
-      this.store.append(event);
+      const result = this.store.append(event);
+      if (result) {
+        this.smtService?.onEventAppended(result);
+        this.deAnchor?.notifyAppend();
+      }
     }
     this.buffer = [];
   }

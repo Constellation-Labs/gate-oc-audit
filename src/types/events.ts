@@ -112,8 +112,6 @@ export interface AuditEvent {
   category: EventCategory;
   description: string;
   metadata: Record<string, unknown>;
-  contentHash: string;
-  previousHash: string;
   createdAt: string;
   receivedAt?: string;
   syncedAt?: string;

@@ -21,8 +21,6 @@ const DDL = [
     description   TEXT NOT NULL,
     metadata      TEXT NOT NULL,
     content_gz    BLOB,
-    content_hash  TEXT NOT NULL,
-    previous_hash TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     received_at   TEXT,
     synced_at     TEXT
@@ -49,7 +47,7 @@ const DDL = [
     id              TEXT PRIMARY KEY,
     sequence_start  INTEGER NOT NULL,
     sequence_end    INTEGER NOT NULL,
-    merkle_root     TEXT NOT NULL,
+    smt_root        TEXT NOT NULL,
     event_count     INTEGER NOT NULL,
     de_tx_hash      TEXT,
     created_at      TEXT NOT NULL
@@ -59,16 +57,11 @@ const DDL = [
     id              TEXT PRIMARY KEY,
     sequence_start  INTEGER NOT NULL,
     sequence_end    INTEGER NOT NULL,
-    merkle_root     TEXT NOT NULL,
+    smt_root        TEXT NOT NULL,
     event_count     INTEGER NOT NULL,
     de_tx_hash      TEXT,
     created_at      TEXT NOT NULL,
     archived_at     TEXT NOT NULL
-  )`,
-
-  `CREATE TABLE IF NOT EXISTS sync_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
   )`,
 
   `CREATE TABLE IF NOT EXISTS schema_version (
@@ -77,7 +70,7 @@ const DDL = [
   )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 export function initializeSchema(db: Database.Database): void {
   for (const pragma of PRAGMAS) {
@@ -94,8 +87,9 @@ export function initializeSchema(db: Database.Database): void {
 
     if (current < CURRENT_SCHEMA_VERSION) {
       // v2: Added checkpoint_archive table (CREATE IF NOT EXISTS handles it).
-      // Future migrations go here, gated by version number:
-      // if (current < 3) { db.exec("ALTER TABLE ..."); }
+
+      // v3: Removed hash chain (content_hash, previous_hash columns),
+      //     renamed merkle_root to smt_root, removed sync_state table.
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());
