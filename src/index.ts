@@ -11,9 +11,9 @@ import { ToolScanner } from "./scanner.js";
 import { RateLimiter } from "./rate-limiter.js";
 
 export default definePluginEntry({
-  id: "@constellation-network/openclaw-audit-plugin",
-  name: "Constellation Audit Trail",
-  description: "Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
+  id: "constellation-audit-plugin",
+  name: "@constellation-network/openclaw-audit-plugin",
+  description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
   register(api) {
     const config = api.pluginConfig ?? {};

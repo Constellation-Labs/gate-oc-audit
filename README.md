@@ -54,7 +54,7 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `agent.start` | `before_agent_start` | prompt length, trigger |
+| `agent.start` | `before_model_resolve` | prompt length, trigger |
 | `agent.end` | `agent_end` | duration (ms), success |
 | `agent.compaction_start` | `before_compaction` | message count, compacting count, token count |
 | `agent.compaction_end` | `after_compaction` | message count, compacted count, token count |

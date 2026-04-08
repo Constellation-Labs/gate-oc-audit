@@ -17,7 +17,7 @@ export type EventType =
   | "tool.invoked"
   | "tool.result"
   | "tool.persisted"
-  | "tool.denied"
+
   | "message.received"
   | "message.sending"
   | "message.sent"
@@ -37,8 +37,7 @@ export type EventType =
   | "session.end"
   | "gateway.start"
   | "gateway.stop"
-  | "cron.executed"
-  | "cron.failed"
+
   | "config.tool_changed"
   | "config.skill_changed"
   | "config.soul_changed"
@@ -89,14 +88,6 @@ export interface ToolMetadata {
   exitCode?: number;
   durationMs?: number;
   truncatedOutput?: string;
-  error?: string;
-}
-
-export interface CronMetadata {
-  jobId: string;
-  prompt?: string;
-  durationMs?: number;
-  result?: string;
   error?: string;
 }
 

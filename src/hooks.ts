@@ -64,14 +64,22 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
 
   api.on(
     "before_model_resolve",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      safeAppend(store, limiter, {
+        sessionId: ctx.sessionId,
+        eventType: "agent.start",
+        category: "agent",
+        description: "Agent run started",
+        metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
+      });
       safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
         eventType: "prompt.model_resolve",
         category: "prompt",
         description: "Model resolution requested",
         metadata: { promptLength: evt.prompt?.length },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -84,21 +92,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
         category: "prompt",
         description: "Prompt build started",
         metadata: { promptLength: evt.prompt?.length, messageCount: evt.messages?.length },
-      }),
-    { priority: AUDIT_PRIORITY },
-  );
-
-  // --- Agent lifecycle ---
-
-  api.on(
-    "before_agent_start",
-    (evt, ctx) =>
-      safeAppend(store, limiter, {
-        sessionId: ctx.sessionId,
-        eventType: "agent.start",
-        category: "agent",
-        description: "Agent run started",
-        metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       }),
     { priority: AUDIT_PRIORITY },
   );
@@ -158,22 +151,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
         metadata: {
           toolName: evt.toolName,
           isSynthetic: evt.isSynthetic,
-        },
-      }),
-    { priority: AUDIT_PRIORITY },
-  );
-
-  api.on(
-    "tool_denied" as any,
-    (evt: { toolName?: string; reason?: string }, ctx: { sessionId?: string }) =>
-      safeAppend(store, limiter, {
-        sessionId: ctx.sessionId,
-        eventType: "tool.denied",
-        category: "tool",
-        description: `Tool denied: ${evt.toolName}`,
-        metadata: {
-          toolName: evt.toolName,
-          reason: evt.reason,
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -511,42 +488,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           outcome: evt.outcome,
           error: evt.error,
           runId: evt.runId,
-        },
-      }),
-    { priority: AUDIT_PRIORITY },
-  );
-
-  // --- Cron ---
-
-  api.on(
-    "cron_executed" as any,
-    (evt: { jobId?: string; prompt?: string; durationMs?: number; result?: string }, ctx: { sessionId?: string }) =>
-      safeAppend(store, limiter, {
-        sessionId: ctx.sessionId,
-        eventType: "cron.executed",
-        category: "cron",
-        description: `Cron executed: ${evt.jobId ?? "unknown"}`,
-        metadata: {
-          jobId: evt.jobId,
-          prompt: evt.prompt?.slice(0, 500),
-          durationMs: evt.durationMs,
-          result: evt.result?.slice(0, 1024),
-        },
-      }),
-    { priority: AUDIT_PRIORITY },
-  );
-
-  api.on(
-    "cron_failed" as any,
-    (evt: { jobId?: string; error?: string }, ctx: { sessionId?: string }) =>
-      safeAppend(store, limiter, {
-        sessionId: ctx.sessionId,
-        eventType: "cron.failed",
-        category: "cron",
-        description: `Cron failed: ${evt.jobId ?? "unknown"}`,
-        metadata: {
-          jobId: evt.jobId,
-          error: evt.error,
         },
       }),
     { priority: AUDIT_PRIORITY },

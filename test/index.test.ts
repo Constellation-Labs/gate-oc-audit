@@ -46,8 +46,8 @@ describe("plugin entry point", () => {
   });
 
   it("exports id, name, description, register", () => {
-    assert.equal(plugin.id, "@constellation-network/openclaw-audit-plugin");
-    assert.equal(plugin.name, "Constellation Audit Trail");
+    assert.equal(plugin.id, "constellation-audit-plugin");
+    assert.equal(plugin.name, "@constellation-network/openclaw-audit-plugin");
     assert.ok(plugin.description);
     assert.equal(typeof plugin.register, "function");
   });
@@ -56,8 +56,8 @@ describe("plugin entry point", () => {
     const api = createMockApi(testDbPath);
     plugin.register(api as any);
 
-    assert.equal(api.registeredHooks.length, 29);
-    assert.ok(api.registeredHooks.includes("before_agent_start"));
+    assert.equal(api.registeredHooks.length, 25);
+    assert.ok(api.registeredHooks.includes("before_model_resolve"));
     assert.ok(api.registeredHooks.includes("llm_output"));
 
     assert.equal(api.registeredCli.length, 1);
