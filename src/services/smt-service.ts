@@ -3,7 +3,7 @@
  *
  * Every event appended to the audit store is also committed as dual-hash
  * (raw + censored) SMT leaves. Provides proof generation, epoch pruning,
- * encrypted snapshots, and background checkpointing.
+ * snapshots, and background checkpointing.
  */
 
 import { createRequire } from "module";
@@ -15,9 +15,9 @@ import {
   EPOCH_DURATION_MS,
 } from "../store/smt-logic.js";
 import {
-  encryptSnapshot,
-  decryptSnapshot,
-  type EncryptedSnapshot,
+  createSnapshot as createSmtSnapshot,
+  restoreSnapshot as restoreSmtSnapshot,
+  type Snapshot,
 } from "./smt-snapshot.js";
 import type { AuditEvent } from "../types/events.js";
 import type {
@@ -67,10 +67,6 @@ function resolveConfig(config: Record<string, unknown>): SmtConfig {
       typeof smt.storageCapBytes === "number"
         ? smt.storageCapBytes
         : 500 * 1024 * 1024,
-    snapshotPassphrase:
-      typeof smt.snapshotPassphrase === "string"
-        ? smt.snapshotPassphrase
-        : "",
   };
 }
 
@@ -327,16 +323,14 @@ export class SmtService {
 
   createSnapshot(
     treeKey: string,
-    passphrase?: string,
-  ): EncryptedSnapshot | { error: string } {
+  ): Snapshot | { error: string } {
     const store = this.manager.get(treeKey);
     if (!store) return { error: `Tree ${treeKey} not found` };
 
-    const pp = passphrase || this.config.snapshotPassphrase || "default-audit-key";
     const nodes = store.getNodes();
     const root = store.getRoot();
 
-    return encryptSnapshot(nodes, root, pp, {
+    return createSmtSnapshot(nodes, root, {
       treeKey,
       entryCount: store.getEntryCount(),
       nodeCount: nodes.size,
@@ -347,13 +341,10 @@ export class SmtService {
 
   restoreSnapshot(
     treeKey: string,
-    snapshot: EncryptedSnapshot,
-    passphrase?: string,
+    snapshot: Snapshot,
   ): { root: string; nodeCount: number } | { error: string } {
     try {
-      const pp =
-        passphrase || this.config.snapshotPassphrase || "default-audit-key";
-      const restored = decryptSnapshot(snapshot, pp);
+      const restored = restoreSmtSnapshot(snapshot);
       const store = this.manager.getOrCreate(treeKey);
       store.restoreFromState(restored.nodes, restored.root);
       return { root: restored.root, nodeCount: restored.nodes.size };
