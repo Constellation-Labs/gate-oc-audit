@@ -45,6 +45,10 @@
         "type": "string",
         "description": "SECP256K1 private key (64-char hex) for signing fingerprints. If omitted, an ephemeral key is generated."
       },
+      "deWalletKeyFile": {
+        "type": "string",
+        "description": "Path to file containing a SECP256K1 private key (64-char hex) for wallet-based x402 payment auth. Derives orgId and tenantId from wallet address automatically."
+      },
       "x402Payment": {
         "type": "string",
         "description": "x402 micropayment header value (alternative to DE API key)"

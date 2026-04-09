@@ -197,14 +197,21 @@ export default (() => {
       parameters: {},
       handler: () => {
         const hasApiKey = typeof config.deApiKey === "string" && config.deApiKey.length > 0;
-        const hasX402 = typeof config.x402Payment === "string" && config.x402Payment.length > 0;
+        const hasWalletKeyFile = typeof config.deWalletKeyFile === "string" && config.deWalletKeyFile.length > 0;
 
-        if (hasApiKey || hasX402) {
-          const method = hasApiKey ? "API key" : "x402 micropayment";
+        if (hasApiKey) {
           return {
             status: "configured",
-            method,
-            message: `Digital Evidence anchoring is active via ${method}.`,
+            method: "API key",
+            message: "Digital Evidence anchoring is active via API key.",
+          };
+        }
+
+        if (hasWalletKeyFile) {
+          return {
+            status: "configured",
+            method: "x402 wallet",
+            message: "Digital Evidence anchoring is active via x402 wallet payments.",
           };
         }
 
@@ -213,15 +220,15 @@ export default (() => {
           message: [
             "Digital Evidence anchoring is not configured.",
             "",
-            "To enable tamper-evident audit trail anchoring:",
-            "1. Create a free account at https://evidence.constellationnetwork.io",
-            "2. Generate an API key from your dashboard",
-            "3. Add it to your plugin config:",
+            "Option 1: API key (simplest)",
+            "  1. Create account at https://evidence.constellationnetwork.io",
+            "  2. Generate an API key from your dashboard",
+            '  3. Add to config: "deApiKey": "your-key", "deOrgId": "...", "deTenantId": "..."',
             "",
-            '   "deApiKey": "your-api-key-here"',
-            "",
-            "Alternatively, use x402 micropayments with a Constellation wallet:",
-            '   "x402Payment": "your-payment-header"',
+            "Option 2: Wallet key file (x402 micropayments)",
+            "  1. Create a file containing your SECP256K1 private key (64-char hex)",
+            '  2. Add to config: "deWalletKeyFile": "/path/to/wallet.key"',
+            "  3. orgId and tenantId are derived automatically from the wallet address",
             "",
             "Anchoring cost: ~2 credits per fingerprint (negligible).",
           ].join("\n"),

@@ -15,9 +15,11 @@
   },
   "dependencies": {
     "@constellation-network/digital-evidence-sdk": "^0.3.2",
+    "@constellation-network/digital-evidence-sdk-x402": "^0.1.1",
     "@zk-kit/smt": "^1.0.2",
     "better-sqlite3": "^12.8.0",
     "chokidar": "^4.0.0",
+    "ethers": "^6.16.0",
     "level": "^8.0.1",
     "uuidv7": "^1.0.2"
   },
