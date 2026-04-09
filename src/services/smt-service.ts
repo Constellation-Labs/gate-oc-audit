@@ -7,7 +7,8 @@
  */
 
 import { createRequire } from "module";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFile, readFile } from "node:fs/promises";
+
 import { join } from "node:path";
 import { TreeManager, type TreeInfo } from "../store/smt-tree-manager.js";
 import type { SmtProof } from "../store/smt-store.js";
@@ -86,7 +87,8 @@ export class SmtService {
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
   private restored = false;
-  private firstCheckpointDone = false;
+  private needsFirstCheckpoint = true;
+  private suppressCheckpoints = false;
 
   constructor(config: Record<string, unknown>) {
     this.config = resolveConfig(config);
@@ -102,7 +104,7 @@ export class SmtService {
     this.restored = true;
     try {
       await this.manager.restoreAll(this.config.checkpointDir);
-      this.restoreMetadata();
+      await this.restoreMetadata();
       const trees = this.manager.listTrees();
       console.error(`[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`);
     } catch (err) {
@@ -147,7 +149,7 @@ export class SmtService {
     // Final checkpoint on shutdown — await to ensure LevelDB write completes
     try {
       await this.manager.checkpointAll(this.config.checkpointDir);
-      this.checkpointMetadata();
+      await this.checkpointMetadata();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:smt] Final checkpoint failed:", msg);
@@ -159,11 +161,7 @@ export class SmtService {
   }
 
   private estimateStorageBytes(): number {
-    let total = 0;
-    for (const { size } of this.manager.listTrees()) {
-      total += size * BYTES_PER_NODE;
-    }
-    return total;
+    return this.manager.totalNodeCount() * BYTES_PER_NODE;
   }
 
   /**
@@ -182,27 +180,8 @@ export class SmtService {
       const timestamp = Math.floor(new Date(event.createdAt).getTime() / 1000);
       const conversationId = event.sessionId ?? this.machineId;
 
-      const rawHash = sdk.hashDocument(
-        "raw:" +
-          sdk.canonicalize({
-            id: event.id,
-            sequence: event.sequence,
-            eventType: event.eventType,
-            category: event.category,
-            description: event.description,
-            metadata: event.metadata,
-          }),
-      );
-
-      const censoredHash = sdk.hashDocument(
-        "censored:" +
-          sdk.canonicalize({
-            id: event.id,
-            eventType: event.eventType,
-            category: event.category,
-            createdAt: event.createdAt,
-          }),
-      );
+      const rawHash = this.computeRawHash(event);
+      const censoredHash = this.computeCensoredHash(event);
 
       const result = insertEntry(store, {
         treeKey,
@@ -222,8 +201,8 @@ export class SmtService {
         return;
       }
 
-      if (!this.firstCheckpointDone) {
-        this.firstCheckpointDone = true;
+      if (this.needsFirstCheckpoint && !this.suppressCheckpoints) {
+        this.needsFirstCheckpoint = false;
         this.checkpoint();
       }
     } catch (err) {
@@ -391,16 +370,16 @@ export class SmtService {
    * Used on startup to rebuild the tree when no checkpoint exists.
    */
   replayEvents(events: AuditEvent[]): number {
-    this.firstCheckpointDone = true; // suppress per-event checkpoints during replay
-    let count = 0;
+    this.suppressCheckpoints = true;
     for (const event of events) {
       this.onEventAppended(event);
-      count++;
     }
-    if (count > 0) {
+    this.suppressCheckpoints = false;
+    this.needsFirstCheckpoint = false;
+    if (events.length > 0) {
       this.checkpoint();
     }
-    return count;
+    return events.length;
   }
 
   getCurrentSmtRoot(treeKey?: string): string | null {
@@ -409,7 +388,7 @@ export class SmtService {
     return store?.getRoot() ?? null;
   }
 
-  private checkpointMetadata(): void {
+  private async checkpointMetadata(): Promise<void> {
     try {
       const data = {
         seqNos: Array.from(this.seqNos),
@@ -421,18 +400,22 @@ export class SmtService {
         ),
       };
       const filePath = join(this.config.checkpointDir, "_metadata.json");
-      writeFileSync(filePath, JSON.stringify(data));
+      await writeFile(filePath, JSON.stringify(data));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
     }
   }
 
-  private restoreMetadata(): void {
+  private async restoreMetadata(): Promise<void> {
+    let raw: string;
     try {
-      const filePath = join(this.config.checkpointDir, "_metadata.json");
-      if (!existsSync(filePath)) return;
-      const raw = readFileSync(filePath, "utf-8");
+      raw = await readFile(join(this.config.checkpointDir, "_metadata.json"), "utf-8");
+    } catch {
+      return; // No metadata file yet
+    }
+
+    try {
       const data = JSON.parse(raw);
 
       if (Array.isArray(data.seqNos)) {
@@ -475,9 +458,9 @@ export class SmtService {
       const store = this.manager.get(treeKey);
       if (!store) continue;
 
-      for (const [epoch] of treeEpochs) {
-        if (epoch >= cutoff) continue;
+      const expiredEpochs = Array.from(treeEpochs.keys()).filter((e) => e < cutoff);
 
+      for (const epoch of expiredEpochs) {
         const hashes = treeEpochs.get(epoch) || [];
         const proofs = hashes.map((h) => store.createProof(h));
 

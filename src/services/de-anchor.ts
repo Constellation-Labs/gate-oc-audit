@@ -6,39 +6,8 @@ import type { NotificationService } from "./notifications.js";
 import type { SmtService } from "./smt-service.js";
 
 const require2 = createRequire(import.meta.url);
-const dedCore = require2("@constellation-network/digital-evidence-sdk") as {
-  generateFingerprint: (options: DedGenerateOptions, privateKey: string) => Promise<unknown>;
-  generateKeyPair: () => { privateKey: string; publicKey: string };
-  hashDocument: (content: string | Buffer) => string;
-};
-const { DedClient } = require2("@constellation-network/digital-evidence-sdk/network") as {
-  DedClient: new (config: { baseUrl: string; apiKey?: string; timeout?: number }) => DedClientInstance;
-};
-
-interface DedClientInstance {
-  fingerprints: {
-    submit: (submissions: unknown[]) => Promise<DedSubmitResult[]>;
-    getByHash: (hash: string) => Promise<{ data: unknown }>;
-  };
-}
-
-interface DedSubmitResult {
-  eventId?: string;
-  hash?: string;
-  accepted: boolean;
-  errors?: string[];
-}
-
-interface DedGenerateOptions {
-  orgId: string;
-  tenantId: string;
-  eventId: string;
-  documentId: string;
-  documentRef: string;
-  timestamp: Date;
-  includeMetadata?: boolean;
-  tags?: Record<string, string>;
-}
+const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
+const { DedClient } = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
 
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -62,7 +31,7 @@ export class DeAnchorService {
   private eventThreshold: number;
   private intervalMs: number;
 
-  private dedClient: DedClientInstance | undefined;
+  private dedClient: InstanceType<typeof DedClient> | undefined;
 
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
@@ -85,19 +54,21 @@ export class DeAnchorService {
     this.intervalMs =
       typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS;
 
-    // Signing key — use configured key or generate an ephemeral one
-    if (typeof config.deSigningKey === "string" && config.deSigningKey.length > 0) {
-      this.deSigningKey = config.deSigningKey;
-    } else {
-      const kp = dedCore.generateKeyPair();
-      this.deSigningKey = kp.privateKey;
-      console.error("[audit-plugin:de-anchor] No signing key configured, generated ephemeral key pair");
-    }
-
-    // Initialize DedClient eagerly so anchorIfNeeded() works without start()
+    // Only initialize signing + client when API key anchoring is configured.
+    // x402Payment is not yet supported by DedClient — treat it as disabled.
     if (this.deApiKey && this.deOrgId && this.deTenantId) {
+      if (typeof config.deSigningKey === "string" && config.deSigningKey.length > 0) {
+        this.deSigningKey = config.deSigningKey;
+      } else {
+        const kp = dedCore.generateKeyPair();
+        this.deSigningKey = kp.privateKey;
+        console.error("[audit-plugin:de-anchor] No signing key configured, generated ephemeral key pair");
+      }
+
       const baseUrl = this.deApiUrl.replace(/\/v1\/?$/, "");
       this.dedClient = new DedClient({ baseUrl, apiKey: this.deApiKey, timeout: FETCH_TIMEOUT_MS });
+    } else {
+      this.deSigningKey = "";
     }
   }
 
@@ -152,10 +123,7 @@ export class DeAnchorService {
       const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
 
       const eventCount = this.store.countSince(startSeq);
-      if (eventCount < this.eventThreshold) {
-        console.error(`[audit-plugin:de-anchor] Below threshold (${eventCount}/${this.eventThreshold}), skipping`);
-        return;
-      }
+      if (eventCount < this.eventThreshold) return;
 
       // Use SMT root as the integrity fingerprint
       const smtRoot = this.smtService?.getCurrentSmtRoot();
@@ -189,22 +157,26 @@ export class DeAnchorService {
 
     try {
       const checkpoints = this.store.getCheckpoints();
+      const client = this.dedClient;
+      const notifier = this.notifier;
 
-      for (const cp of checkpoints) {
-        if (cp.deTxHash) {
-          try {
-            const detail = await this.dedClient.fingerprints.getByHash(cp.smtRoot);
-            if (!detail) {
-              console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
-              this.notifier
-                ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
-                .catch(() => {});
+      await Promise.all(
+        checkpoints
+          .filter((cp) => cp.deTxHash)
+          .map(async (cp) => {
+            try {
+              const detail = await client.fingerprints.getByHash(cp.smtRoot);
+              if (!detail) {
+                console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
+                notifier
+                  ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
+                  .catch(() => {});
+              }
+            } catch {
+              // Don't fail startup on DE API errors
             }
-          } catch {
-            // Don't fail startup on DE API errors
-          }
-        }
-      }
+          }),
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:de-anchor] Checkpoint verification error:", message);

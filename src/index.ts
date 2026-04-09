@@ -10,11 +10,12 @@ import { SmtService } from "./services/smt-service.js";
 import { ToolScanner } from "./scanner.js";
 import { RateLimiter } from "./rate-limiter.js";
 
-let _registered = false;
-let _store: AuditStore | undefined;
-let _limiter: RateLimiter | undefined;
+export default (() => {
+  let _registered = false;
+  let _store: AuditStore | undefined;
+  let _limiter: RateLimiter | undefined;
 
-export default definePluginEntry({
+  return definePluginEntry({
   id: "constellation-audit-plugin",
   name: "constellation-audit-plugin",
   description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
@@ -182,6 +183,11 @@ export default definePluginEntry({
     notifier = new NotificationService(webhookUrl);
     const scanner = new ToolScanner();
 
+    // Capture as const for use in closures below — avoids non-null assertions
+    const activeStore = store;
+    const activeSmt = smtService;
+    const activeNotifier = notifier;
+
     // --- Agent-callable tools ---
 
     // registerTool accepts handler-style tools at runtime; cast to satisfy strict types
@@ -312,27 +318,27 @@ export default definePluginEntry({
 
     console.error(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
 
-    const retention = new RetentionService(store!, config);
-    const configWatcher = new ConfigWatcher(store!, scanner, notifier!, config);
-    const deAnchor = new DeAnchorService(store!, config, notifier!);
-    deAnchor.setSmtService(smtService!);
+    const retention = new RetentionService(activeStore, config);
+    const configWatcher = new ConfigWatcher(activeStore, scanner, activeNotifier, config);
+    const deAnchor = new DeAnchorService(activeStore, config, activeNotifier);
+    deAnchor.setSmtService(activeSmt);
     limiter.setDeAnchor(deAnchor);
 
     api.registerService({
       id: "constellation-audit-plugin:smt",
       async start() {
         console.error("[audit-plugin] Service smt start() called");
-        await smtService!.start();
+        await activeSmt.start();
         // Replay stored events if the SMT tree is empty (e.g. missed checkpoint)
-        if (smtService!.listTrees().length === 0 && store!.count() > 0) {
-          const total = store!.count();
-          const events = store!.query({ limit: total }).reverse();
-          const replayed = smtService!.replayEvents(events);
+        const eventCount = activeStore.count();
+        if (activeSmt.listTrees().length === 0 && eventCount > 0) {
+          const events = activeStore.query({ limit: eventCount, order: "asc" });
+          const replayed = activeSmt.replayEvents(events);
           console.error(`[audit-plugin:smt] Replayed ${replayed} stored event(s) into SMT`);
         }
       },
       async stop() {
-        await smtService!.stop();
+        await activeSmt.stop();
       },
     });
 
@@ -344,7 +350,7 @@ export default definePluginEntry({
       stop() {
         retention.stop();
         limiter.flush();
-        store!.close();
+        activeStore.close();
       },
     });
 
@@ -368,4 +374,5 @@ export default definePluginEntry({
       },
     });
   },
-});
+  });
+})();

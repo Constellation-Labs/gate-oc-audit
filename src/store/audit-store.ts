@@ -25,6 +25,7 @@ export interface QueryOptions {
   eventType?: string;
   category?: string;
   sessionId?: string;
+  order?: "asc" | "desc";
 }
 
 interface EventRow {
@@ -280,13 +281,14 @@ export class AuditStore {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
+    const order = opts.order === "asc" ? "ASC" : "DESC";
 
     const rows = this.db
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
                 event_type, category, description, metadata,
                 created_at, received_at, synced_at
-         FROM audit_events ${where} ORDER BY sequence DESC LIMIT @limit OFFSET @offset`,
+         FROM audit_events ${where} ORDER BY sequence ${order} LIMIT @limit OFFSET @offset`,
       )
       .all({ ...params, limit, offset }) as EventRow[];
 
