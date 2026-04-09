@@ -10,20 +10,142 @@ import { SmtService } from "./services/smt-service.js";
 import { ToolScanner } from "./scanner.js";
 import { RateLimiter } from "./rate-limiter.js";
 
+let _registered = false;
+let _store: AuditStore | undefined;
+let _limiter: RateLimiter | undefined;
+
 export default definePluginEntry({
   id: "constellation-audit-plugin",
-  name: "@constellation-network/openclaw-audit-plugin",
+  name: "constellation-audit-plugin",
   description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
   register(api) {
     const config = api.pluginConfig ?? {};
-    const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
-    const store = new AuditStore(dbPath);
 
-    const smtService = new SmtService(config);
+    // --- CLI (registered first so cli-metadata mode can discover commands) ---
+
+    // Lazily initialized — only created when a CLI action actually runs
+    let store: AuditStore | undefined;
+    let smtService: SmtService | undefined;
+    let notifier: NotificationService | undefined;
+
+    function getStore(): AuditStore {
+      if (!store) {
+        const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
+        store = new AuditStore(dbPath);
+      }
+      return store;
+    }
+
+    function getSmtService(): SmtService {
+      if (!smtService) smtService = new SmtService(config);
+      return smtService;
+    }
+
+    function getNotifier(): NotificationService {
+      if (!notifier) {
+        const webhookUrl = typeof config.notificationWebhook === "string"
+          ? config.notificationWebhook
+          : undefined;
+        notifier = new NotificationService(webhookUrl);
+      }
+      return notifier;
+    }
+
+    api.registerCli(({ program }) => {
+      const audit = program.command("audit").description("View and manage audit trail");
+
+      audit
+        .command("list")
+        .description("View recent audit events")
+        .option("--last <n>", "Show last N events")
+        .option("--type <type>", "Filter by event type")
+        .option("--category <category>", "Filter by category")
+        .option("--session <id>", "Filter by session ID")
+        .option("--limit <n>", "Max events to return")
+        .option("--offset <n>", "Skip first N events")
+        .action((opts) => cliAuditHandler(getStore(), opts));
+
+      audit
+        .command("verify")
+        .description("Verify SMT integrity and DE checkpoints")
+        .action(() => cliVerifyHandler(getSmtService(), getStore(), getNotifier()));
+
+      audit
+        .command("export [format]")
+        .description("Export audit logs as JSON or CSV")
+        .option("--type <type>", "Filter by event type")
+        .option("--category <category>", "Filter by category")
+        .option("--session <id>", "Filter by session ID")
+        .option("--limit <n>", "Max events to export")
+        .action((format: string | undefined, opts: Record<string, string>) =>
+          cliExportHandler(getStore(), format, opts),
+        );
+
+      // SMT subcommands
+      const smt = audit.command("smt").description("Sparse Merkle Tree operations");
+
+      smt
+        .command("root")
+        .description("Show current SMT root")
+        .option("--tree <key>", "Tree identifier")
+        .action((opts) => cliSmtHandler(getSmtService(), "root", opts));
+
+      smt
+        .command("proof <hash>")
+        .description("Generate inclusion/exclusion proof")
+        .option("--tree <key>", "Tree identifier")
+        .action((hash: string, opts) => cliSmtHandler(getSmtService(), "proof", { ...opts, hash }));
+
+      smt
+        .command("verify")
+        .description("Verify an SMT proof")
+        .requiredOption("--proof <json>", "Proof JSON")
+        .action((opts) => cliSmtHandler(getSmtService(), "verify-proof", opts));
+
+      smt
+        .command("trees")
+        .description("List all SMT trees")
+        .action(() => cliSmtHandler(getSmtService(), "trees", {}));
+
+      smt
+        .command("chain <conversationId>")
+        .description("Show conversation chain")
+        .option("--tree <key>", "Tree identifier")
+        .action((conversationId: string, opts) =>
+          cliSmtHandler(getSmtService(), "chain", { ...opts, conversationId }),
+        );
+    }, {
+      descriptors: [
+        { name: "audit", description: "View and manage audit trail", hasSubcommands: true },
+      ],
+    });
+
+    // In cli-metadata mode, only command descriptors are needed
+    if (api.registrationMode === "cli-metadata") return;
+
+    // Guard against double creation of services — openclaw may load the plugin multiple times.
+    // Hooks must be re-registered on every api instance because events may be dispatched
+    // through any of them.
+    if (_registered) {
+      if (_store && _limiter) {
+        registerHooks(api, _store, _limiter);
+      }
+      console.error("[audit-plugin] Already registered, re-registered hooks on new api instance");
+      return;
+    }
+    _registered = true;
+
+    // --- Full registration: hooks, services, tools ---
+
+    const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
+    store = new AuditStore(dbPath);
+    smtService = new SmtService(config);
 
     const limiter = new RateLimiter(store, config);
     limiter.setSmtService(smtService);
+    _store = store;
+    _limiter = limiter;
     registerHooks(api, store, limiter);
 
     // LLM cost tracking via diagnostic events (separate subscription path)
@@ -54,84 +176,11 @@ export default definePluginEntry({
       // onDiagnosticEvent not available in this SDK version
     });
 
-    // --- Shared services ---
-
     const webhookUrl = typeof config.notificationWebhook === "string"
       ? config.notificationWebhook
       : undefined;
-    const notifier = new NotificationService(webhookUrl);
+    notifier = new NotificationService(webhookUrl);
     const scanner = new ToolScanner();
-
-    // --- CLI ---
-
-    api.registerCli(({ program }) => {
-      const audit = program.command("audit").description("View and manage audit trail");
-
-      audit
-        .command("list")
-        .description("View recent audit events")
-        .option("--last <n>", "Show last N events")
-        .option("--type <type>", "Filter by event type")
-        .option("--category <category>", "Filter by category")
-        .option("--session <id>", "Filter by session ID")
-        .option("--limit <n>", "Max events to return")
-        .option("--offset <n>", "Skip first N events")
-        .action((opts) => cliAuditHandler(store, opts));
-
-      audit
-        .command("verify")
-        .description("Verify SMT integrity and DE checkpoints")
-        .action(() => cliVerifyHandler(smtService, store, notifier));
-
-      audit
-        .command("export [format]")
-        .description("Export audit logs as JSON or CSV")
-        .option("--type <type>", "Filter by event type")
-        .option("--category <category>", "Filter by category")
-        .option("--session <id>", "Filter by session ID")
-        .option("--limit <n>", "Max events to export")
-        .action((format: string | undefined, opts: Record<string, string>) =>
-          cliExportHandler(store, format, opts),
-        );
-
-      // SMT subcommands
-      const smt = audit.command("smt").description("Sparse Merkle Tree operations");
-
-      smt
-        .command("root")
-        .description("Show current SMT root")
-        .option("--tree <key>", "Tree identifier")
-        .action((opts) => cliSmtHandler(smtService, "root", opts));
-
-      smt
-        .command("proof <hash>")
-        .description("Generate inclusion/exclusion proof")
-        .option("--tree <key>", "Tree identifier")
-        .action((hash: string, opts) => cliSmtHandler(smtService, "proof", { ...opts, hash }));
-
-      smt
-        .command("verify")
-        .description("Verify an SMT proof")
-        .requiredOption("--proof <json>", "Proof JSON")
-        .action((opts) => cliSmtHandler(smtService, "verify-proof", opts));
-
-      smt
-        .command("trees")
-        .description("List all SMT trees")
-        .action(() => cliSmtHandler(smtService, "trees", {}));
-
-      smt
-        .command("chain <conversationId>")
-        .description("Show conversation chain")
-        .option("--tree <key>", "Tree identifier")
-        .action((conversationId: string, opts) =>
-          cliSmtHandler(smtService, "chain", { ...opts, conversationId }),
-        );
-    }, {
-      descriptors: [
-        { name: "audit", description: "View and manage audit trail", hasSubcommands: true },
-      ],
-    });
 
     // --- Agent-callable tools ---
 
@@ -199,58 +248,59 @@ export default definePluginEntry({
         required: ["action"],
       },
       handler: (params: Record<string, unknown>) => {
+        const smt = getSmtService();
         const action = params.action as string;
         const treeKey = params.tree as string | undefined;
 
         switch (action) {
           case "root": {
-            const result = smtService.getRoot(treeKey);
+            const result = smt.getRoot(treeKey);
             return result ?? { error: "Tree not found" };
           }
           case "proof": {
             const hash = params.hash as string;
             if (!hash) return { error: "hash is required" };
-            const proof = smtService.createProof(hash, treeKey);
+            const proof = smt.createProof(hash, treeKey);
             return proof ? { proof } : { error: "Tree not found" };
           }
           case "verify": {
             const proof = params.proof as any;
             if (!proof) return { error: "proof is required" };
-            return { valid: smtService.verifyProof(proof) };
+            return { valid: smt.verifyProof(proof) };
           }
           case "trees": {
-            return { trees: smtService.listTrees() };
+            return { trees: smt.listTrees() };
           }
           case "stats": {
-            const result = smtService.getRoot(treeKey);
+            const result = smt.getRoot(treeKey);
             return result ?? { error: "Tree not found" };
           }
           case "chain": {
             if (!treeKey) return { error: "tree is required" };
             const convId = params.conversationId as string;
             if (!convId) return { error: "conversationId is required" };
-            return { chain: smtService.getChain(treeKey, convId) };
+            return { chain: smt.getChain(treeKey, convId) };
           }
           case "prune_epoch": {
             if (!treeKey) return { error: "tree is required" };
             const epoch = params.epoch as number;
             if (epoch === undefined) return { error: "epoch is required" };
-            return smtService.pruneEpoch(treeKey, epoch);
+            return smt.pruneEpoch(treeKey, epoch);
           }
           case "exported_proofs": {
             if (!treeKey) return { error: "tree is required" };
             const epoch = params.epoch as number | undefined;
-            return smtService.getExportedProofs(treeKey, epoch);
+            return smt.getExportedProofs(treeKey, epoch);
           }
           case "snapshot": {
             if (!treeKey) return { error: "tree is required" };
-            return smtService.createSnapshot(treeKey);
+            return smt.createSnapshot(treeKey);
           }
           case "restore_snapshot": {
             if (!treeKey) return { error: "tree is required" };
             const snapshot = params.snapshot as any;
             if (!snapshot) return { error: "snapshot is required" };
-            return smtService.restoreSnapshot(treeKey, snapshot);
+            return smt.restoreSnapshot(treeKey, snapshot);
           }
           default:
             return { error: `Unknown action: ${action}` };
@@ -260,36 +310,46 @@ export default definePluginEntry({
 
     // --- Background services ---
 
-    const retention = new RetentionService(store, config);
-    const configWatcher = new ConfigWatcher(store, scanner, notifier, config);
-    const deAnchor = new DeAnchorService(store, config, notifier);
-    deAnchor.setSmtService(smtService);
+    console.error(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
+
+    const retention = new RetentionService(store!, config);
+    const configWatcher = new ConfigWatcher(store!, scanner, notifier!, config);
+    const deAnchor = new DeAnchorService(store!, config, notifier!);
+    deAnchor.setSmtService(smtService!);
     limiter.setDeAnchor(deAnchor);
 
     api.registerService({
-      id: "@constellation-network/openclaw-audit-plugin:smt",
+      id: "constellation-audit-plugin:smt",
       async start() {
-        await smtService.start();
+        console.error("[audit-plugin] Service smt start() called");
+        await smtService!.start();
+        // Replay stored events if the SMT tree is empty (e.g. missed checkpoint)
+        if (smtService!.listTrees().length === 0 && store!.count() > 0) {
+          const total = store!.count();
+          const events = store!.query({ limit: total }).reverse();
+          const replayed = smtService!.replayEvents(events);
+          console.error(`[audit-plugin:smt] Replayed ${replayed} stored event(s) into SMT`);
+        }
       },
       async stop() {
-        await smtService.stop();
+        await smtService!.stop();
       },
     });
 
     api.registerService({
-      id: "@constellation-network/openclaw-audit-plugin:retention",
+      id: "constellation-audit-plugin:retention",
       start() {
         retention.start();
       },
       stop() {
         retention.stop();
         limiter.flush();
-        store.close();
+        store!.close();
       },
     });
 
     api.registerService({
-      id: "@constellation-network/openclaw-audit-plugin:config-watcher",
+      id: "constellation-audit-plugin:config-watcher",
       async start() {
         await configWatcher.start();
       },
@@ -299,7 +359,7 @@ export default definePluginEntry({
     });
 
     api.registerService({
-      id: "@constellation-network/openclaw-audit-plugin:de-anchor",
+      id: "constellation-audit-plugin:de-anchor",
       async start() {
         await deAnchor.start();
       },

@@ -1,6 +1,6 @@
 {
-  "id": "@constellation-network/openclaw-audit-plugin",
-  "name": "Constellation Audit Trail",
+  "id": "constellation-audit-plugin",
+  "name": "@constellation-network/openclaw-audit-plugin",
   "description": "Tamper-evident audit trail with Digital Evidence anchoring for AI coding agent activity",
   "configSchema": {
     "type": "object",
@@ -32,6 +32,18 @@
       "deApiUrl": {
         "type": "string",
         "description": "Digital Evidence API URL (default: https://de-api.constellationnetwork.io/v1)"
+      },
+      "deOrgId": {
+        "type": "string",
+        "description": "Digital Evidence organization ID (UUID) for fingerprint submission"
+      },
+      "deTenantId": {
+        "type": "string",
+        "description": "Digital Evidence tenant ID (UUID) for fingerprint submission"
+      },
+      "deSigningKey": {
+        "type": "string",
+        "description": "SECP256K1 private key (64-char hex) for signing fingerprints. If omitted, an ephemeral key is generated."
       },
       "x402Payment": {
         "type": "string",

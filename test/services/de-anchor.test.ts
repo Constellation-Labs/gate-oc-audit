@@ -58,7 +58,7 @@ describe("DeAnchorService", () => {
       const server = createServer((req, res) => {
         received = true;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ hash: "de-tx-hash-123" }));
+        res.end(JSON.stringify([{ accepted: true, hash: "de-tx-hash-123", eventId: "evt-1", errors: [] }]));
       });
 
       await new Promise<void>((r) => server.listen(0, r));
@@ -70,6 +70,8 @@ describe("DeAnchorService", () => {
         const service = new DeAnchorService(store, {
           deApiKey: "test-key",
           deApiUrl: `http://localhost:${port}/v1`,
+          deOrgId: "11111111-1111-1111-1111-111111111111",
+          deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
           deEventThreshold: 5,
         });
 
@@ -107,6 +109,8 @@ describe("DeAnchorService", () => {
         const service = new DeAnchorService(store, {
           deApiKey: "test-key",
           deApiUrl: `http://localhost:${port}/v1`,
+          deOrgId: "11111111-1111-1111-1111-111111111111",
+          deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
           deEventThreshold: 5,
         });
 

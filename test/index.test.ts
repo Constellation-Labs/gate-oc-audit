@@ -33,8 +33,8 @@ function createMockApi(dbPath: string) {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     runtime: {},
     registrationMode: "full" as const,
-    id: "@constellation-network/openclaw-audit-plugin",
-    name: "Constellation Audit Trail",
+    id: "constellation-audit-plugin",
+    name: "@constellation-network/openclaw-audit-plugin",
     source: "test",
     resolvePath: (p: string) => p,
   };
@@ -47,7 +47,7 @@ describe("plugin entry point", () => {
 
   it("exports id, name, description, register", () => {
     assert.equal(plugin.id, "constellation-audit-plugin");
-    assert.equal(plugin.name, "@constellation-network/openclaw-audit-plugin");
+    assert.equal(plugin.name, "constellation-audit-plugin");
     assert.ok(plugin.description);
     assert.equal(typeof plugin.register, "function");
   });
