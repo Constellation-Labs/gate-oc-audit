@@ -43,18 +43,36 @@ describe("DeAnchorService", () => {
 
   describe("anchorIfNeeded", () => {
     it("does not anchor when below event threshold", async () => {
-      for (let i = 0; i < 5; i++) insert(store);
-
-      const service = new DeAnchorService(store, {
-        deApiKey: "test-key",
-        deEventThreshold: 100,
+      let received = false;
+      const server = createServer((req, res) => {
+        received = true;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ accepted: true, hash: "should-not-reach", eventId: "evt-1", errors: [] }]));
       });
 
-      const mockSmtService = { getCurrentSmtRoot: () => "a".repeat(64) } as any;
-      service.setSmtService(mockSmtService);
+      await new Promise<void>((r) => server.listen(0, r));
+      const port = (server.address() as { port: number }).port;
 
-      await service.anchorIfNeeded();
-      assert.equal(store.getLastCheckpoint(), undefined);
+      try {
+        for (let i = 0; i < 5; i++) insert(store);
+
+        const service = new DeAnchorService(store, {
+          deApiKey: "test-key",
+          deApiUrl: `http://localhost:${port}/v1`,
+          deOrgId: "11111111-1111-1111-1111-111111111111",
+          deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          deEventThreshold: 100,
+        });
+
+        const mockSmtService = { getCurrentSmtRoot: () => "a".repeat(64) } as any;
+        service.setSmtService(mockSmtService);
+
+        await service.anchorIfNeeded();
+        assert.equal(store.getLastCheckpoint(), undefined);
+        assert.ok(!received, "DE API should not have been called when below threshold");
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()));
+      }
     });
 
     it("anchors when threshold reached", async () => {

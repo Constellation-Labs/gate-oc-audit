@@ -103,10 +103,12 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 | `deOrgId` | — | Organization UUID (required with API key) |
 | `deTenantId` | — | Tenant UUID (required with API key) |
 | `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
-| `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints |
+| `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints (see note below) |
 | `deApiUrl` | `https://de-api.constellationnetwork.io/v1` | DE API endpoint |
 | `deEventThreshold` | `100` | Events to accumulate before anchoring |
 | `deIntervalMs` | `300000` | Max time between anchoring attempts (ms) |
+
+> **Ephemeral signing keys:** When `deSigningKey` is not configured, a new key pair is generated on each startup. This means fingerprints from different sessions are signed with different keys and cannot be verified against a single identity. Pin `deSigningKey` in your config if you need cross-session verifiable provenance.
 
 ## What gets recorded
 

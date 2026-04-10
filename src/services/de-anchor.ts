@@ -143,6 +143,11 @@ export class DeAnchorService {
     }
   }
 
+  /** Whether a submit function was successfully initialized (API key or wallet). */
+  isActive(): boolean {
+    return !!this.submitFn;
+  }
+
   setSmtService(smt: SmtService): void {
     this.smtService = smt;
   }
