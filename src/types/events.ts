@@ -24,7 +24,6 @@ export type EventType =
   | "message.claimed"
   | "message.dispatched"
   | "message.write"
-  | "agent.start"
   | "agent.end"
   | "agent.compaction_start"
   | "agent.compaction_end"

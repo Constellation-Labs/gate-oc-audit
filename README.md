@@ -118,7 +118,7 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `prompt.model_resolve` | `before_model_resolve` | prompt length |
+| `prompt.model_resolve` | `before_model_resolve` | prompt length, trigger |
 | `prompt.build` | `before_prompt_build` | prompt length, message count |
 | `prompt.input` | `llm_input` | provider, model, prompt length, history message count, images count, content (gzipped) |
 | `prompt.response` | `llm_output` | provider, model, token usage (input/output/cache read/write), content (gzipped) |
@@ -127,7 +127,6 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `agent.start` | `before_model_resolve` | prompt length, trigger |
 | `agent.end` | `agent_end` | duration (ms), success |
 | `agent.compaction_start` | `before_compaction` | message count, compacting count, token count |
 | `agent.compaction_end` | `after_compaction` | message count, compacted count, token count |

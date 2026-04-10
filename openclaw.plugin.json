@@ -49,10 +49,6 @@
         "type": "string",
         "description": "Path to file containing a SECP256K1 private key (64-char hex) for wallet-based x402 payment auth. Derives orgId and tenantId from wallet address automatically."
       },
-      "x402Payment": {
-        "type": "string",
-        "description": "x402 micropayment header value (alternative to DE API key)"
-      },
       "deEventThreshold": {
         "type": "number",
         "description": "Number of events to accumulate before anchoring to DE (default: 100)"

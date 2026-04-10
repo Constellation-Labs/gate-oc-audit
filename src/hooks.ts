@@ -67,17 +67,10 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
     (evt, ctx) => {
       safeAppend(store, limiter, {
         sessionId: ctx.sessionId,
-        eventType: "agent.start",
-        category: "agent",
-        description: "Agent run started",
-        metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
-      });
-      safeAppend(store, limiter, {
-        sessionId: ctx.sessionId,
         eventType: "prompt.model_resolve",
         category: "prompt",
         description: "Model resolution requested",
-        metadata: { promptLength: evt.prompt?.length },
+        metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       });
     },
     { priority: AUDIT_PRIORITY },

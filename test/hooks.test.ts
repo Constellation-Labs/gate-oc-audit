@@ -173,19 +173,19 @@ describe("registerHooks", () => {
     }
   });
 
-  describe("before_model_resolve emits agent.start", () => {
-    it("records agent.start with prompt length and trigger", () => {
+  describe("before_model_resolve emits prompt.model_resolve", () => {
+    it("records prompt.model_resolve with prompt length and trigger", () => {
       fireHook(api, "before_model_resolve",
         { prompt: "hello world" },
         { sessionId: "s1", trigger: "user" },
       );
 
       const events = getEvents(dbPath);
-      const startEvent = events.find((e: any) => e.event_type === "agent.start");
-      assert.ok(startEvent, "expected agent.start event");
-      assert.equal(startEvent.category, "agent");
-      assert.equal(startEvent.session_id, "s1");
-      const meta = JSON.parse(startEvent.metadata);
+      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
+      assert.ok(resolveEvent, "expected prompt.model_resolve event");
+      assert.equal(resolveEvent.category, "prompt");
+      assert.equal(resolveEvent.session_id, "s1");
+      const meta = JSON.parse(resolveEvent.metadata);
       assert.equal(meta.promptLength, 11);
       assert.equal(meta.trigger, "user");
     });
@@ -193,8 +193,8 @@ describe("registerHooks", () => {
     it("handles missing optional prompt", () => {
       fireHook(api, "before_model_resolve", {}, { sessionId: "s1" });
       const events = getEvents(dbPath);
-      const startEvent = events.find((e: any) => e.event_type === "agent.start");
-      const meta = JSON.parse(startEvent.metadata);
+      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
+      const meta = JSON.parse(resolveEvent.metadata);
       assert.ok(!("promptLength" in meta));
     });
   });

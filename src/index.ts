@@ -13,11 +13,11 @@ import { RateLimiter } from "./rate-limiter.js";
 export default (() => {
   let _registered = false;
   let _store: AuditStore | undefined;
-  let _limiter: RateLimiter | undefined;
+let _limiter: RateLimiter | undefined;
 
   return definePluginEntry({
   id: "constellation-audit-plugin",
-  name: "constellation-audit-plugin",
+  name: "@constellation-network/openclaw-audit-plugin",
   description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
   register(api) {
@@ -197,13 +197,24 @@ export default (() => {
       parameters: {},
       handler: () => {
         const hasApiKey = typeof config.deApiKey === "string" && config.deApiKey.length > 0;
+        const hasOrgId = typeof config.deOrgId === "string" && config.deOrgId.length > 0;
+        const hasTenantId = typeof config.deTenantId === "string" && config.deTenantId.length > 0;
         const hasWalletKeyFile = typeof config.deWalletKeyFile === "string" && config.deWalletKeyFile.length > 0;
 
-        if (hasApiKey) {
+        if (hasApiKey && hasOrgId && hasTenantId) {
           return {
             status: "configured",
             method: "API key",
             message: "Digital Evidence anchoring is active via API key.",
+          };
+        }
+
+        if (hasApiKey) {
+          const missing = [!hasOrgId && "deOrgId", !hasTenantId && "deTenantId"].filter(Boolean).join(", ");
+          return {
+            status: "misconfigured",
+            method: "API key",
+            message: `Digital Evidence anchoring is disabled: deApiKey is set but ${missing} missing.`,
           };
         }
 

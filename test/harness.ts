@@ -126,7 +126,7 @@ async function main() {
   assertSmt("session_start", 2);
 
   fire(api, "before_model_resolve", { prompt: "Explain how the audit plugin works" }, ctx);
-  assertSmt("before_model_resolve (agent.start + model_resolve)", 4);
+  assertSmt("before_model_resolve (model_resolve)", 3);
 
   fire(api, "before_prompt_build", {
     prompt: "Explain how the audit plugin works",
