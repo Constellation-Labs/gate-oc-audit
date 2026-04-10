@@ -14,15 +14,19 @@ That's it. The plugin automatically starts recording audit events when your agen
 
 ### Configuration (optional)
 
+Add config under `plugins.entries` in your OpenClaw configuration:
+
 ```json
 {
-  "plugins": ["@constellation-network/openclaw-audit-plugin"],
-  "plugin": {
-    "@constellation-network/openclaw-audit-plugin": {
-      "config": {
-        "dbPath": "~/.openclaw/audit.db",
-        "localRetentionDays": 365,
-        "localMaxSizeMb": 500
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "dbPath": "~/.openclaw/audit.db",
+          "localRetentionDays": 365,
+          "localMaxSizeMb": 500
+        }
       }
     }
   }
@@ -34,6 +38,75 @@ That's it. The plugin automatically starts recording audit events when your agen
 | `dbPath` | `~/.openclaw/audit.db` | Path to the SQLite database file |
 | `localRetentionDays` | `365` | Delete events older than this many days |
 | `localMaxSizeMb` | `500` | Prune oldest events when the DB exceeds this size |
+
+### Digital Evidence anchoring
+
+Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.constellationnetwork.io) network for independent, tamper-proof verification. Two authentication methods are supported:
+
+**Option 1 — API key**
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.deApiKey "your-api-key"
+openclaw config set plugins.entries.constellation-audit-plugin.config.deOrgId "your-org-uuid"
+openclaw config set plugins.entries.constellation-audit-plugin.config.deTenantId "your-tenant-uuid"
+```
+
+Or in the config JSON:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "deApiKey": "your-api-key",
+          "deOrgId": "your-org-uuid",
+          "deTenantId": "your-tenant-uuid"
+        }
+      }
+    }
+  }
+}
+```
+
+Create a free account at https://evidence.constellationnetwork.io and generate an API key from your dashboard.
+
+**Option 2 — Wallet key file (x402 micropayments)**
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.deWalletKeyFile "/path/to/wallet.key"
+```
+
+Or in the config JSON:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "deWalletKeyFile": "/path/to/wallet.key"
+        }
+      }
+    }
+  }
+}
+```
+
+The file should contain a SECP256K1 private key (64-char hex). Organization and tenant IDs are derived automatically from the wallet address — no registration required. Submission uses [x402](https://www.x402.org/) micropayments (USDC on Base) via the `@constellation-network/digital-evidence-sdk-x402` package.
+
+| Option | Default | Description |
+|---|---|---|
+| `deApiKey` | — | API key for DE anchoring |
+| `deOrgId` | — | Organization UUID (required with API key) |
+| `deTenantId` | — | Tenant UUID (required with API key) |
+| `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
+| `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints |
+| `deApiUrl` | `https://de-api.constellationnetwork.io/v1` | DE API endpoint |
+| `deEventThreshold` | `100` | Events to accumulate before anchoring |
+| `deIntervalMs` | `300000` | Max time between anchoring attempts (ms) |
 
 ## What gets recorded
 
