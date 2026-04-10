@@ -1,5 +1,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { SmtService } from "../../src/services/smt-service.js";
 import type { AuditEvent } from "../../src/types/events.js";
 
@@ -142,6 +145,64 @@ describe("SmtService", () => {
     assert.doesNotThrow(() => {
       service.onEventAppended({} as any);
     });
+  });
+
+  it("exportedProofs survive checkpoint/restore cycle", async () => {
+    const checkpointDir = mkdtempSync(join(tmpdir(), "smt-export-test-"));
+
+    try {
+      const svc1 = new SmtService({
+        smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+      });
+      await svc1.start();
+
+      // Insert events so there's a tree with entries in an epoch
+      for (let i = 0; i < 3; i++) {
+        svc1.onEventAppended(makeEvent({ sequence: i + 1 }));
+      }
+
+      const treeKey = svc1.listTrees()[0].key;
+      // Events land in the current epoch (hour-based: Date.now() / 3_600_000)
+      const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+      const result = svc1.pruneEpoch(treeKey, currentEpoch);
+      assert.ok(!("error" in result) && result.pruned > 0, "should have pruned current epoch");
+      const prunedEpoch = currentEpoch;
+
+      // Verify proofs exist before shutdown
+      const before = svc1.getExportedProofs(treeKey, prunedEpoch!) as any;
+      assert.ok(before.proofCount > 0, "proofs should exist before shutdown");
+
+      await svc1.stop();
+
+      // Restore into a fresh service instance
+      const svc2 = new SmtService({
+        smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+      });
+      await svc2.start();
+
+      const after = svc2.getExportedProofs(treeKey, prunedEpoch!) as any;
+      assert.equal(after.proofCount, before.proofCount, "exportedProofs should survive restart");
+
+      await svc2.stop();
+    } finally {
+      rmSync(checkpointDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replayEvents supports batched fetcher callback", () => {
+    const events = Array.from({ length: 5 }, (_, i) =>
+      makeEvent({ sequence: i + 1 }),
+    );
+
+    const fetcher = (offset: number, limit: number) =>
+      events.slice(offset, offset + limit);
+
+    const replayed = service.replayEvents(fetcher, events.length);
+    assert.equal(replayed, 5);
+
+    const trees = service.listTrees();
+    assert.equal(trees.length, 1);
+    assert.ok(trees[0].entryCount >= 5);
   });
 
 });

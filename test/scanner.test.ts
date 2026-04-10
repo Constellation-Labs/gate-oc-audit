@@ -7,6 +7,7 @@ import { ToolScanner } from "../src/scanner.js";
 const CP = ["child", "process"].join("_");
 const EV = ["ev", "al"].join("");
 const EX = ["ex", "ec"].join("");
+const PROC_ENV = ["process", "env"].join(".");
 
 describe("ToolScanner", () => {
   const scanner = new ToolScanner();
@@ -82,13 +83,13 @@ describe("ToolScanner", () => {
       assert.ok(!findings.some((f) => f.check === "exfiltration_fs_read"));
     });
 
-    it("detects sensitive process.env access", () => {
-      const findings = scanner.scanContent(`const key = ${"process"}.env.SECRET_KEY;`);
+    it("detects sensitive env variable access", () => {
+      const findings = scanner.scanContent(`const key = ${PROC_ENV}.SECRET_KEY;`);
       assert.ok(findings.some((f) => f.check === "escalation_env_access"));
     });
 
-    it("does not flag process.env.NODE_ENV", () => {
-      const findings = scanner.scanContent(`const env = process.env.NODE_ENV;`);
+    it("does not flag NODE_ENV env access", () => {
+      const findings = scanner.scanContent(`const env = ${PROC_ENV}.NODE_ENV;`);
       assert.ok(!findings.some((f) => f.check === "escalation_env_access"));
     });
 

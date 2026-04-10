@@ -33,6 +33,14 @@ export class TreeManager {
     return this.trees.get(treeKey);
   }
 
+  totalNodeCount(): number {
+    let total = 0;
+    for (const store of this.trees.values()) {
+      total += store.getSize();
+    }
+    return total;
+  }
+
   listTrees(): TreeInfo[] {
     const result: TreeInfo[] = [];
     for (const [key, store] of this.trees) {

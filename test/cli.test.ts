@@ -38,6 +38,22 @@ function captureConsole(fn: () => void): { stdout: string; stderr: string } {
   return { stdout: logs.join("\n"), stderr: errors.join("\n") };
 }
 
+async function captureConsoleAsync(fn: () => Promise<void>): Promise<{ stdout: string; stderr: string }> {
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
+  return { stdout: logs.join("\n"), stderr: errors.join("\n") };
+}
+
 describe("CLI: audit list", () => {
   let dbPath: string;
   let store: AuditStore;
@@ -99,6 +115,7 @@ describe("CLI: audit verify", () => {
   let store: AuditStore;
 
   const mockSmtService = {
+    ensureReady: () => Promise.resolve(),
     listTrees: () => [],
     getRoot: () => null,
     createProof: () => null,
@@ -117,10 +134,10 @@ describe("CLI: audit verify", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("reports status for empty SMT", () => {
+  it("reports status for empty SMT", async () => {
     for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
 
-    const { stdout } = captureConsole(() => cliVerifyHandler(mockSmtService, store));
+    const { stdout } = await captureConsoleAsync(() => cliVerifyHandler(mockSmtService, store));
     assert.ok(stdout.includes("No SMT trees found"));
   });
 });

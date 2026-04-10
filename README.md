@@ -14,15 +14,19 @@ That's it. The plugin automatically starts recording audit events when your agen
 
 ### Configuration (optional)
 
+Add config under `plugins.entries` in your OpenClaw configuration:
+
 ```json
 {
-  "plugins": ["@constellation-network/openclaw-audit-plugin"],
-  "plugin": {
-    "@constellation-network/openclaw-audit-plugin": {
-      "config": {
-        "dbPath": "~/.openclaw/audit.db",
-        "localRetentionDays": 365,
-        "localMaxSizeMb": 500
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "dbPath": "~/.openclaw/audit.db",
+          "localRetentionDays": 365,
+          "localMaxSizeMb": 500
+        }
       }
     }
   }
@@ -35,6 +39,77 @@ That's it. The plugin automatically starts recording audit events when your agen
 | `localRetentionDays` | `365` | Delete events older than this many days |
 | `localMaxSizeMb` | `500` | Prune oldest events when the DB exceeds this size |
 
+### Digital Evidence anchoring
+
+Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.constellationnetwork.io) network for independent, tamper-proof verification. Two authentication methods are supported:
+
+**Option 1 — API key**
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.deApiKey "your-api-key"
+openclaw config set plugins.entries.constellation-audit-plugin.config.deOrgId "your-org-uuid"
+openclaw config set plugins.entries.constellation-audit-plugin.config.deTenantId "your-tenant-uuid"
+```
+
+Or in the config JSON:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "deApiKey": "your-api-key",
+          "deOrgId": "your-org-uuid",
+          "deTenantId": "your-tenant-uuid"
+        }
+      }
+    }
+  }
+}
+```
+
+Create a free account at https://evidence.constellationnetwork.io and generate an API key from your dashboard.
+
+**Option 2 — Wallet key file (x402 micropayments)**
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.deWalletKeyFile "/path/to/wallet.key"
+```
+
+Or in the config JSON:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "enabled": true,
+        "config": {
+          "deWalletKeyFile": "/path/to/wallet.key"
+        }
+      }
+    }
+  }
+}
+```
+
+The file should contain a SECP256K1 private key (64-char hex). Organization and tenant IDs are derived automatically from the wallet address — no registration required. Submission uses [x402](https://www.x402.org/) micropayments (USDC on Base) via the `@constellation-network/digital-evidence-sdk-x402` package.
+
+| Option | Default | Description |
+|---|---|---|
+| `deApiKey` | — | API key for DE anchoring |
+| `deOrgId` | — | Organization UUID (required with API key) |
+| `deTenantId` | — | Tenant UUID (required with API key) |
+| `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
+| `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints (see note below) |
+| `deApiUrl` | `https://de-api.constellationnetwork.io/v1` | DE API endpoint |
+| `deEventThreshold` | `100` | Events to accumulate before anchoring |
+| `deIntervalMs` | `300000` | Max time between anchoring attempts (ms) |
+
+> **Ephemeral signing keys:** When `deSigningKey` is not configured, a new key pair is generated on each startup. This means fingerprints from different sessions are signed with different keys and cannot be verified against a single identity. Pin `deSigningKey` in your config if you need cross-session verifiable provenance.
+
 ## What gets recorded
 
 The plugin hooks into all 26 OpenClaw lifecycle events and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
@@ -45,7 +120,7 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `prompt.model_resolve` | `before_model_resolve` | prompt length |
+| `prompt.model_resolve` | `before_model_resolve` | prompt length, trigger |
 | `prompt.build` | `before_prompt_build` | prompt length, message count |
 | `prompt.input` | `llm_input` | provider, model, prompt length, history message count, images count, content (gzipped) |
 | `prompt.response` | `llm_output` | provider, model, token usage (input/output/cache read/write), content (gzipped) |
@@ -54,7 +129,6 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `agent.start` | `before_agent_start` | prompt length, trigger |
 | `agent.end` | `agent_end` | duration (ms), success |
 | `agent.compaction_start` | `before_compaction` | message count, compacting count, token count |
 | `agent.compaction_end` | `after_compaction` | message count, compacted count, token count |

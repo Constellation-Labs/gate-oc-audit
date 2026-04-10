@@ -90,11 +90,12 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   }
 }
 
-export function cliVerifyHandler(
+export async function cliVerifyHandler(
   smtService: SmtService,
   store: AuditStore,
   notifier?: NotificationService,
-): void {
+): Promise<void> {
+  await smtService.ensureReady();
   console.log("Verifying audit trail integrity...\n");
 
   // 1. SMT verification — check trees and sample proofs
@@ -105,7 +106,7 @@ export function cliVerifyHandler(
     let allValid = true;
 
     for (const tree of trees) {
-      console.log(`SMT tree "${tree.key}": root=${tree.root.slice(0, 16)}..., ${tree.entryCount} entries, ${tree.size} nodes`);
+      console.log(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
 
       // Sample recent events and verify their proofs
       const recentEvents = store.query({ limit: 10 });
@@ -179,11 +180,12 @@ export function cliExportHandler(store: AuditStore, format?: string, opts: Audit
   }
 }
 
-export function cliSmtHandler(
+export async function cliSmtHandler(
   smtService: SmtService,
   action: string,
   opts: Record<string, string>,
-): void {
+): Promise<void> {
+  await smtService.ensureReady();
   switch (action) {
     case "root": {
       const result = smtService.getRoot(opts.tree);
@@ -229,7 +231,7 @@ export function cliSmtHandler(
         return;
       }
       for (const tree of trees) {
-        console.log(`${tree.key}: root=${tree.root.slice(0, 16)}..., ${tree.entryCount} entries, ${tree.size} nodes`);
+        console.log(`${tree.key}: root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
       }
       break;
     }

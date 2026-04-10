@@ -149,19 +149,18 @@ describe("registerHooks", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("registers 29 lifecycle hooks", () => {
-    assert.equal(api.hooks.size, 29);
+  it("registers 25 lifecycle hooks", () => {
+    assert.equal(api.hooks.size, 25);
     for (const name of [
       "before_model_resolve", "before_prompt_build",
-      "before_agent_start", "agent_end",
-      "before_tool_call", "after_tool_call", "tool_result_persist", "tool_denied",
+      "agent_end",
+      "before_tool_call", "after_tool_call", "tool_result_persist",
       "llm_input", "llm_output",
       "message_received", "message_sending", "message_sent",
       "inbound_claim", "before_dispatch", "before_message_write",
       "before_compaction", "after_compaction", "before_reset",
       "session_start", "session_end",
       "subagent_spawning", "subagent_spawned", "subagent_delivery_target", "subagent_ended",
-      "cron_executed", "cron_failed",
       "gateway_start", "gateway_stop",
     ]) {
       assert.ok(api.hooks.has(name), `Missing hook: ${name}`);
@@ -174,24 +173,28 @@ describe("registerHooks", () => {
     }
   });
 
-  describe("before_agent_start", () => {
-    it("records agent.start with prompt length", () => {
-      fireHook(api, "before_agent_start",
+  describe("before_model_resolve emits prompt.model_resolve", () => {
+    it("records prompt.model_resolve with prompt length and trigger", () => {
+      fireHook(api, "before_model_resolve",
         { prompt: "hello world" },
-        { sessionId: "s1" },
+        { sessionId: "s1", trigger: "user" },
       );
 
       const events = getEvents(dbPath);
-      assert.equal(events.length, 1);
-      assert.equal(events[0].event_type, "agent.start");
-      assert.equal(events[0].category, "agent");
-      assert.equal(events[0].session_id, "s1");
-      assert.equal(JSON.parse(events[0].metadata).promptLength, 11);
+      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
+      assert.ok(resolveEvent, "expected prompt.model_resolve event");
+      assert.equal(resolveEvent.category, "prompt");
+      assert.equal(resolveEvent.session_id, "s1");
+      const meta = JSON.parse(resolveEvent.metadata);
+      assert.equal(meta.promptLength, 11);
+      assert.equal(meta.trigger, "user");
     });
 
     it("handles missing optional prompt", () => {
-      fireHook(api, "before_agent_start", {}, { sessionId: "s1" });
-      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      fireHook(api, "before_model_resolve", {}, { sessionId: "s1" });
+      const events = getEvents(dbPath);
+      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
+      const meta = JSON.parse(resolveEvent.metadata);
       assert.ok(!("promptLength" in meta));
     });
   });
@@ -405,9 +408,10 @@ describe("registerHooks", () => {
       );
 
       const events = getEvents(dbPath);
-      assert.equal(events[0].event_type, "prompt.model_resolve");
-      assert.equal(events[0].category, "prompt");
-      assert.equal(JSON.parse(events[0].metadata).promptLength, 5);
+      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
+      assert.ok(resolveEvent, "expected prompt.model_resolve event");
+      assert.equal(resolveEvent.category, "prompt");
+      assert.equal(JSON.parse(resolveEvent.metadata).promptLength, 5);
     });
   });
 
@@ -727,7 +731,7 @@ describe("registerHooks", () => {
   describe("fail-open", () => {
     it("does not throw when store is closed", () => {
       store.close();
-      fireHook(api, "before_agent_start", {}, { sessionId: "s1" });
+      fireHook(api, "before_model_resolve", {}, { sessionId: "s1" });
       store = new AuditStore(makeTempDb());
     });
   });

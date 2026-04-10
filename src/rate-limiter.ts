@@ -1,6 +1,6 @@
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEvent, AuditEventInsert } from "./types/events.js";
-import type { DeAnchorService } from "./services/de-anchor.js";
+import type { AnchorService } from "./services/de-anchor.js";
 import type { SmtService } from "./services/smt-service.js";
 
 const DEFAULT_MAX_EVENTS_PER_SEC = 100;
@@ -21,7 +21,7 @@ interface CoalescedGroup {
 
 export class RateLimiter {
   private store: AuditStore;
-  private deAnchor: DeAnchorService | undefined;
+  private deAnchor: AnchorService | undefined;
   private smtService: SmtService | undefined;
   private maxPerSec: number;
   private bufferCapacity: number;
@@ -38,9 +38,10 @@ export class RateLimiter {
     this.bufferCapacity = typeof config.rateLimitBufferSize === "number"
       ? config.rateLimitBufferSize
       : DEFAULT_BUFFER_CAPACITY;
+    console.error(`[audit-plugin:rate-limiter] Initialized — maxPerSec: ${this.maxPerSec}, bufferCapacity: ${this.bufferCapacity}`);
   }
 
-  setDeAnchor(deAnchor: DeAnchorService): void {
+  setDeAnchor(deAnchor: AnchorService): void {
     this.deAnchor = deAnchor;
   }
 
@@ -69,6 +70,9 @@ export class RateLimiter {
     }
 
     // Over threshold: buffer the event
+    if (this.buffer.length === 0) {
+      console.error(`[audit-plugin:rate-limiter] Rate limit hit (${this.windowEvents}/${this.maxPerSec}/s), buffering events`);
+    }
     if (this.buffer.length < this.bufferCapacity) {
       this.buffer.push(insert);
     } else {
