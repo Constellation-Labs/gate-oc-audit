@@ -19,7 +19,6 @@
     "@zk-kit/smt": "^1.0.2",
     "better-sqlite3": "^12.8.0",
     "chokidar": "^4.0.0",
-    "ethers": "^6.16.0",
     "level": "^8.0.1",
     "uuidv7": "^1.0.2"
   },
@@ -31,7 +30,13 @@
     "typescript": "^5.8.3"
   },
   "peerDependencies": {
+    "ethers": "^6.0.0",
     "openclaw": ">=2026.1.0"
+  },
+  "peerDependenciesMeta": {
+    "ethers": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [

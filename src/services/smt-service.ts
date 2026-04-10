@@ -84,6 +84,8 @@ export class SmtService {
   private exportedProofs: ExportedProofs = new Map();
   private leafValues: LeafValues = new Map();
 
+  private lastInsertedSeq = 0;
+
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
   private restored = false;
@@ -146,13 +148,19 @@ export class SmtService {
       clearInterval(this.pruneTimer);
       this.pruneTimer = undefined;
     }
-    // Final checkpoint on shutdown — await to ensure LevelDB write completes
+    // Final checkpoint on shutdown — each step is independent so a tree
+    // checkpoint failure doesn't prevent metadata from being persisted.
     try {
       await this.manager.checkpointAll(this.config.checkpointDir);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+    }
+    try {
       await this.checkpointMetadata();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Final checkpoint failed:", msg);
+      console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
     }
   }
 
@@ -199,6 +207,10 @@ export class SmtService {
       if ("error" in result) {
         console.error(`[audit-plugin:smt] Insert rejected: ${result.error}`);
         return;
+      }
+
+      if (event.sequence > this.lastInsertedSeq) {
+        this.lastInsertedSeq = event.sequence;
       }
 
       if (this.needsFirstCheckpoint && !this.suppressCheckpoints) {
@@ -366,20 +378,49 @@ export class SmtService {
   }
 
   /**
-   * Replay existing audit events into the SMT.
+   * Replay existing audit events into the SMT in batches.
    * Used on startup to rebuild the tree when no checkpoint exists.
+   * Accepts either an array (legacy) or a batch-fetching callback to
+   * avoid loading the entire audit store into memory at once.
    */
-  replayEvents(events: AuditEvent[]): number {
+  replayEvents(
+    eventsOrFetcher: AuditEvent[] | ((offset: number, limit: number) => AuditEvent[]),
+    totalCount?: number,
+  ): number {
     this.suppressCheckpoints = true;
-    for (const event of events) {
-      this.onEventAppended(event);
+    let replayed = 0;
+
+    if (Array.isArray(eventsOrFetcher)) {
+      for (const event of eventsOrFetcher) {
+        this.onEventAppended(event);
+      }
+      replayed = eventsOrFetcher.length;
+    } else {
+      const BATCH_SIZE = 1000;
+      const total = totalCount ?? Infinity;
+      let offset = 0;
+      while (offset < total) {
+        const batch = eventsOrFetcher(offset, BATCH_SIZE);
+        if (batch.length === 0) break;
+        for (const event of batch) {
+          this.onEventAppended(event);
+        }
+        replayed += batch.length;
+        offset += batch.length;
+      }
     }
+
     this.suppressCheckpoints = false;
     this.needsFirstCheckpoint = false;
-    if (events.length > 0) {
+    if (replayed > 0) {
       this.checkpoint();
     }
-    return events.length;
+    return replayed;
+  }
+
+  /** Highest audit event sequence number that was inserted into the SMT and checkpointed. */
+  getLastCheckpointedSequence(): number {
+    return this.lastInsertedSeq;
   }
 
   getCurrentSmtRoot(treeKey?: string): string | null {
@@ -398,6 +439,10 @@ export class SmtService {
         epochEntries: Array.from(this.epochEntries).map(
           ([tk, epochs]) => [tk, Array.from(epochs)] as const,
         ),
+        exportedProofs: Array.from(this.exportedProofs).map(
+          ([tk, epochs]) => [tk, Array.from(epochs)] as const,
+        ),
+        lastInsertedSeq: this.lastInsertedSeq,
       };
       const filePath = join(this.config.checkpointDir, "_metadata.json");
       await writeFile(filePath, JSON.stringify(data));
@@ -435,6 +480,17 @@ export class SmtService {
           ),
         );
       }
+      if (Array.isArray(data.exportedProofs)) {
+        this.exportedProofs = new Map(
+          data.exportedProofs.map(
+            ([tk, epochs]: [string, [number, object[]][]]) => [tk, new Map(epochs)],
+          ),
+        );
+      }
+      const savedSeq = data.lastInsertedSeq ?? data.lastCheckpointedSeq;
+      if (typeof savedSeq === "number") {
+        this.lastInsertedSeq = savedSeq;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:smt] Metadata restore failed:", msg);
@@ -442,11 +498,13 @@ export class SmtService {
   }
 
   private checkpoint(): void {
-    this.manager.checkpointAll(this.config.checkpointDir).then(() => {
-      this.checkpointMetadata();
-    }).catch((err) => {
+    this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Checkpoint failed:", msg);
+      console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+    });
+    this.checkpointMetadata().catch((err) => {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
     });
   }
 

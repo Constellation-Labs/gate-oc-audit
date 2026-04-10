@@ -1,14 +1,14 @@
-import { createRequire } from "module";
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { uuidv7 } from "uuidv7";
-import type { AuditStore } from "../store/audit-store.js";
-import type { NotificationService } from "./notifications.js";
-import type { SmtService } from "./smt-service.js";
+import {createRequire} from "module";
+import {randomUUID} from "node:crypto";
+import {existsSync, readFileSync} from "node:fs";
+import {uuidv7} from "uuidv7";
+import type {AuditStore} from "../store/audit-store.js";
+import type {NotificationService} from "./notifications.js";
+import type {SmtService} from "./smt-service.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
-const { DedClient } = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
+const {DedClient} = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
 
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -17,284 +17,393 @@ const CIRCUIT_BREAKER_RESET_MS = 30 * 1000;
 const DE_MAINNET_API = "https://de-api.constellationnetwork.io/v1";
 const FETCH_TIMEOUT_MS = 15_000;
 
-export class DeAnchorService {
-  private store: AuditStore;
-  private notifier: NotificationService | undefined;
-  private smtService: SmtService | undefined;
-  private timer: ReturnType<typeof setInterval> | undefined;
+type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
+type VerifyFn = (hash: string) => Promise<unknown>;
 
-  private deApiUrl: string;
-  private deOrgId: string;
-  private deTenantId: string;
-  private deSigningKey: string;
-  private eventThreshold: number;
-  private intervalMs: number;
+// ---------------------------------------------------------------------------
+// Public interface — used by rate-limiter and index.ts
+// ---------------------------------------------------------------------------
 
-  private submitFn:
-    | ((submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>)
-    | undefined;
-  private verifyFn: ((hash: string) => Promise<unknown>) | undefined;
-  private authLabel: string | undefined;
+export interface AnchorService {
+    isActive(): boolean;
+    setSmtService(smt: SmtService): void;
+    start(): Promise<void>;
+    stop(): void;
+    notifyAppend(): void;
+    anchorIfNeeded(): Promise<void>;
+}
 
-  private consecutiveFailures = 0;
-  private circuitOpenUntil = 0;
-  private appendsSinceLastCheckpoint = 0;
+// ---------------------------------------------------------------------------
+// No-op implementation — logs a warning, every method is a stub
+// ---------------------------------------------------------------------------
 
-  constructor(
+export class NoOpAnchorService implements AnchorService {
+    constructor(reason: string) {
+        console.error(`[audit-plugin:de-anchor] ${reason}, anchoring disabled`);
+    }
+
+    isActive(): boolean {
+        return false;
+    }
+
+    setSmtService(): void { /* no-op */ }
+
+    async start(): Promise<void> { /* no-op */ }
+
+    stop(): void { /* no-op */ }
+
+    notifyAppend(): void { /* no-op */ }
+
+    async anchorIfNeeded(): Promise<void> { /* no-op */ }
+}
+
+// ---------------------------------------------------------------------------
+// Base class — shared anchoring logic (circuit breaker, threshold, checkpoints)
+// ---------------------------------------------------------------------------
+
+interface ActiveAnchorConfig {
+    store: AuditStore;
+    notifier?: NotificationService;
+    deApiUrl: string;
+    deOrgId: string;
+    deTenantId: string;
+    deSigningKey: string;
+    eventThreshold: number;
+    intervalMs: number;
+    submitFn: SubmitFn;
+    verifyFn?: VerifyFn;
+    authLabel: string;
+}
+
+class ActiveAnchorService implements AnchorService {
+    private readonly store: AuditStore;
+    private readonly notifier: NotificationService | undefined;
+    private smtService: SmtService | undefined;
+    private timer: ReturnType<typeof setInterval> | undefined;
+
+    private readonly deApiUrl: string;
+    private readonly deOrgId: string;
+    private readonly deTenantId: string;
+    private readonly deSigningKey: string;
+    private readonly eventThreshold: number;
+    private readonly intervalMs: number;
+    private readonly submitFn: SubmitFn;
+    private readonly verifyFn: VerifyFn | undefined;
+    private readonly authLabel: string;
+
+    private consecutiveFailures = 0;
+    private circuitOpenUntil = 0;
+    private appendsSinceLastCheckpoint = 0;
+
+    constructor(cfg: ActiveAnchorConfig) {
+        this.store = cfg.store;
+        this.notifier = cfg.notifier;
+        this.deApiUrl = cfg.deApiUrl;
+        this.deOrgId = cfg.deOrgId;
+        this.deTenantId = cfg.deTenantId;
+        this.deSigningKey = cfg.deSigningKey;
+        this.eventThreshold = cfg.eventThreshold;
+        this.intervalMs = cfg.intervalMs;
+        this.submitFn = cfg.submitFn;
+        this.verifyFn = cfg.verifyFn;
+        this.authLabel = cfg.authLabel;
+    }
+
+    isActive(): boolean {
+        return true;
+    }
+
+    setSmtService(smt: SmtService): void {
+        this.smtService = smt;
+    }
+
+    async start(): Promise<void> {
+        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, interval: ${this.intervalMs}ms`);
+
+        await this.verifyCheckpoints();
+        await this.anchorIfNeeded();
+        this.timer = setInterval(() => this.anchorIfNeeded(), this.intervalMs);
+        this.timer.unref();
+        console.error("[audit-plugin:de-anchor] Started successfully");
+    }
+
+    stop(): void {
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = undefined;
+        }
+    }
+
+    notifyAppend(): void {
+        this.appendsSinceLastCheckpoint++;
+        if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
+            console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
+            this.appendsSinceLastCheckpoint = 0;
+            this.anchorIfNeeded().catch(() => {});
+        }
+    }
+
+    async anchorIfNeeded(): Promise<void> {
+        if (this.isCircuitOpen()) return;
+
+        try {
+            const lastCheckpoint = this.store.getLastCheckpoint();
+            const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
+
+            const eventCount = this.store.countSince(startSeq);
+            if (eventCount < this.eventThreshold) return;
+
+            const smtRoot = this.smtService?.getCurrentSmtRoot();
+            if (!smtRoot) {
+                console.error("[audit-plugin:de-anchor] No SMT root available, skipping anchor");
+                return;
+            }
+
+            const seqEnd = startSeq + eventCount - 1;
+
+            console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
+            const txHash = await this.submitFingerprint(smtRoot);
+
+            const checkpointId = uuidv7();
+            this.store.insertCheckpoint(checkpointId, startSeq, seqEnd, smtRoot, eventCount, txHash);
+
+            this.consecutiveFailures = 0;
+            this.appendsSinceLastCheckpoint = 0;
+            console.error(
+                `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
+            );
+        } catch (err) {
+            this.recordFailure();
+            const message = err instanceof Error ? err.message : "Unknown error";
+            console.error("[audit-plugin:de-anchor] Anchor failed:", message);
+        }
+    }
+
+    private async verifyCheckpoints(): Promise<void> {
+        if (!this.verifyFn) return;
+
+        try {
+            const checkpoints = this.store.getCheckpoints();
+            const verifyFn = this.verifyFn;
+            const notifier = this.notifier;
+
+            await Promise.all(
+                checkpoints
+                    .filter((cp) => cp.deTxHash)
+                    .map(async (cp) => {
+                        try {
+                            const detail = await verifyFn(cp.smtRoot);
+                            if (!detail) {
+                                console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
+                                notifier
+                                    ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
+                                    .catch(() => {});
+                            }
+                        } catch {
+                            // Don't fail startup on DE API errors
+                        }
+                    }),
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "Unknown error";
+            console.error("[audit-plugin:de-anchor] Checkpoint verification error:", message);
+        }
+    }
+
+    private async submitFingerprint(smtRoot: string): Promise<string | null> {
+        const submission = await dedCore.generateFingerprint(
+            {
+                orgId: this.deOrgId,
+                tenantId: this.deTenantId,
+                eventId: randomUUID(),
+                documentId: "openclaw-smt-root",
+                documentRef: smtRoot,
+                timestamp: new Date(),
+                includeMetadata: true,
+                tags: {source: "openclaw-audit-plugin", type: "smt-root"},
+            },
+            this.deSigningKey,
+        );
+
+        const results = await this.submitFn([submission]);
+        const result = results[0];
+        if (!result?.accepted) {
+            throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
+        }
+        return result.hash ?? result.eventId ?? null;
+    }
+
+    private isCircuitOpen(): boolean {
+        if (this.consecutiveFailures < CIRCUIT_BREAKER_THRESHOLD) return false;
+        if (Date.now() >= this.circuitOpenUntil) {
+            this.consecutiveFailures = CIRCUIT_BREAKER_THRESHOLD - 1;
+            return false;
+        }
+        return true;
+    }
+
+    private recordFailure(): void {
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+            this.circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_RESET_MS;
+            console.error(
+                `[audit-plugin:de-anchor] Circuit breaker open — will retry after ${CIRCUIT_BREAKER_RESET_MS / 1000}s`,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared config parsing
+// ---------------------------------------------------------------------------
+
+function parseBaseConfig(config: Record<string, unknown>) {
+    return {
+        deApiUrl: typeof config.deApiUrl === "string" ? config.deApiUrl : DE_MAINNET_API,
+        eventThreshold: typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD,
+        intervalMs: typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS,
+    };
+}
+
+function resolveSigningKey(config: Record<string, unknown>): string {
+    if (typeof config.deSigningKey === "string" && config.deSigningKey.length > 0) {
+        return config.deSigningKey;
+    }
+    const kp = dedCore.generateKeyPair();
+    console.error("[audit-plugin:de-anchor] No signing key configured, generated ephemeral key pair");
+    return kp.privateKey;
+}
+
+// ---------------------------------------------------------------------------
+// API key implementation
+// ---------------------------------------------------------------------------
+
+export class ApiKeyAnchorService extends ActiveAnchorService {
+    constructor(
+        store: AuditStore,
+        config: Record<string, unknown>,
+        notifier?: NotificationService,
+    ) {
+        const base = parseBaseConfig(config);
+        const deApiKey = config.deApiKey as string;
+        const deOrgId = config.deOrgId as string;
+        const deTenantId = config.deTenantId as string;
+        const deSigningKey = resolveSigningKey(config);
+
+        const baseUrl = base.deApiUrl.replace(/\/v1\/?$/, "");
+        const client = new DedClient({baseUrl, apiKey: deApiKey, timeout: FETCH_TIMEOUT_MS});
+
+        super({
+            store,
+            notifier,
+            deApiUrl: base.deApiUrl,
+            deOrgId,
+            deTenantId,
+            deSigningKey,
+            eventThreshold: base.eventThreshold,
+            intervalMs: base.intervalMs,
+            submitFn: (s) => client.fingerprints.submit(s),
+            verifyFn: (h) => client.fingerprints.getByHash(h),
+            authLabel: "API key",
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wallet (x402) implementation
+// ---------------------------------------------------------------------------
+
+export class WalletAnchorService extends ActiveAnchorService {
+    constructor(
+        store: AuditStore,
+        keyFilePath: string,
+        config: Record<string, unknown>,
+        notifier?: NotificationService,
+    ) {
+        const base = parseBaseConfig(config);
+
+        let rawKey = readFileSync(keyFilePath, "utf-8").trim().replace(/^0x/, "");
+        if (!dedCore.isValidPrivateKey(rawKey)) {
+            throw new Error("Wallet key file contains invalid private key (expected 64-char hex)");
+        }
+
+        const {DedX402Client, createEthersSigner} = require2(
+            "@constellation-network/digital-evidence-sdk-x402",
+        ) as typeof import("@constellation-network/digital-evidence-sdk-x402");
+        const {ethers} = require2("ethers") as typeof import("ethers");
+
+        const wallet = new ethers.Wallet(`0x${rawKey}`);
+        const baseUrl = base.deApiUrl.replace(/\/v1\/?$/, "");
+        const client = new DedX402Client({
+            baseUrl,
+            signer: createEthersSigner(wallet),
+            signingPrivateKey: rawKey,
+            timeout: FETCH_TIMEOUT_MS,
+        });
+
+        const submitFn: SubmitFn = async (s) => {
+            const res = await client.fingerprints.submit(s);
+            if (res.kind === "payment_required") {
+                throw new Error("x402 payment required but could not be fulfilled");
+            }
+            return res.kind === "result" ? res.data : res;
+        };
+
+        super({
+            store,
+            notifier,
+            deApiUrl: base.deApiUrl,
+            deOrgId: client.orgId,
+            deTenantId: client.tenantId,
+            deSigningKey: rawKey,
+            eventThreshold: base.eventThreshold,
+            intervalMs: base.intervalMs,
+            submitFn,
+            verifyFn: (h) => client.fingerprints.getByHash(h),
+            authLabel: "x402 wallet",
+        });
+
+        console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory — picks the right class based on config
+// ---------------------------------------------------------------------------
+
+export function createDeAnchorService(
     store: AuditStore,
-    config: Record<string, unknown> = {},
+    config: Record<string, unknown>,
     notifier?: NotificationService,
-  ) {
-    this.store = store;
-    this.notifier = notifier;
-    this.deApiUrl = typeof config.deApiUrl === "string" ? config.deApiUrl : DE_MAINNET_API;
+): AnchorService {
     const deApiKey = typeof config.deApiKey === "string" ? config.deApiKey : undefined;
-    this.deOrgId = typeof config.deOrgId === "string" ? config.deOrgId : "";
-    this.deTenantId = typeof config.deTenantId === "string" ? config.deTenantId : "";
-    this.eventThreshold =
-      typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD;
-    this.intervalMs =
-      typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS;
-
+    const hasOrgId = typeof config.deOrgId === "string" && config.deOrgId.length > 0;
+    const hasTenantId = typeof config.deTenantId === "string" && config.deTenantId.length > 0;
     const deWalletKeyFile = typeof config.deWalletKeyFile === "string" ? config.deWalletKeyFile : undefined;
 
-    if (deApiKey && this.deOrgId && this.deTenantId) {
-      // Path A: API key auth
-      if (deWalletKeyFile) {
-        console.error("[audit-plugin:de-anchor] Both deApiKey and deWalletKeyFile configured, API key takes precedence");
-      }
-      if (typeof config.deSigningKey === "string" && config.deSigningKey.length > 0) {
-        this.deSigningKey = config.deSigningKey;
-      } else {
-        const kp = dedCore.generateKeyPair();
-        this.deSigningKey = kp.privateKey;
-        console.error("[audit-plugin:de-anchor] No signing key configured, generated ephemeral key pair");
-      }
-
-      const baseUrl = this.deApiUrl.replace(/\/v1\/?$/, "");
-      const client = new DedClient({ baseUrl, apiKey: deApiKey, timeout: FETCH_TIMEOUT_MS });
-      this.submitFn = (s) => client.fingerprints.submit(s);
-      this.verifyFn = (h) => client.fingerprints.getByHash(h);
-      this.authLabel = "API key";
-    } else if (deApiKey) {
-      // API key provided but missing org/tenant
-      this.deSigningKey = "";
-      console.error("[audit-plugin:de-anchor] deApiKey provided but deOrgId and deTenantId are required, anchoring disabled");
-    } else if (deWalletKeyFile) {
-      // Path B: Wallet key file for x402 payments
-      this.deSigningKey = "";
-      this.initWalletClient(deWalletKeyFile);
-    } else {
-      this.deSigningKey = "";
-    }
-  }
-
-  private initWalletClient(keyFilePath: string): void {
-    if (!existsSync(keyFilePath)) {
-      console.error(`[audit-plugin:de-anchor] Wallet key file not found: ${keyFilePath}`);
-      return;
-    }
-
-    let rawKey: string;
-    try {
-      rawKey = readFileSync(keyFilePath, "utf-8").trim().replace(/^0x/, "");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error(`[audit-plugin:de-anchor] Failed to read wallet key file: ${msg}`);
-      return;
-    }
-
-    if (!dedCore.isValidPrivateKey(rawKey)) {
-      console.error("[audit-plugin:de-anchor] Wallet key file contains invalid private key (expected 64-char hex)");
-      return;
-    }
-
-    try {
-      const { DedX402Client, createEthersSigner } = require2(
-        "@constellation-network/digital-evidence-sdk-x402",
-      ) as typeof import("@constellation-network/digital-evidence-sdk-x402");
-      const { ethers } = require2("ethers") as typeof import("ethers");
-
-      const wallet = new ethers.Wallet(`0x${rawKey}`);
-      const baseUrl = this.deApiUrl.replace(/\/v1\/?$/, "");
-      const client = new DedX402Client({
-        baseUrl,
-        signer: createEthersSigner(wallet),
-        signingPrivateKey: rawKey,
-        timeout: FETCH_TIMEOUT_MS,
-      });
-
-      this.submitFn = async (s) => {
-        const res = await client.fingerprints.submit(s);
-        if (res.kind === "payment_required") {
-          throw new Error("x402 payment required but could not be fulfilled");
+    if (deApiKey && hasOrgId && hasTenantId) {
+        if (deWalletKeyFile) {
+            console.error("[audit-plugin:de-anchor] Both deApiKey and deWalletKeyFile configured, API key takes precedence");
         }
-        return res.kind === "result" ? res.data : res;
-      };
-      this.verifyFn = (h) => client.fingerprints.getByHash(h);
-      this.deOrgId = client.orgId;
-      this.deTenantId = client.tenantId;
-      this.deSigningKey = rawKey;
-      this.authLabel = "x402 wallet";
-      console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error(`[audit-plugin:de-anchor] Failed to initialize x402 client: ${msg}`);
-    }
-  }
-
-  /** Whether a submit function was successfully initialized (API key or wallet). */
-  isActive(): boolean {
-    return !!this.submitFn;
-  }
-
-  setSmtService(smt: SmtService): void {
-    this.smtService = smt;
-  }
-
-  async start(): Promise<void> {
-    if (!this.submitFn) {
-      console.error("[audit-plugin:de-anchor] No DE API key or wallet key file configured, anchoring disabled");
-      return;
+        return new ApiKeyAnchorService(store, config, notifier);
     }
 
-    const method = this.authLabel;
-    console.error(`[audit-plugin:de-anchor] Starting — auth: ${method}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, interval: ${this.intervalMs}ms`);
-
-    await this.verifyCheckpoints();
-    await this.anchorIfNeeded();
-    this.timer = setInterval(() => this.anchorIfNeeded(), this.intervalMs);
-    this.timer.unref();
-    console.error("[audit-plugin:de-anchor] Started successfully");
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
+    if (deApiKey) {
+        const missing = [!hasOrgId && "deOrgId", !hasTenantId && "deTenantId"].filter(Boolean).join(" and ");
+        return new NoOpAnchorService(`deApiKey provided but ${missing} missing`);
     }
-  }
 
-  notifyAppend(): void {
-    if (!this.submitFn) return;
-
-    this.appendsSinceLastCheckpoint++;
-    if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
-      console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
-      this.appendsSinceLastCheckpoint = 0;
-      this.anchorIfNeeded().catch(() => {});
+    if (deWalletKeyFile) {
+        if (!existsSync(deWalletKeyFile)) {
+            return new NoOpAnchorService(`Wallet key file not found: ${deWalletKeyFile}`);
+        }
+        try {
+            return new WalletAnchorService(store, deWalletKeyFile, config, notifier);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            return new NoOpAnchorService(`Failed to initialize wallet: ${msg}`);
+        }
     }
-  }
 
-  async anchorIfNeeded(): Promise<void> {
-    if (this.isCircuitOpen()) return;
-
-    try {
-      const lastCheckpoint = this.store.getLastCheckpoint();
-      const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
-
-      const eventCount = this.store.countSince(startSeq);
-      if (eventCount < this.eventThreshold) return;
-
-      // Use SMT root as the integrity fingerprint
-      const smtRoot = this.smtService?.getCurrentSmtRoot();
-      if (!smtRoot) {
-        console.error("[audit-plugin:de-anchor] No SMT root available, skipping anchor");
-        return;
-      }
-
-      const seqEnd = startSeq + eventCount - 1;
-
-      console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
-      const txHash = await this.submitFingerprint(smtRoot);
-
-      const checkpointId = uuidv7();
-      this.store.insertCheckpoint(checkpointId, startSeq, seqEnd, smtRoot, eventCount, txHash);
-
-      this.consecutiveFailures = 0;
-      this.appendsSinceLastCheckpoint = 0;
-      console.error(
-        `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
-      );
-    } catch (err) {
-      this.recordFailure();
-      const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:de-anchor] Anchor failed:", message);
-    }
-  }
-
-  async verifyCheckpoints(): Promise<void> {
-    if (!this.verifyFn) return;
-
-    try {
-      const checkpoints = this.store.getCheckpoints();
-      const verifyFn = this.verifyFn;
-      const notifier = this.notifier;
-
-      await Promise.all(
-        checkpoints
-          .filter((cp) => cp.deTxHash)
-          .map(async (cp) => {
-            try {
-              const detail = await verifyFn(cp.smtRoot);
-              if (!detail) {
-                console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
-                notifier
-                  ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
-                  .catch(() => {});
-              }
-            } catch {
-              // Don't fail startup on DE API errors
-            }
-          }),
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:de-anchor] Checkpoint verification error:", message);
-    }
-  }
-
-  private async submitFingerprint(smtRoot: string): Promise<string | null> {
-    const submission = await dedCore.generateFingerprint(
-      {
-        orgId: this.deOrgId,
-        tenantId: this.deTenantId,
-        eventId: randomUUID(),
-        documentId: "openclaw-smt-root",
-        documentRef: smtRoot,
-        timestamp: new Date(),
-        includeMetadata: true,
-        tags: { source: "openclaw-audit-plugin", type: "smt-root" },
-      },
-      this.deSigningKey,
-    );
-
-    if (!this.submitFn) throw new Error("No DE client initialized");
-
-    const results = await this.submitFn([submission]);
-    const result = results[0];
-    if (!result?.accepted) {
-      throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
-    }
-    return result.hash ?? result.eventId ?? null;
-  }
-
-  private isCircuitOpen(): boolean {
-    if (this.consecutiveFailures < CIRCUIT_BREAKER_THRESHOLD) return false;
-    if (Date.now() >= this.circuitOpenUntil) {
-      this.consecutiveFailures = CIRCUIT_BREAKER_THRESHOLD - 1;
-      return false;
-    }
-    return true;
-  }
-
-  private recordFailure(): void {
-    this.consecutiveFailures++;
-    if (this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
-      this.circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_RESET_MS;
-      console.error(
-        `[audit-plugin:de-anchor] Circuit breaker open — will retry after ${CIRCUIT_BREAKER_RESET_MS / 1000}s`,
-      );
-    }
-  }
+    return new NoOpAnchorService("No DE credentials configured");
 }

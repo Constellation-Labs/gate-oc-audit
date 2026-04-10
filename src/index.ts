@@ -4,7 +4,8 @@ import {registerHooks} from "./hooks.js";
 import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler} from "./cli.js";
 import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
-import {DeAnchorService} from "./services/de-anchor.js";
+import {createDeAnchorService} from "./services/de-anchor.js";
+import type {AnchorService} from "./services/de-anchor.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
 import {ToolScanner} from "./scanner.js";
@@ -147,6 +148,8 @@ export default (() => {
             limiter.setSmtService(smtService);
             _store = store;
             _limiter = limiter;
+            // Hooks are re-registered on every API instance (see guard above);
+            // tools below are only registered here, on the first call.
             registerHooks(api, store, limiter);
 
             // LLM cost tracking via diagnostic events (separate subscription path)
@@ -190,7 +193,7 @@ export default (() => {
 
             // Declared here so the tool handler closures can reference it;
             // constructed later in the "Background services" section.
-            let deAnchor!: DeAnchorService;
+            let deAnchor!: AnchorService;
 
             // --- Agent-callable tools ---
 
@@ -356,7 +359,7 @@ export default (() => {
 
             const retention = new RetentionService(activeStore, config);
             const configWatcher = new ConfigWatcher(activeStore, scanner, activeNotifier, config);
-            deAnchor = new DeAnchorService(activeStore, config, activeNotifier);
+            deAnchor = createDeAnchorService(activeStore, config, activeNotifier);
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
 
@@ -365,12 +368,20 @@ export default (() => {
                 async start() {
                     console.error("[audit-plugin] Service smt start() called");
                     await activeSmt.start();
-                    // Replay stored events if the SMT tree is empty (e.g. missed checkpoint)
-                    const eventCount = activeStore.count();
-                    if (activeSmt.listTrees().length === 0 && eventCount > 0) {
-                        const events = activeStore.query({limit: eventCount, order: "asc"});
-                        const replayed = activeSmt.replayEvents(events);
-                        console.error(`[audit-plugin:smt] Replayed ${replayed} stored event(s) into SMT`);
+                    // Replay events the SMT hasn't seen yet (delta since last checkpoint)
+                    const lastSeq = activeSmt.getLastCheckpointedSequence();
+                    const pending = activeStore.countSince(lastSeq + 1);
+                    if (pending > 0) {
+                        const replayed = activeSmt.replayEvents(
+                            (offset, limit) => activeStore.query({
+                                afterSequence: lastSeq,
+                                limit,
+                                offset,
+                                order: "asc",
+                            }),
+                            pending,
+                        );
+                        console.error(`[audit-plugin:smt] Replayed ${replayed} event(s) since seq ${lastSeq}`);
                     }
                 },
                 async stop() {

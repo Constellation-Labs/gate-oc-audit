@@ -25,6 +25,8 @@ export interface QueryOptions {
   eventType?: string;
   category?: string;
   sessionId?: string;
+  /** Only return events with sequence > this value. */
+  afterSequence?: number;
   order?: "asc" | "desc";
 }
 
@@ -276,6 +278,10 @@ export class AuditStore {
     if (opts.sessionId) {
       conditions.push("session_id = @sessionId");
       params.sessionId = opts.sessionId;
+    }
+    if (opts.afterSequence !== undefined) {
+      conditions.push("sequence > @afterSequence");
+      params.afterSequence = opts.afterSequence;
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
