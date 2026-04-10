@@ -7,7 +7,6 @@ const SENSITIVE_KEY =
   /secret|password|token|api.?key|auth|credential|passphrase|jwt|bearer|cookie|private.?key/i;
 
 const AUDIT_PRIORITY = 200;
-const CONTENT_PREVIEW_LENGTH = 500;
 
 function sanitize(value: unknown, seen = new WeakSet()): unknown {
   if (value === null || value === undefined) return value;
@@ -127,8 +126,9 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           toolName: evt.toolName,
           durationMs: evt.durationMs,
           error: evt.error,
-          truncatedOutput: typeof evt.result === "string" ? evt.result.slice(0, 1024) : undefined,
+          outputLength: typeof evt.result === "string" ? evt.result.length : undefined,
         },
+        content: typeof evt.result === "string" ? evt.result : undefined,
       }),
     { priority: AUDIT_PRIORITY },
   );
@@ -165,7 +165,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           promptLength: evt.prompt?.length,
           historyMessageCount: evt.historyMessages?.length,
           imagesCount: evt.imagesCount,
-          truncatedContent: evt.prompt?.slice(0, CONTENT_PREVIEW_LENGTH),
         },
         content: evt.prompt,
       }),
@@ -190,7 +189,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           accountId: ctx.accountId,
           surface: evt.metadata?.surface as string | undefined,
           contentLength: evt.content?.length,
-          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
           timestamp: evt.timestamp ?? Date.now(),
         },
         content: evt.content,
@@ -214,7 +212,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           channel: ctx.channelId,
           accountId: ctx.accountId,
           contentLength: evt.content?.length,
-          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
           success: evt.success,
           error: evt.error,
           timestamp: Date.now(),
@@ -239,7 +236,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
           recipient,
           channel: ctx.channelId,
           contentLength: evt.content?.length,
-          truncatedContent: evt.content?.slice(0, CONTENT_PREVIEW_LENGTH),
         },
         content: evt.content,
       });
@@ -310,7 +306,6 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
         metadata: {
           provider: evt.provider,
           model: evt.model,
-          truncatedContent: evt.assistantTexts?.join("\n")?.slice(0, CONTENT_PREVIEW_LENGTH),
           inputTokens: evt.usage?.input,
           outputTokens: evt.usage?.output,
           cacheReadTokens: evt.usage?.cacheRead,

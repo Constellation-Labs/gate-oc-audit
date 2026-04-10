@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { uuidv7 } from "uuidv7";
 
 import { createRequire } from "module";
@@ -28,6 +28,8 @@ export interface QueryOptions {
   /** Only return events with sequence > this value. */
   afterSequence?: number;
   order?: "asc" | "desc";
+  /** When true, decompress content_gz and populate event.content. Default: false. */
+  includeContent?: boolean;
 }
 
 interface EventRow {
@@ -42,6 +44,7 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
+  content_gz: Buffer | null;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
@@ -60,6 +63,7 @@ function rowToEvent(row: EventRow): AuditEvent {
     category: row.category as EventCategory,
     description: row.description,
     metadata: JSON.parse(row.metadata),
+    content: row.content_gz ? gunzipSync(row.content_gz).toString() : undefined,
     createdAt: row.created_at,
     receivedAt: row.received_at ?? undefined,
     syncedAt: row.synced_at ?? undefined,
@@ -220,6 +224,9 @@ export class AuditStore {
       const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
         ? insert.content
         : undefined;
+      if (insert.content && !rawContent) {
+        console.error(`[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
+      }
       const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
 
       this.insertStmt.run({
@@ -253,6 +260,7 @@ export class AuditStore {
         category: insert.category,
         description: insert.description,
         metadata: insert.metadata,
+        content: rawContent,
         createdAt,
       };
     } catch (err) {
@@ -289,10 +297,11 @@ export class AuditStore {
     const offset = opts.offset ?? 0;
     const order = opts.order === "asc" ? "ASC" : "DESC";
 
+    const contentCol = opts.includeContent ? ", content_gz" : "";
     const rows = this.db
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
-                event_type, category, description, metadata,
+                event_type, category, description, metadata${contentCol},
                 created_at, received_at, synced_at
          FROM audit_events ${where} ORDER BY sequence ${order} LIMIT @limit OFFSET @offset`,
       )

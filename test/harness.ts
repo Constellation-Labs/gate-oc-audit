@@ -220,7 +220,7 @@ async function main() {
 
   // ── validate every event has a valid SMT proof ──
 
-  const events = store.query({ limit: 100 });
+  const events = store.query({ limit: 100, includeContent: true });
   console.log(`\n--- Audit Store: ${events.length} events ---\n`);
   for (const e of events.reverse()) {
     const time = e.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");

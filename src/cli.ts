@@ -17,21 +17,21 @@ export interface AuditExportOptions {
   category?: string;
   session?: string;
   limit?: string;
+  includeContent?: boolean;
 }
 
 function formatEvent(event: AuditEvent): string {
   const time = event.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
   const session = event.sessionId ? ` [${event.sessionId.slice(0, 8)}]` : "";
-  const meta = event.metadata as Record<string, unknown> | undefined;
-  const content = meta?.truncatedContent ? `\n    ${meta.truncatedContent}` : "";
-  return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}${content}`;
+  const preview = event.content ? `\n    ${event.content.slice(0, 500)}` : "";
+  return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}${preview}`;
 }
 
 function toJsonLines(events: AuditEvent[]): string {
   return events.map((e) => JSON.stringify(e)).join("\n");
 }
 
-function toCsv(events: AuditEvent[]): string {
+function toCsv(events: AuditEvent[], includeContent?: boolean): string {
   const headers = [
     "id",
     "sequence",
@@ -43,6 +43,7 @@ function toCsv(events: AuditEvent[]): string {
     "description",
     "metadata",
     "createdAt",
+    ...(includeContent ? ["content"] as const : []),
   ];
   const rows = events.map((e) =>
     headers.map((h) => {
@@ -74,6 +75,7 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   const q = buildQueryOpts(opts);
   if (opts.last) q.limit = parseInt(opts.last, 10) || 50;
   if (opts.offset) q.offset = parseInt(opts.offset, 10) || 0;
+  q.includeContent = true;
 
   const events = store.query(q);
 
@@ -109,7 +111,7 @@ export async function cliVerifyHandler(
       console.log(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
 
       // Sample recent events and verify their proofs
-      const recentEvents = store.query({ limit: 10 });
+      const recentEvents = store.query({ limit: 10, includeContent: true });
       let verified = 0;
       let failed = 0;
 
@@ -169,12 +171,13 @@ export async function cliVerifyHandler(
 export function cliExportHandler(store: AuditStore, format?: string, opts: AuditExportOptions = {}): void {
   const q = buildQueryOpts(opts);
   if (!q.limit) q.limit = 10_000;
+  if (opts.includeContent) q.includeContent = true;
 
   const events = store.query(q).reverse();
   const fmt = format ?? "json";
 
   if (fmt === "csv") {
-    console.log(toCsv(events));
+    console.log(toCsv(events, opts.includeContent));
   } else {
     console.log(toJsonLines(events));
   }
