@@ -179,7 +179,7 @@ describe("DeAnchorService", () => {
             try {
                 const service = createDeAnchorService(store, {deApiKey: "test-key"});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("deOrgId and deTenantId are required")));
+                assert.ok(errors.some((e) => e.includes("deOrgId and deTenantId missing")));
                 assert.ok(errors.some((e) => e.includes("anchoring disabled")));
             } finally {
                 console.error = origError;
