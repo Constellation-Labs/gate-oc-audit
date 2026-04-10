@@ -149,6 +149,21 @@ describe("DeAnchorService", () => {
     }
   });
 
+  it("disables when API key provided without org/tenant", async () => {
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+
+    try {
+      const service = new DeAnchorService(store, { deApiKey: "test-key" });
+      assert.ok(errors.some((e) => e.includes("deOrgId and deTenantId are required")));
+      await service.start();
+      assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+    } finally {
+      console.error = origError;
+    }
+  });
+
   it("stop is idempotent", () => {
     const service = new DeAnchorService(store, {});
     service.stop();

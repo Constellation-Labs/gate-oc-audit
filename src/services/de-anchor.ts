@@ -30,10 +30,11 @@ export class DeAnchorService {
   private eventThreshold: number;
   private intervalMs: number;
 
-  private dedClient: InstanceType<typeof DedClient> | undefined;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private x402Client: any;
-  private authMethod: "api-key" | "x402" | undefined;
+  private submitFn:
+    | ((submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>)
+    | undefined;
+  private verifyFn: ((hash: string) => Promise<unknown>) | undefined;
+  private authLabel: string | undefined;
 
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
@@ -71,8 +72,10 @@ export class DeAnchorService {
       }
 
       const baseUrl = this.deApiUrl.replace(/\/v1\/?$/, "");
-      this.dedClient = new DedClient({ baseUrl, apiKey: deApiKey, timeout: FETCH_TIMEOUT_MS });
-      this.authMethod = "api-key";
+      const client = new DedClient({ baseUrl, apiKey: deApiKey, timeout: FETCH_TIMEOUT_MS });
+      this.submitFn = (s) => client.fingerprints.submit(s);
+      this.verifyFn = (h) => client.fingerprints.getByHash(h);
+      this.authLabel = "API key";
     } else if (deApiKey) {
       // API key provided but missing org/tenant
       this.deSigningKey = "";
@@ -121,11 +124,18 @@ export class DeAnchorService {
         timeout: FETCH_TIMEOUT_MS,
       });
 
-      this.x402Client = client;
+      this.submitFn = async (s) => {
+        const res = await client.fingerprints.submit(s);
+        if (res.kind === "payment_required") {
+          throw new Error("x402 payment required but could not be fulfilled");
+        }
+        return res.kind === "result" ? res.data : res;
+      };
+      this.verifyFn = (h) => client.fingerprints.getByHash(h);
       this.deOrgId = client.orgId;
       this.deTenantId = client.tenantId;
       this.deSigningKey = rawKey;
-      this.authMethod = "x402";
+      this.authLabel = "x402 wallet";
       console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -138,12 +148,12 @@ export class DeAnchorService {
   }
 
   async start(): Promise<void> {
-    if (!this.authMethod) {
+    if (!this.submitFn) {
       console.error("[audit-plugin:de-anchor] No DE API key or wallet key file configured, anchoring disabled");
       return;
     }
 
-    const method = this.authMethod === "api-key" ? "API key" : "x402 wallet";
+    const method = this.authLabel;
     console.error(`[audit-plugin:de-anchor] Starting — auth: ${method}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, interval: ${this.intervalMs}ms`);
 
     await this.verifyCheckpoints();
@@ -161,7 +171,7 @@ export class DeAnchorService {
   }
 
   notifyAppend(): void {
-    if (!this.authMethod) return;
+    if (!this.submitFn) return;
 
     this.appendsSinceLastCheckpoint++;
     if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
@@ -209,11 +219,11 @@ export class DeAnchorService {
   }
 
   async verifyCheckpoints(): Promise<void> {
-    const client = this.dedClient ?? this.x402Client;
-    if (!client) return;
+    if (!this.verifyFn) return;
 
     try {
       const checkpoints = this.store.getCheckpoints();
+      const verifyFn = this.verifyFn;
       const notifier = this.notifier;
 
       await Promise.all(
@@ -221,7 +231,7 @@ export class DeAnchorService {
           .filter((cp) => cp.deTxHash)
           .map(async (cp) => {
             try {
-              const detail = await client.fingerprints.getByHash(cp.smtRoot);
+              const detail = await verifyFn(cp.smtRoot);
               if (!detail) {
                 console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
                 notifier
@@ -254,29 +264,14 @@ export class DeAnchorService {
       this.deSigningKey,
     );
 
-    if (this.dedClient) {
-      const results = await this.dedClient.fingerprints.submit([submission]);
-      const result = results[0];
-      if (!result?.accepted) {
-        throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
-      }
-      return result.hash ?? result.eventId ?? null;
-    }
+    if (!this.submitFn) throw new Error("No DE client initialized");
 
-    if (this.x402Client) {
-      const response = await this.x402Client.fingerprints.submit([submission]);
-      if (response.kind === "payment_required") {
-        throw new Error("x402 payment required but could not be fulfilled");
-      }
-      const results = response.kind === "result" ? response.data : response;
-      const result = results[0];
-      if (!result?.accepted) {
-        throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
-      }
-      return result.hash ?? result.eventId ?? null;
+    const results = await this.submitFn([submission]);
+    const result = results[0];
+    if (!result?.accepted) {
+      throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
     }
-
-    throw new Error("No DE client initialized");
+    return result.hash ?? result.eventId ?? null;
   }
 
   private isCircuitOpen(): boolean {
