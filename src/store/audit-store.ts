@@ -57,10 +57,12 @@ function stripGzipWrapper(gz: Buffer): Buffer {
   let offset = 10; // fixed header
   const flags = gz[3];
   if (flags & 0x04) { offset += gz.readUInt16LE(offset) + 2; }     // FEXTRA
-  if (flags & 0x08) { while (gz[offset] !== 0) offset++; offset++; } // FNAME
-  if (flags & 0x10) { while (gz[offset] !== 0) offset++; offset++; } // FCOMMENT
+  if (flags & 0x08) { while (offset < gz.length && gz[offset] !== 0) offset++; offset++; } // FNAME
+  if (flags & 0x10) { while (offset < gz.length && gz[offset] !== 0) offset++; offset++; } // FCOMMENT
   if (flags & 0x02) { offset += 2; }                                 // FHCRC
-  return gz.subarray(offset, gz.length - 8);
+  const raw = gz.subarray(offset, gz.length - 8);
+  if (raw.length === 0) throw new Error("gzip wrapper consumed entire buffer");
+  return raw;
 }
 
 /** Partially inflate gzipped content, returning at most maxChars characters. */
