@@ -3,6 +3,8 @@ import type { AuditEvent } from "./types/events.js";
 import type { NotificationService } from "./services/notifications.js";
 import type { SmtService } from "./services/smt-service.js";
 
+const CONTENT_PREVIEW_LENGTH = 500;
+
 export interface AuditListOptions {
   last?: string;
   type?: string;
@@ -23,7 +25,7 @@ export interface AuditExportOptions {
 function formatEvent(event: AuditEvent): string {
   const time = event.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
   const session = event.sessionId ? ` [${event.sessionId.slice(0, 8)}]` : "";
-  const preview = event.content ? `\n    ${event.content.slice(0, 500)}` : "";
+  const preview = event.content ? `\n    ${event.content.slice(0, CONTENT_PREVIEW_LENGTH)}` : "";
   return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}${preview}`;
 }
 
@@ -75,7 +77,7 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   const q = buildQueryOpts(opts);
   if (opts.last) q.limit = parseInt(opts.last, 10) || 50;
   if (opts.offset) q.offset = parseInt(opts.offset, 10) || 0;
-  q.includeContent = true;
+  q.contentPreview = CONTENT_PREVIEW_LENGTH;
 
   const events = store.query(q);
 

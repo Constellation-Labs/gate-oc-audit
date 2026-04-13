@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { constants, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
 import { uuidv7 } from "uuidv7";
 
 import { createRequire } from "module";
@@ -30,6 +30,8 @@ export interface QueryOptions {
   order?: "asc" | "desc";
   /** When true, decompress content_gz and populate event.content. Default: false. */
   includeContent?: boolean;
+  /** Partially decompress content_gz up to N chars for preview. Cheaper than includeContent. */
+  contentPreview?: number;
 }
 
 interface EventRow {
@@ -44,13 +46,51 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
-  content_gz: Buffer | null;
+  content_gz?: Buffer | null;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
 }
 
-function rowToEvent(row: EventRow): AuditEvent {
+/** Strip gzip header (RFC 1952) and 8-byte trailer, returning the raw deflate stream. */
+function stripGzipWrapper(gz: Buffer): Buffer {
+  let offset = 10; // fixed header
+  const flags = gz[3];
+  if (flags & 0x04) { offset += gz.readUInt16LE(offset) + 2; }     // FEXTRA
+  if (flags & 0x08) { while (gz[offset] !== 0) offset++; offset++; } // FNAME
+  if (flags & 0x10) { while (gz[offset] !== 0) offset++; offset++; } // FCOMMENT
+  if (flags & 0x02) { offset += 2; }                                 // FHCRC
+  return gz.subarray(offset, gz.length - 8);
+}
+
+/** Partially inflate gzipped content, returning at most maxChars characters. */
+function previewGunzip(gz: Buffer, maxChars: number): string | undefined {
+  try {
+    const raw = stripGzipWrapper(gz);
+    const prefix = raw.subarray(0, maxChars * 4);
+    const buf = inflateRawSync(prefix, { finishFlush: constants.Z_SYNC_FLUSH });
+    let str = buf.toString("utf-8").replace(/\ufffd+$/, "").slice(0, maxChars);
+    // Trim lone high surrogate left by slicing through an emoji
+    const last = str.charCodeAt(str.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) str = str.slice(0, -1);
+    return str;
+  } catch {
+    // Fallback: full decompress and trim
+    try {
+      return gunzipSync(gz).toString("utf-8").slice(0, maxChars);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function decodeContent(row: EventRow, previewChars?: number): string | undefined {
+  if (!row.content_gz) return undefined;
+  if (previewChars !== undefined) return previewGunzip(row.content_gz, previewChars);
+  return gunzipSync(row.content_gz).toString();
+}
+
+function rowToEvent(row: EventRow, contentPreview?: number): AuditEvent {
   return {
     id: row.id,
     sequence: row.sequence,
@@ -63,7 +103,7 @@ function rowToEvent(row: EventRow): AuditEvent {
     category: row.category as EventCategory,
     description: row.description,
     metadata: JSON.parse(row.metadata),
-    content: row.content_gz ? gunzipSync(row.content_gz).toString() : undefined,
+    content: decodeContent(row, contentPreview),
     createdAt: row.created_at,
     receivedAt: row.received_at ?? undefined,
     syncedAt: row.synced_at ?? undefined,
@@ -297,7 +337,8 @@ export class AuditStore {
     const offset = opts.offset ?? 0;
     const order = opts.order === "asc" ? "ASC" : "DESC";
 
-    const contentCol = opts.includeContent ? ", content_gz" : "";
+    const wantContent = opts.includeContent || opts.contentPreview !== undefined;
+    const contentCol = wantContent ? ", content_gz" : "";
     const rows = this.db
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
@@ -307,7 +348,8 @@ export class AuditStore {
       )
       .all({ ...params, limit, offset }) as EventRow[];
 
-    return rows.map(rowToEvent);
+    const previewChars = opts.includeContent ? undefined : opts.contentPreview;
+    return rows.map((row) => rowToEvent(row, previewChars));
   }
 
   count(): number {
