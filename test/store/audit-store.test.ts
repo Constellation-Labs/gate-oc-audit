@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { gunzipSync } from "node:zlib";
+import Database from "better-sqlite3";
 import { AuditStore } from "../../src/store/audit-store.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
 
@@ -204,6 +206,42 @@ describe("AuditStore", () => {
       assert.equal(event.orgId, undefined);
       assert.equal(event.userId, undefined);
       assert.equal(event.source, "openclaw-plugin");
+    });
+  });
+
+  describe("content handling", () => {
+    it("append returns raw content on the event", () => {
+      const event = store.append(sampleInsert({ content: "full message body" }))!;
+      assert.equal(event.content, "full message body");
+    });
+
+    it("append returns undefined content when not provided", () => {
+      const event = store.append(sampleInsert())!;
+      assert.equal(event.content, undefined);
+    });
+
+    it("drops content exceeding MAX_CONTENT_SIZE and logs warning", () => {
+      const warnings: string[] = [];
+      const origErr = console.error;
+      console.error = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+      try {
+        const bigContent = "x".repeat(5 * 1024 * 1024 + 1);
+        const event = store.append(sampleInsert({ content: bigContent }))!;
+        assert.ok(event);
+        assert.equal(event.content, undefined);
+        assert.ok(warnings.some((w) => w.includes("Content exceeds")));
+      } finally {
+        console.error = origErr;
+      }
+    });
+
+    it("stores content gzipped in DB", () => {
+      const event = store.append(sampleInsert({ content: "hello gzip" }))!;
+      const db = new Database(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events WHERE id = ?").get(event.id) as { content_gz: Buffer };
+      assert.ok(row.content_gz);
+      assert.equal(gunzipSync(row.content_gz).toString(), "hello gzip");
+      db.close();
     });
   });
 

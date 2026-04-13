@@ -100,6 +100,13 @@ describe("CLI: audit list", () => {
     assert.ok(!stdout.includes("session.start"));
   });
 
+  it("shows content preview in list output", () => {
+    insert(store, { description: "msg", content: "Hello from the content field" });
+
+    const { stdout } = captureConsole(() => cliAuditHandler(store, {}));
+    assert.ok(stdout.includes("Hello from the content field"));
+  });
+
   it("filters by --session", () => {
     insert(store, { sessionId: "aaa", description: "match" });
     insert(store, { sessionId: "bbb", description: "no match" });
@@ -179,6 +186,35 @@ describe("CLI: audit export", () => {
     assert.ok(lines[0].includes("id,sequence,source"));
     assert.ok(lines[0].includes("metadata"));
     assert.ok(lines[1].includes("ev1"));
+  });
+
+  it("excludes content from JSON export by default", () => {
+    insert(store, { description: "ev1", content: "full body" });
+
+    const { stdout } = captureConsole(() => cliExportHandler(store));
+    const parsed = JSON.parse(stdout.trim());
+    assert.equal(parsed.content, undefined);
+  });
+
+  it("includes content in JSON export with --include-content", () => {
+    insert(store, { description: "ev1", content: "full body" });
+
+    const { stdout } = captureConsole(() =>
+      cliExportHandler(store, undefined, { includeContent: true }),
+    );
+    const parsed = JSON.parse(stdout.trim());
+    assert.equal(parsed.content, "full body");
+  });
+
+  it("includes content column in CSV export with --include-content", () => {
+    insert(store, { description: "ev1", content: "csv body" });
+
+    const { stdout } = captureConsole(() =>
+      cliExportHandler(store, "csv", { includeContent: true }),
+    );
+    const lines = stdout.trim().split("\n");
+    assert.ok(lines[0].includes("content"));
+    assert.ok(lines[1].includes("csv body"));
   });
 
   it("filters exports by --type", () => {
