@@ -67,9 +67,9 @@ function stripGzipWrapper(gz: Buffer): Buffer {
 function previewGunzip(gz: Buffer, maxChars: number): string | undefined {
   try {
     const raw = stripGzipWrapper(gz);
-    const prefix = raw.subarray(0, maxChars * 4);
+    const prefix = raw.subarray(0, (maxChars + 1) * 4); //worst case: incompressible text of 4 bytes unicode chars
     const buf = inflateRawSync(prefix, { finishFlush: constants.Z_SYNC_FLUSH });
-    let str = buf.toString("utf-8").replace(/\ufffd+$/, "").slice(0, maxChars);
+    let str = buf.toString("utf-8").slice(0, maxChars);
     // Trim lone high surrogate left by slicing through an emoji
     const last = str.charCodeAt(str.length - 1);
     if (last >= 0xd800 && last <= 0xdbff) str = str.slice(0, -1);
