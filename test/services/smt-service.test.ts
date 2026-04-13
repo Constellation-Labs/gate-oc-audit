@@ -61,6 +61,16 @@ describe("SmtService", () => {
     assert.equal(h1.length, 64);
   });
 
+  it("raw hash covers content — different content produces different hash", () => {
+    const base = makeEvent();
+    const hashNoContent = service.computeRawHash(base);
+    const hashA = service.computeRawHash({ ...base, content: "a" });
+    const hashB = service.computeRawHash({ ...base, content: "b" });
+    assert.notEqual(hashNoContent, hashA);
+    assert.notEqual(hashNoContent, hashB);
+    assert.notEqual(hashA, hashB);
+  });
+
   it("generates inclusion proof after insert", () => {
     const event = makeEvent();
     service.onEventAppended(event);

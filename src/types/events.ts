@@ -78,7 +78,6 @@ export interface PromptMetadata {
   cacheWriteTokens?: number;
   durationMs?: number;
   costUsd?: number;
-  truncatedPrompt?: string;
 }
 
 export interface ToolMetadata {
@@ -86,7 +85,6 @@ export interface ToolMetadata {
   args?: Record<string, unknown>;
   exitCode?: number;
   durationMs?: number;
-  truncatedOutput?: string;
   error?: string;
 }
 
@@ -102,6 +100,7 @@ export interface AuditEvent {
   category: EventCategory;
   description: string;
   metadata: Record<string, unknown>;
+  content?: string;
   createdAt: string;
   receivedAt?: string;
   syncedAt?: string;

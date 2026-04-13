@@ -272,17 +272,15 @@ describe("registerHooks", () => {
       assert.equal(meta.sender, "user-123");
       assert.equal(meta.channel, "telegram");
       assert.equal(meta.contentLength, 14);
-      assert.equal(meta.truncatedContent, "Please help me");
     });
 
-    it("truncates content to 50 chars", () => {
+    it("stores contentLength for long messages", () => {
       fireHook(api, "message_received",
         { from: "user", content: "a".repeat(1000) },
         { channelId: "telegram" },
       );
 
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
-      assert.equal(meta.truncatedContent.length, 500);
       assert.equal(meta.contentLength, 1000);
     });
 

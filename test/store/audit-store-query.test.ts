@@ -113,6 +113,64 @@ describe("AuditStore.query", () => {
   });
 });
 
+describe("AuditStore.query content options", () => {
+  let dbPath: string;
+  let store: AuditStore;
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("does not return content by default", () => {
+    insert(store, { content: "full message" });
+    const events = store.query();
+    assert.equal(events[0].content, undefined);
+  });
+
+  it("returns full content with includeContent", () => {
+    insert(store, { content: "full message" });
+    const events = store.query({ includeContent: true });
+    assert.equal(events[0].content, "full message");
+  });
+
+  it("returns truncated content with contentPreview", () => {
+    const longContent = "a".repeat(5000);
+    insert(store, { content: longContent });
+    const events = store.query({ contentPreview: 100 });
+    assert.ok(events[0].content);
+    assert.ok(events[0].content!.length <= 100);
+    assert.equal(events[0].content, "a".repeat(100));
+  });
+
+  it("includeContent takes precedence over contentPreview", () => {
+    const longContent = "b".repeat(2000);
+    insert(store, { content: longContent });
+    const events = store.query({ includeContent: true, contentPreview: 100 });
+    assert.equal(events[0].content, longContent);
+  });
+
+  it("contentPreview handles small content shorter than limit", () => {
+    insert(store, { content: "tiny" });
+    const events = store.query({ contentPreview: 500 });
+    assert.equal(events[0].content, "tiny");
+  });
+
+  it("contentPreview handles unicode content", () => {
+    const cjk = "こんにちは世界".repeat(100);
+    insert(store, { content: cjk });
+    const events = store.query({ contentPreview: 50 });
+    assert.ok(events[0].content);
+    assert.ok(events[0].content!.length <= 50);
+    assert.equal(events[0].content, cjk.slice(0, 50));
+  });
+});
+
 describe("AuditStore.count", () => {
   let dbPath: string;
   let store: AuditStore;

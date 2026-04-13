@@ -1,7 +1,7 @@
 import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler} from "./cli.js";
+import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
 import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService} from "./services/de-anchor.js";
@@ -80,7 +80,8 @@ export default (() => {
                     .option("--category <category>", "Filter by category")
                     .option("--session <id>", "Filter by session ID")
                     .option("--limit <n>", "Max events to export")
-                    .action((format: string | undefined, opts: Record<string, string>) =>
+                    .option("--include-content", "Include full decompressed content in output")
+                    .action((format: string | undefined, opts: AuditExportOptions) =>
                         cliExportHandler(getStore(), format, opts),
                     );
 
@@ -378,6 +379,7 @@ export default (() => {
                                 limit,
                                 offset,
                                 order: "asc",
+                                includeContent: true,
                             }),
                             pending,
                         );

@@ -225,7 +225,7 @@ export class SmtService {
 
   /**
    * Compute the raw hash for an event (for proof lookups).
-   * Includes full event fields — use for exact replay verification.
+   * Includes full event fields plus raw content — use for exact replay verification.
    */
   computeRawHash(event: AuditEvent): string {
     return sdk.hashDocument(
@@ -237,6 +237,7 @@ export class SmtService {
           category: event.category,
           description: event.description,
           metadata: event.metadata,
+          content: event.content,
         }),
     );
   }
