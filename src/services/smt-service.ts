@@ -311,6 +311,7 @@ export class SmtService {
     const hashes: string[] = treeEpochs?.get(epoch) || [];
 
     if (hashes.length === 0) {
+      treeEpochs?.delete(epoch);
       return { pruned: 0, proofsExported: 0, root: store.getRoot() };
     }
 
@@ -571,10 +572,10 @@ export class SmtService {
 
       for (const epoch of expiredEpochs) {
         const result = this.pruneEpoch(treeKey, epoch);
-        if (!("error" in result)) {
-          console.error(
-            `[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`,
-          );
+        if ("error" in result) {
+          console.error(`[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`);
+        } else if (result.pruned > 0) {
+          console.error(`[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`);
         }
       }
     }

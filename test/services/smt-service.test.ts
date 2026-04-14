@@ -322,6 +322,37 @@ describe("SmtService", () => {
     assert.equal(service.getRoot(treeKey)!.entryCount, entryCountBefore);
   });
 
+  it("createSnapshot → restoreSnapshot preserves frozen keys", () => {
+    const event = makeEvent({ sequence: 1 });
+    service.onEventAppended(event);
+    const treeKey = service.listTrees()[0].key;
+    const rootBefore = service.getCurrentSmtRoot();
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    const pruneResult = service.pruneEpoch(treeKey, currentEpoch);
+    assert.ok(!("error" in pruneResult) && pruneResult.pruned > 0);
+
+    const snapshot = service.createSnapshot(treeKey);
+    assert.ok(!("error" in snapshot));
+
+    // Restore into a fresh service
+    const svc2 = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}`,
+      },
+    });
+    const restoreResult = svc2.restoreSnapshot(treeKey, snapshot as any);
+    assert.ok(!("error" in restoreResult));
+    assert.equal(restoreResult.root, rootBefore);
+
+    // Re-appending the frozen event should be a no-op
+    svc2.onEventAppended(event);
+    assert.equal(svc2.getCurrentSmtRoot(treeKey), rootBefore);
+    assert.equal(svc2.getRoot(treeKey)!.entryCount, service.getRoot(treeKey)!.entryCount);
+  });
+
   it("replayEvents supports batched fetcher callback", () => {
     const events = Array.from({ length: 5 }, (_, i) =>
       makeEvent({ sequence: i + 1 }),
