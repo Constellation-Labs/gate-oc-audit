@@ -32,17 +32,22 @@ export interface Snapshot {
 export function serializeSmtState(
   nodes: Map<string, string[]>,
   root: string,
+  frozenKeys?: string[],
 ): Buffer {
   const obj: Record<string, string[]> = {};
   for (const [key, value] of nodes) {
     obj[key] = value;
   }
-  return Buffer.from(sdk.canonicalize({ root, nodes: obj }));
+  const payload: Record<string, unknown> = { root, nodes: obj };
+  if (frozenKeys && frozenKeys.length > 0) {
+    payload.frozenKeys = frozenKeys;
+  }
+  return Buffer.from(sdk.canonicalize(payload));
 }
 
 export function deserializeSmtState(
   data: Buffer,
-): { root: string; nodes: Map<string, string[]> } {
+): { root: string; nodes: Map<string, string[]>; frozenKeys?: string[] } {
   const obj = JSON.parse(data.toString());
   const nodes = new Map<string, string[]>();
   for (const [key, value] of Object.entries(
@@ -50,15 +55,20 @@ export function deserializeSmtState(
   )) {
     nodes.set(key, value);
   }
-  return { root: obj.root, nodes };
+  return {
+    root: obj.root,
+    nodes,
+    frozenKeys: Array.isArray(obj.frozenKeys) ? obj.frozenKeys : undefined,
+  };
 }
 
 export function createSnapshot(
   nodes: Map<string, string[]>,
   root: string,
   meta: Snapshot["meta"],
+  frozenKeys?: string[],
 ): Snapshot {
-  const serialized = serializeSmtState(nodes, root);
+  const serialized = serializeSmtState(nodes, root, frozenKeys);
   const contentHash = sdk.hashDocument(serialized);
 
   return {
@@ -71,7 +81,7 @@ export function createSnapshot(
 
 export function restoreSnapshot(
   snapshot: Snapshot,
-): { root: string; nodes: Map<string, string[]> } {
+): { root: string; nodes: Map<string, string[]>; frozenKeys?: string[] } {
   const raw = Buffer.from(snapshot.data, "base64");
 
   const computedHash = sdk.hashDocument(raw);

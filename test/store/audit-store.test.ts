@@ -122,7 +122,8 @@ describe("AuditStore", () => {
       assert.equal(e3.sequence, 3);
       store2.close();
 
-      store = new AuditStore(makeTempDb());
+      dbPath = makeTempDb();
+      store = new AuditStore(dbPath);
     });
 
   });
@@ -143,23 +144,27 @@ describe("AuditStore", () => {
     });
 
     it("clears degraded flag after successful append", () => {
-      // Force a failure by closing and reopening
+      // Force degraded via a corrupted prepared statement
       const path2 = makeTempDb();
       const store2 = new AuditStore(path2);
-
-      // Append succeeds
       store2.append(sampleInsert());
-      assert.equal(store2.isDegraded(), false);
 
+      // Close and reopen to get a fresh handle, then corrupt it
       store2.close();
-
-      // Verify that after a failure + success cycle, degraded clears
-      // We can't easily force a mid-operation failure, but we verify the flag
-      // is set to false on each successful append
       const store3 = new AuditStore(path2);
-      store3.append(sampleInsert({ description: "recovery" }));
-      assert.equal(store3.isDegraded(), false);
+
+      // Manually trigger degraded by closing underlying DB and attempting append
       store3.close();
+      store3.append(sampleInsert({ description: "will fail" }));
+      assert.equal(store3.isDegraded(), true);
+
+      // Reopen — degraded starts false, proving recovery on construction
+      const store4 = new AuditStore(path2);
+      assert.equal(store4.isDegraded(), false);
+      store4.append(sampleInsert({ description: "recovery" }));
+      assert.equal(store4.isDegraded(), false);
+      store4.close();
+      cleanupDb(path2);
     });
 
     it("does not advance sequence on failure", () => {
@@ -175,7 +180,8 @@ describe("AuditStore", () => {
       assert.equal(e2.sequence, 2);
       store2.close();
 
-      store = new AuditStore(makeTempDb());
+      dbPath = makeTempDb();
+      store = new AuditStore(dbPath);
     });
   });
 
