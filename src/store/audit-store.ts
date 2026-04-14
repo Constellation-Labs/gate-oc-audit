@@ -153,6 +153,7 @@ export class AuditStore {
 
   private stmts: {
     getManifests: Database.Statement;
+    getManifestsByType: Database.Statement;
     upsertManifest: Database.Statement;
     deleteManifest: Database.Statement;
     getCheckpoints: Database.Statement;
@@ -187,6 +188,7 @@ export class AuditStore {
 
     this.stmts = {
       getManifests: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests"),
+      getManifestsByType: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests WHERE manifest_type = ?"),
       upsertManifest: this.db.prepare(
         `INSERT INTO config_manifests (id, manifest_type, content_hash, file_path, captured_at)
          VALUES (?, ?, ?, ?, ?)
@@ -439,10 +441,15 @@ export class AuditStore {
     return (pageSize * pageCount) / (1024 * 1024);
   }
 
-  // --- Config manifest operations (used by ConfigWatcher) ---
+  // --- Config manifest operations (used by ConfigWatcher and FileWatcher) ---
 
   getManifests(): Array<{ id: string; contentHash: string; filePath: string | null }> {
     return (this.stmts.getManifests.all() as Array<{ id: string; content_hash: string; file_path: string | null }>)
+      .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path }));
+  }
+
+  getManifestsByType(manifestType: string): Array<{ id: string; contentHash: string; filePath: string | null }> {
+    return (this.stmts.getManifestsByType.all(manifestType) as Array<{ id: string; content_hash: string; file_path: string | null }>)
       .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path }));
   }
 

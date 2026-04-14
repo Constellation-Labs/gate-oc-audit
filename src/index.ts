@@ -10,6 +10,7 @@ import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
 import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
+import {FileWatcher} from "./services/file-watcher.js";
 
 export default (() => {
     let _registered = false;
@@ -420,6 +421,18 @@ export default (() => {
                 },
                 stop() {
                     deAnchor.stop();
+                },
+            });
+
+            const fileWatcher = new FileWatcher(activeStore, limiter, config);
+
+            api.registerService({
+                id: "constellation-audit-plugin:file-watcher",
+                async start() {
+                    await fileWatcher.start();
+                },
+                stop() {
+                    fileWatcher.stop();
                 },
             });
         },
