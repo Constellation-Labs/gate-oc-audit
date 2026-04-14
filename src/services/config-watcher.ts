@@ -235,12 +235,15 @@ export class ConfigWatcher {
 
   private loadManifestFromStore(): void {
     try {
-      for (const row of this.store.getManifests()) {
-        if (row.filePath) {
-          this.manifest.set(row.filePath, {
-            contentHash: row.contentHash,
-            filePath: row.filePath,
-          });
+      const configTypes: ManifestType[] = ["skills", "tools", "soul", "cron"];
+      for (const mt of configTypes) {
+        for (const row of this.store.getManifestsByType(mt)) {
+          if (row.filePath) {
+            this.manifest.set(row.filePath, {
+              contentHash: row.contentHash,
+              filePath: row.filePath,
+            });
+          }
         }
       }
     } catch {

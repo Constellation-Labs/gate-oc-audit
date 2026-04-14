@@ -90,12 +90,15 @@ export class FileWatcher {
       return;
     }
 
-    let minimatch: (path: string, pattern: string, options?: { dot?: boolean }) => boolean;
+    let isMatch: (path: string, pattern: string, options?: { dot?: boolean }) => boolean;
     try {
-      const mod = await import("minimatch");
-      minimatch = mod.minimatch;
+      const mod = await import("picomatch");
+      // picomatch v4 CJS: dynamic import wraps the module — isMatch lives on .default
+      const pm = mod.default ?? mod;
+      isMatch = pm.isMatch ?? pm;
+      if (typeof isMatch !== "function") throw new Error("isMatch not found");
     } catch {
-      console.error("[audit-plugin] minimatch not available, file watching disabled");
+      console.error("[audit-plugin] picomatch not available, file watching disabled");
       return;
     }
 
@@ -104,10 +107,10 @@ export class FileWatcher {
     // Pre-resolve patterns and build matchers once, so the ignored callback
     // only needs a cheap closure lookup per file.
     const resolvedPatterns = this.patterns.map((p) => resolve(p));
-    const matchers = resolvedPatterns.map((p) => (filePath: string) => minimatch(filePath, p, { dot: true }));
+    const matchers = resolvedPatterns.map((p) => (filePath: string) => isMatch(filePath, p, { dot: true }));
 
     const resolvedIgnore = this.ignorePatterns.map((p) => resolve(p));
-    const ignoreMatchers = resolvedIgnore.map((p) => (filePath: string) => minimatch(filePath, p, { dot: true }));
+    const ignoreMatchers = resolvedIgnore.map((p) => (filePath: string) => isMatch(filePath, p, { dot: true }));
 
     // Pre-resolve base directories so the watched set is known up front.
     const baseDirs = [...new Set(resolvedPatterns.map(globParent))].filter((d) => existsSync(d));
