@@ -81,12 +81,16 @@
       },
       "fileWatchIntervalMs": {
         "type": "number",
-        "description": "Polling interval in milliseconds for file watching (default: 1000)"
+        "description": "Polling interval in milliseconds for file watching when fileWatchUsePolling is true (default: 1000)"
       },
       "fileWatchIgnorePatterns": {
         "type": "array",
         "items": { "type": "string" },
         "description": "Glob patterns to exclude from file watching (e.g. [\"**/node_modules/**\", \"**/.git/**\"])"
+      },
+      "fileWatchUsePolling": {
+        "type": "boolean",
+        "description": "Use polling instead of native fs events for file watching (default: false). Enable for network mounts."
       }
     },
     "additionalProperties": false

@@ -21,6 +21,7 @@ describe("FileWatcher", () => {
   let store: AuditStore;
   let limiter: RateLimiter;
   let watchDir: string;
+  let activeWatcher: FileWatcher | undefined;
 
   beforeEach(() => {
     dbPath = makeTempDb();
@@ -31,15 +32,17 @@ describe("FileWatcher", () => {
   });
 
   afterEach(() => {
+    activeWatcher?.stop();
+    activeWatcher = undefined;
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
     rmSync(watchDir, { recursive: true, force: true });
   });
 
   it("does nothing when no patterns configured", async () => {
-    const watcher = new FileWatcher(store, limiter, {});
-    await watcher.start();
-    watcher.stop();
+    activeWatcher = new FileWatcher(store, limiter, {});
+    await activeWatcher.start();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.equal(events.length, 0);
@@ -48,29 +51,31 @@ describe("FileWatcher", () => {
   it("does not fire events for pre-existing files on startup", async () => {
     writeFileSync(join(watchDir, "existing.txt"), "already here");
 
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(1500);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.equal(events.length, 0, "Should not fire events for pre-existing files");
   });
 
   it("detects new file", async () => {
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     writeFileSync(join(watchDir, "hello.txt"), "hello world");
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.ok(events.length > 0, "Should have logged a file change event");
@@ -85,11 +90,12 @@ describe("FileWatcher", () => {
   });
 
   it("detects modified file", async () => {
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     // Create file while watcher is running
@@ -99,7 +105,7 @@ describe("FileWatcher", () => {
     // Modify it
     writeFileSync(join(watchDir, "data.txt"), "version 2");
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const modified = events.filter(
@@ -112,11 +118,12 @@ describe("FileWatcher", () => {
   it("detects removed file", async () => {
     const filePath = join(watchDir, "temp.txt");
 
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     // Create then remove while watcher is running
@@ -125,7 +132,7 @@ describe("FileWatcher", () => {
 
     rmSync(filePath);
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const removed = events.filter(
@@ -137,17 +144,18 @@ describe("FileWatcher", () => {
   it("respects ignore patterns", async () => {
     mkdirSync(join(watchDir, "ignored"), { recursive: true });
 
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIgnorePatterns: [join(watchDir, "ignored", "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     writeFileSync(join(watchDir, "ignored", "secret.txt"), "should be ignored");
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const ignoredEvents = events.filter(
@@ -157,11 +165,12 @@ describe("FileWatcher", () => {
   });
 
   it("deduplicates identical content", async () => {
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 100,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     // Create file while watcher is running
@@ -171,7 +180,7 @@ describe("FileWatcher", () => {
     // Re-write the same content
     writeFileSync(join(watchDir, "stable.txt"), "unchanged content");
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const stableEvents = events.filter(
@@ -186,27 +195,28 @@ describe("FileWatcher", () => {
   });
 
   it("clamps pollIntervalMs to minimum of 100", async () => {
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
       fileWatchIntervalMs: 0,
+      fileWatchUsePolling: true,
     });
-    await watcher.start();
+    await activeWatcher.start();
     await sleep(500);
 
     writeFileSync(join(watchDir, "fast.txt"), "content");
     await sleep(2000);
-    watcher.stop();
+    activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.ok(events.length > 0, "Should still detect files with clamped interval");
   });
 
   it("stop is idempotent", async () => {
-    const watcher = new FileWatcher(store, limiter, {
+    activeWatcher = new FileWatcher(store, limiter, {
       fileWatchPatterns: [join(watchDir, "**")],
     });
-    await watcher.start();
-    watcher.stop();
-    watcher.stop(); // should not throw
+    await activeWatcher.start();
+    activeWatcher.stop();
+    activeWatcher.stop(); // should not throw
   });
 });

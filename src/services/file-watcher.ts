@@ -1,30 +1,13 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { AuditStore } from "../store/audit-store.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { ConfigChangeType, FileChangeMetadata } from "../types/events.js";
+import { fileHash, fileSizeBytes } from "../util/fs.js";
 
 const MANIFEST_TYPE = "file_watch";
 
 const GLOB_CHARS = /[*?{[]/;
-
-function fileHash(filePath: string): string | undefined {
-  try {
-    const content = readFileSync(filePath);
-    return createHash("sha256").update(content).digest("hex");
-  } catch {
-    return undefined;
-  }
-}
-
-function fileSizeBytes(filePath: string): number | undefined {
-  try {
-    return statSync(filePath).size;
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Extract the base directory from a glob pattern (the part before the first
@@ -42,7 +25,7 @@ function globParent(pattern: string): string {
   }
   const prefix = resolved.slice(0, idx);
   const lastSep = prefix.lastIndexOf(sep);
-  if (lastSep <= 0) return prefix;
+  if (lastSep <= 0) return resolve(".");
   // Preserve drive root on Windows (e.g. "C:\") and filesystem root on POSIX
   return lastSep === prefix.indexOf(sep) ? prefix.slice(0, lastSep + 1) : prefix.slice(0, lastSep);
 }
@@ -60,6 +43,7 @@ export class FileWatcher {
   private patterns: string[];
   private ignorePatterns: string[];
   private pollIntervalMs: number;
+  private usePolling: boolean;
 
   constructor(
     store: AuditStore,
@@ -77,9 +61,13 @@ export class FileWatcher {
     this.pollIntervalMs = typeof config.fileWatchIntervalMs === "number"
       ? Math.max(100, config.fileWatchIntervalMs)
       : 1000;
+    this.usePolling = typeof config.fileWatchUsePolling === "boolean"
+      ? config.fileWatchUsePolling
+      : false;
   }
 
   async start(): Promise<void> {
+    if (this.watcher) return;
     if (this.patterns.length === 0) return;
 
     let chokidar: typeof import("chokidar");
@@ -120,29 +108,17 @@ export class FileWatcher {
       return;
     }
 
-    // Cache resolved paths inside the ignored callback to avoid re-resolving
-    // the same path on every poll cycle.
-    const resolvedCache = new Map<string, string>();
-    function cachedResolve(filePath: string): string {
-      let r = resolvedCache.get(filePath);
-      if (r === undefined) {
-        r = resolve(filePath);
-        resolvedCache.set(filePath, r);
-      }
-      return r;
-    }
-
     this.watcher = chokidar.watch(baseDirs, {
       ignoreInitial: true,
       persistent: true,
-      depth: 10,
-      usePolling: true,
+      depth: 5,
+      usePolling: this.usePolling,
       interval: this.pollIntervalMs,
       awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
       ignored: (filePath: string, stats) => {
         if (stats?.isDirectory()) return false;
         if (!stats) return false; // first pass, no stats yet — let through
-        const r = cachedResolve(filePath);
+        const r = resolve(filePath);
         if (ignoreMatchers.some((m) => m(r))) return true;
         return !matchers.some((m) => m(r));
       },
@@ -169,7 +145,7 @@ export class FileWatcher {
       if (rawChangeType === "removed") {
         if (!existing) return;
         this.manifest.delete(resolvedPath);
-        try { this.store.deleteManifest(resolvedPath); } catch (err) {
+        try { this.store.deleteManifest(`${MANIFEST_TYPE}:${resolvedPath}`); } catch (err) {
           console.error("[audit-plugin] Failed to delete file watch manifest:", err instanceof Error ? err.message : err);
         }
       } else {
@@ -178,7 +154,7 @@ export class FileWatcher {
         if (existing?.contentHash === hash) return; // no actual change
 
         this.manifest.set(resolvedPath, { contentHash: hash, filePath: resolvedPath });
-        try { this.store.upsertManifest(resolvedPath, MANIFEST_TYPE, hash, resolvedPath); } catch (err) {
+        try { this.store.upsertManifest(`${MANIFEST_TYPE}:${resolvedPath}`, MANIFEST_TYPE, hash, resolvedPath); } catch (err) {
           console.error("[audit-plugin] Failed to upsert file watch manifest:", err instanceof Error ? err.message : err);
         }
 

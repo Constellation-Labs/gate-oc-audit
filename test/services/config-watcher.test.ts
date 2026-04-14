@@ -112,7 +112,7 @@ describe("ConfigWatcher", () => {
     await sleep(1500);
     watcher.stop();
 
-    const manifests = store.getManifests();
+    const manifests = store.getManifestsByType("skills");
 
     assert.ok(manifests.length > 0, "Should have entries in config_manifests");
     assert.ok(manifests.some((m) => m.id.includes("skills")));
