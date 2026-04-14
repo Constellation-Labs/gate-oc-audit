@@ -155,8 +155,6 @@ export class SmtStore {
     for (const [key, value] of nodes) {
       internalNodes.set(key, value);
     }
-    if (frozenKeys) {
-      this.frozenKeys = new Set(frozenKeys);
-    }
+    this.frozenKeys = new Set(frozenKeys ?? []);
   }
 }

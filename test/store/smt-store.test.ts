@@ -196,4 +196,19 @@ describe("SmtStore", () => {
     assert.equal(store2.isFrozen("aa01"), true);
     assert.equal(store2.isFrozen("aa02"), false);
   });
+
+  it("restoreFromState without frozenKeys clears existing frozen set", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.freezeLeaf("aa01");
+    assert.equal(store.isFrozen("aa01"), true);
+
+    // Restore an old-format snapshot (no frozenKeys) onto a store that already has frozen keys
+    const nodes = store.getNodes();
+    const root = store.getRoot();
+    store.restoreFromState(nodes, root);
+
+    assert.equal(store.getFrozenCount(), 0);
+    assert.equal(store.isFrozen("aa01"), false);
+  });
 });
