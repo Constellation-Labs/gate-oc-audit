@@ -15,6 +15,7 @@ export interface TreeInfo {
   root: string;
   size: number;
   entryCount: number;
+  frozenCount: number;
 }
 
 export class TreeManager {
@@ -49,6 +50,7 @@ export class TreeManager {
         root: store.getRoot(),
         size: store.getSize(),
         entryCount: store.getEntryCount(),
+        frozenCount: store.getFrozenCount(),
       });
     }
     return result;
@@ -74,6 +76,13 @@ export class TreeManager {
 
         batch.put("meta:root", snapshot.root);
         batch.put("meta:entryCount", String(store.getEntryCount()));
+
+        const frozenKeys = store.getFrozenKeys();
+        if (frozenKeys.size > 0) {
+          batch.put("meta:frozenKeys", JSON.stringify(Array.from(frozenKeys)));
+        } else {
+          batch.del("meta:frozenKeys");
+        }
 
         for (const [nodeHash, children] of snapshot.nodes) {
           batch.put(`n:${nodeHash}`, JSON.stringify(children));
@@ -116,7 +125,15 @@ export class TreeManager {
           }
         }
 
-        store.restore({ root, nodes });
+        let frozenKeys: string[] | undefined;
+        try {
+          const frozenRaw = await db.get("meta:frozenKeys");
+          frozenKeys = JSON.parse(frozenRaw) as string[];
+        } catch {
+          // No frozen keys — backward compatible
+        }
+
+        store.restore({ root, nodes, frozenKeys });
         this.trees.set(treeKey, store);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";

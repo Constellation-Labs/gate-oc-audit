@@ -197,6 +197,10 @@ export class SmtService {
       const rawHash = this.computeRawHash(event);
       const censoredHash = this.computeCensoredHash(event);
 
+      if (store.isFrozen(rawHash) || (censoredHash && store.isFrozen(censoredHash))) {
+        return;
+      }
+
       const result = insertEntry(store, {
         treeKey,
         rawHash,
@@ -268,7 +272,11 @@ export class SmtService {
     const key = treeKey ?? this.getTreeKey();
     const store = this.manager.get(key);
     if (!store) return null;
-    return store.createProof(hash);
+    const proof = store.createProof(hash);
+    if (store.isFrozen(hash)) {
+      return { ...proof, frozen: true };
+    }
+    return proof;
   }
 
   verifyProof(proof: SmtProof): boolean {
@@ -302,8 +310,13 @@ export class SmtService {
     const treeEpochs = this.epochEntries.get(treeKey);
     const hashes: string[] = treeEpochs?.get(epoch) || [];
 
-    // Export proofs before deletion
-    const proofs = hashes.map((h) => store.createProof(h));
+    if (hashes.length === 0) {
+      treeEpochs?.delete(epoch);
+      return { pruned: 0, proofsExported: 0, root: store.getRoot() };
+    }
+
+    // Export proofs before freezing, annotated with frozen: true
+    const proofs = hashes.map((h) => ({ ...store.createProof(h), frozen: true }));
 
     let treeExports = this.exportedProofs.get(treeKey);
     if (!treeExports) {
@@ -312,9 +325,9 @@ export class SmtService {
     }
     treeExports.set(epoch, proofs);
 
-    // Delete entries from SMT and clean up associated metadata
+    // Freeze keys instead of deleting — root is unchanged
     for (const h of hashes) {
-      store.delete(h);
+      store.freezeLeaf(h);
       this.leafValues.delete(h);
     }
     treeEpochs?.delete(epoch);
@@ -377,6 +390,7 @@ export class SmtService {
 
     const nodes = store.getNodes();
     const root = store.getRoot();
+    const frozenKeys = store.getFrozenKeys();
 
     return createSmtSnapshot(nodes, root, {
       treeKey,
@@ -384,7 +398,7 @@ export class SmtService {
       nodeCount: nodes.size,
       root,
       createdAt: new Date().toISOString(),
-    });
+    }, frozenKeys.size > 0 ? Array.from(frozenKeys) : undefined);
   }
 
   restoreSnapshot(
@@ -394,7 +408,7 @@ export class SmtService {
     try {
       const restored = restoreSmtSnapshot(snapshot);
       const store = this.manager.getOrCreate(treeKey);
-      store.restoreFromState(restored.nodes, restored.root);
+      store.restoreFromState(restored.nodes, restored.root, restored.frozenKeys);
       return { root: restored.root, nodeCount: restored.nodes.size };
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -560,10 +574,8 @@ export class SmtService {
         const result = this.pruneEpoch(treeKey, epoch);
         if ("error" in result) {
           console.error(`[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`);
-        } else {
-          console.error(
-            `[audit-plugin] Pruned epoch ${epoch} from SMT tree ${treeKey}: ${result.pruned} entries`,
-          );
+        } else if (result.pruned > 0) {
+          console.error(`[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`);
         }
       }
     }

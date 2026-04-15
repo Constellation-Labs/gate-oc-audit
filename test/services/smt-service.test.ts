@@ -199,6 +199,160 @@ describe("SmtService", () => {
     }
   });
 
+  it("pruneEpoch preserves root hash", () => {
+    for (let i = 0; i < 5; i++) {
+      service.onEventAppended(makeEvent({ sequence: i + 1 }));
+    }
+    const treeKey = service.listTrees()[0].key;
+    const rootBefore = service.getCurrentSmtRoot();
+    assert.ok(rootBefore);
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    const result = service.pruneEpoch(treeKey, currentEpoch);
+    assert.ok(!("error" in result));
+    assert.ok(result.pruned > 0);
+
+    const rootAfter = service.getCurrentSmtRoot();
+    assert.equal(rootAfter, rootBefore, "root must not change after freeze-prune");
+    assert.equal(result.root, rootBefore, "returned root must match pre-freeze root");
+  });
+
+  it("pruneEpoch exported proofs have frozen: true", () => {
+    for (let i = 0; i < 3; i++) {
+      service.onEventAppended(makeEvent({ sequence: i + 1 }));
+    }
+    const treeKey = service.listTrees()[0].key;
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+
+    service.pruneEpoch(treeKey, currentEpoch);
+
+    const exported = service.getExportedProofs(treeKey, currentEpoch) as any;
+    assert.ok(exported.proofCount > 0);
+    for (const proof of exported.proofs) {
+      assert.equal(proof.frozen, true, "exported proofs should be annotated frozen");
+    }
+  });
+
+  it("pre-freeze proofs verify after pruneEpoch", () => {
+    const events: ReturnType<typeof makeEvent>[] = [];
+    for (let i = 0; i < 3; i++) {
+      const e = makeEvent({ sequence: i + 1 });
+      events.push(e);
+      service.onEventAppended(e);
+    }
+    const treeKey = service.listTrees()[0].key;
+
+    // Capture proofs before freezing
+    const preFreezeProofs = events.map((e) => {
+      const hash = service.computeRawHash(e);
+      return service.createProof(hash, treeKey)!;
+    });
+    for (const p of preFreezeProofs) {
+      assert.ok(p);
+      assert.equal(p.membership, true);
+    }
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    service.pruneEpoch(treeKey, currentEpoch);
+
+    // Pre-freeze proofs still verify
+    for (const p of preFreezeProofs) {
+      assert.equal(service.verifyProof(p), true, "pre-freeze proof must still verify");
+    }
+  });
+
+  it("createProof annotates frozen leaves", () => {
+    const event = makeEvent({ sequence: 1 });
+    service.onEventAppended(event);
+    const treeKey = service.listTrees()[0].key;
+    const hash = service.computeRawHash(event);
+
+    // Before freeze: no frozen flag
+    const proofBefore = service.createProof(hash, treeKey)!;
+    assert.equal(proofBefore.frozen, undefined);
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    service.pruneEpoch(treeKey, currentEpoch);
+
+    // After freeze: frozen flag set
+    const proofAfter = service.createProof(hash, treeKey)!;
+    assert.equal(proofAfter.frozen, true);
+    assert.equal(proofAfter.membership, true, "leaf is still in the tree");
+    assert.equal(service.verifyProof(proofAfter), true);
+  });
+
+  it("pruneEpoch with empty epoch returns zero counts", () => {
+    service.onEventAppended(makeEvent({ sequence: 1 }));
+    const treeKey = service.listTrees()[0].key;
+
+    const result = service.pruneEpoch(treeKey, 0); // epoch 0 has no entries
+    assert.ok(!("error" in result));
+    assert.equal(result.pruned, 0);
+    assert.equal(result.proofsExported, 0);
+  });
+
+  it("listTrees includes frozenCount", () => {
+    for (let i = 0; i < 3; i++) {
+      service.onEventAppended(makeEvent({ sequence: i + 1 }));
+    }
+    const treeKey = service.listTrees()[0].key;
+    assert.equal(service.listTrees()[0].frozenCount, 0);
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    service.pruneEpoch(treeKey, currentEpoch);
+
+    assert.ok(service.listTrees()[0].frozenCount > 0);
+  });
+
+  it("re-appending a frozen event is a no-op", () => {
+    const event = makeEvent({ sequence: 1 });
+    service.onEventAppended(event);
+    const treeKey = service.listTrees()[0].key;
+    const rootBefore = service.getCurrentSmtRoot();
+    const entryCountBefore = service.getRoot(treeKey)!.entryCount;
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    service.pruneEpoch(treeKey, currentEpoch);
+
+    // Re-append the same event (simulates replay after restart)
+    service.onEventAppended(event);
+
+    // Tree should be unchanged — no throw, no duplicate entries
+    assert.equal(service.getCurrentSmtRoot(), rootBefore);
+    assert.equal(service.getRoot(treeKey)!.entryCount, entryCountBefore);
+  });
+
+  it("createSnapshot → restoreSnapshot preserves frozen keys", () => {
+    const event = makeEvent({ sequence: 1 });
+    service.onEventAppended(event);
+    const treeKey = service.listTrees()[0].key;
+    const rootBefore = service.getCurrentSmtRoot();
+
+    const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
+    const pruneResult = service.pruneEpoch(treeKey, currentEpoch);
+    assert.ok(!("error" in pruneResult) && pruneResult.pruned > 0);
+
+    const snapshot = service.createSnapshot(treeKey);
+    assert.ok(!("error" in snapshot));
+
+    // Restore into a fresh service
+    const svc2 = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}`,
+      },
+    });
+    const restoreResult = svc2.restoreSnapshot(treeKey, snapshot as any);
+    assert.ok(!("error" in restoreResult));
+    assert.equal(restoreResult.root, rootBefore);
+
+    // Re-appending the frozen event should be a no-op
+    svc2.onEventAppended(event);
+    assert.equal(svc2.getCurrentSmtRoot(treeKey), rootBefore);
+    assert.equal(svc2.getRoot(treeKey)!.entryCount, service.getRoot(treeKey)!.entryCount);
+  });
+
   it("replayEvents supports batched fetcher callback", () => {
     const events = Array.from({ length: 5 }, (_, i) =>
       makeEvent({ sequence: i + 1 }),

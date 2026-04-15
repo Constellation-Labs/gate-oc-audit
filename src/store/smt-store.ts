@@ -22,11 +22,13 @@ export interface SmtProof {
   siblings: string[];
   root: string;
   membership: boolean;
+  frozen?: boolean;
 }
 
 export interface SmtSnapshot {
   root: string;
   nodes: Map<string, string[]>;
+  frozenKeys?: string[];
 }
 
 function sha256Hash(childNodes: (string | bigint)[]): string {
@@ -37,6 +39,7 @@ function sha256Hash(childNodes: (string | bigint)[]): string {
 export class SmtStore {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private smt: any;
+  private frozenKeys: Set<string> = new Set();
 
   constructor() {
     this.smt = new SMT(sha256Hash, false);
@@ -59,6 +62,23 @@ export class SmtStore {
     this.smt.delete(key);
   }
 
+  /** Mark a leaf key as frozen. The leaf stays in the SMT; root is unchanged. */
+  freezeLeaf(key: string): void {
+    this.frozenKeys.add(key);
+  }
+
+  isFrozen(key: string): boolean {
+    return this.frozenKeys.has(key);
+  }
+
+  getFrozenKeys(): Set<string> {
+    return new Set(this.frozenKeys);
+  }
+
+  getFrozenCount(): number {
+    return this.frozenKeys.size;
+  }
+
   createProof(key: string): SmtProof {
     const proof = this.smt.createProof(key);
     return {
@@ -71,7 +91,8 @@ export class SmtStore {
   }
 
   verifyProof(proof: SmtProof): boolean {
-    return this.smt.verifyProof(proof);
+    const { frozen: _, ...smtProof } = proof;
+    return this.smt.verifyProof(smtProof);
   }
 
   getRoot(): string {
@@ -106,6 +127,7 @@ export class SmtStore {
     return {
       root: String(this.smt.root),
       nodes: new Map(nodes),
+      frozenKeys: this.frozenKeys.size > 0 ? Array.from(this.frozenKeys) : undefined,
     };
   }
 
@@ -117,6 +139,7 @@ export class SmtStore {
     for (const [key, value] of snapshot.nodes) {
       nodes.set(key, value);
     }
+    this.frozenKeys = new Set(snapshot.frozenKeys ?? []);
   }
 
   getNodes(): Map<string, string[]> {
@@ -124,7 +147,7 @@ export class SmtStore {
     return new Map(this.smt.nodes);
   }
 
-  restoreFromState(nodes: Map<string, string[]>, root: string): void {
+  restoreFromState(nodes: Map<string, string[]>, root: string, frozenKeys?: Iterable<string>): void {
     this.smt.root = root;
     // @ts-ignore — accessing internal nodes map
     const internalNodes: Map<string, string[]> = this.smt.nodes;
@@ -132,5 +155,6 @@ export class SmtStore {
     for (const [key, value] of nodes) {
       internalNodes.set(key, value);
     }
+    this.frozenKeys = new Set(frozenKeys ?? []);
   }
 }

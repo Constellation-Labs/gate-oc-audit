@@ -100,4 +100,115 @@ describe("SmtStore", () => {
     // Proof root no longer matches current root
     assert.notEqual(proof.root, store.getRoot());
   });
+
+  it("freezeLeaf preserves root hash", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    const rootBefore = store.getRoot();
+
+    store.freezeLeaf("aa01");
+
+    assert.equal(store.getRoot(), rootBefore, "root must not change after freeze");
+    assert.equal(store.isFrozen("aa01"), true);
+    assert.equal(store.isFrozen("aa02"), false);
+    assert.equal(store.getFrozenCount(), 1);
+  });
+
+  it("frozen leaf still produces valid membership proof", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    const proofBefore = store.createProof("aa01");
+
+    store.freezeLeaf("aa01");
+
+    const proofAfter = store.createProof("aa01");
+    assert.equal(proofAfter.membership, true, "frozen leaf is still in the tree");
+    assert.equal(proofAfter.root, proofBefore.root, "root is unchanged");
+    assert.equal(store.verifyProof(proofAfter), true);
+  });
+
+  it("pre-freeze proof verifies after freeze", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    const proofBefore = store.createProof("aa01");
+
+    store.freezeLeaf("aa01");
+
+    assert.equal(store.verifyProof(proofBefore), true, "pre-freeze proof still valid");
+  });
+
+  it("non-frozen leaves work normally after freeze", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    store.freezeLeaf("aa01");
+
+    // Non-frozen leaf still accessible
+    assert.equal(store.get("aa02"), "bb02");
+    const proof = store.createProof("aa02");
+    assert.equal(proof.membership, true);
+    assert.equal(store.verifyProof(proof), true);
+  });
+
+  it("new inserts work after freeze", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.freezeLeaf("aa01");
+    const rootAfterFreeze = store.getRoot();
+
+    store.add("aa03", "bb03");
+    assert.notEqual(store.getRoot(), rootAfterFreeze, "root changes on new insert");
+    assert.equal(store.get("aa03"), "bb03");
+    assert.equal(store.isFrozen("aa01"), true);
+    assert.equal(store.isFrozen("aa03"), false);
+  });
+
+  it("checkpoint/restore preserves frozen keys", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    store.freezeLeaf("aa01");
+    const snapshot = store.checkpoint();
+
+    const store2 = new SmtStore();
+    store2.restore(snapshot);
+    assert.equal(store2.getRoot(), store.getRoot());
+    assert.equal(store2.isFrozen("aa01"), true);
+    assert.equal(store2.isFrozen("aa02"), false);
+    assert.equal(store2.getFrozenCount(), 1);
+  });
+
+  it("restoreFromState with frozen keys", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.add("aa02", "bb02");
+    store.freezeLeaf("aa01");
+    const nodes = store.getNodes();
+    const root = store.getRoot();
+    const frozenKeys = store.getFrozenKeys();
+
+    const store2 = new SmtStore();
+    store2.restoreFromState(nodes, root, frozenKeys);
+    assert.equal(store2.getRoot(), root);
+    assert.equal(store2.isFrozen("aa01"), true);
+    assert.equal(store2.isFrozen("aa02"), false);
+  });
+
+  it("restoreFromState without frozenKeys clears existing frozen set", () => {
+    const store = new SmtStore();
+    store.add("aa01", "bb01");
+    store.freezeLeaf("aa01");
+    assert.equal(store.isFrozen("aa01"), true);
+
+    // Restore an old-format snapshot (no frozenKeys) onto a store that already has frozen keys
+    const nodes = store.getNodes();
+    const root = store.getRoot();
+    store.restoreFromState(nodes, root);
+
+    assert.equal(store.getFrozenCount(), 0);
+    assert.equal(store.isFrozen("aa01"), false);
+  });
 });
