@@ -48,8 +48,7 @@ function resolveConfig(config: Record<string, unknown>): SmtConfig {
       ? (config.smt as Record<string, unknown>)
       : {};
   return {
-    treeKey:
-      typeof smt.treeKey === "string" ? smt.treeKey : "auto",
+    treeKey: typeof smt.treeKey === "string" ? smt.treeKey : "auto",
     maxTreeSize:
       typeof smt.maxTreeSize === "number" ? smt.maxTreeSize : 500_000,
     checkpointDir:
@@ -109,7 +108,9 @@ export class SmtService {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
       const trees = this.manager.listTrees();
-      console.error(`[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`);
+      console.error(
+        `[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:smt] Checkpoint restore failed:", msg);
@@ -117,7 +118,9 @@ export class SmtService {
   }
 
   async start(): Promise<void> {
-    console.error(`[audit-plugin:smt] Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`);
+    console.error(
+      `[audit-plugin:smt] Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`,
+    );
 
     await this.ensureReady();
 
@@ -171,7 +174,9 @@ export class SmtService {
   }
 
   private getTreeKey(): string {
-    return this.config.treeKey === "auto" ? this.machineId : this.config.treeKey;
+    return this.config.treeKey === "auto"
+      ? this.machineId
+      : this.config.treeKey;
   }
 
   private estimateStorageBytes(): number {
@@ -185,7 +190,9 @@ export class SmtService {
   onEventAppended(event: AuditEvent): void {
     try {
       if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        console.error("[audit-plugin:smt] Storage cap reached, skipping insert");
+        console.error(
+          "[audit-plugin:smt] Storage cap reached, skipping insert",
+        );
         return;
       }
 
@@ -193,15 +200,20 @@ export class SmtService {
       const store = this.manager.getOrCreate(treeKey);
       const timestamp = Math.floor(new Date(event.createdAt).getTime() / 1000);
       const conversationId = event.sessionId ?? this.machineId;
+      const eventId = event.id;
 
       const rawHash = this.computeRawHash(event);
       const censoredHash = this.computeCensoredHash(event);
 
-      if (store.isFrozen(rawHash) || (censoredHash && store.isFrozen(censoredHash))) {
+      if (
+        store.isFrozen(rawHash) ||
+        (censoredHash && store.isFrozen(censoredHash))
+      ) {
         return;
       }
 
       const result = insertEntry(store, {
+        eventId,
         treeKey,
         rawHash,
         censoredHash,
@@ -303,7 +315,9 @@ export class SmtService {
   pruneEpoch(
     treeKey: string,
     epoch: number,
-  ): { pruned: number; proofsExported: number; root: string } | { error: string } {
+  ):
+    | { pruned: number; proofsExported: number; root: string }
+    | { error: string } {
     const store = this.manager.get(treeKey);
     if (!store) return { error: `Tree ${treeKey} not found` };
 
@@ -316,7 +330,10 @@ export class SmtService {
     }
 
     // Export proofs before freezing, annotated with frozen: true
-    const proofs = hashes.map((h) => ({ ...store.createProof(h), frozen: true }));
+    const proofs = hashes.map((h) => ({
+      ...store.createProof(h),
+      frozen: true,
+    }));
 
     let treeExports = this.exportedProofs.get(treeKey);
     if (!treeExports) {
@@ -356,18 +373,24 @@ export class SmtService {
     };
   }
 
-  getExportedProofs(
-    treeKey: string,
-    epoch?: number,
-  ): object {
+  getExportedProofs(treeKey: string, epoch?: number): object {
     const treeExports = this.exportedProofs.get(treeKey);
     if (!treeExports || treeExports.size === 0) {
-      return { tree: treeKey, exportedEpochs: [], message: "No exported proofs" };
+      return {
+        tree: treeKey,
+        exportedEpochs: [],
+        message: "No exported proofs",
+      };
     }
     if (epoch !== undefined) {
       const proofs = treeExports.get(epoch);
       if (!proofs) {
-        return { tree: treeKey, epoch, proofs: [], message: "No proofs for this epoch" };
+        return {
+          tree: treeKey,
+          epoch,
+          proofs: [],
+          message: "No proofs for this epoch",
+        };
       }
       return { tree: treeKey, epoch, proofCount: proofs.length, proofs };
     }
@@ -382,9 +405,7 @@ export class SmtService {
     };
   }
 
-  createSnapshot(
-    treeKey: string,
-  ): Snapshot | { error: string } {
+  createSnapshot(treeKey: string): Snapshot | { error: string } {
     const store = this.manager.get(treeKey);
     if (!store) return { error: `Tree ${treeKey} not found` };
 
@@ -392,13 +413,18 @@ export class SmtService {
     const root = store.getRoot();
     const frozenKeys = store.getFrozenKeys();
 
-    return createSmtSnapshot(nodes, root, {
-      treeKey,
-      entryCount: store.getEntryCount(),
-      nodeCount: nodes.size,
+    return createSmtSnapshot(
+      nodes,
       root,
-      createdAt: new Date().toISOString(),
-    }, frozenKeys.size > 0 ? Array.from(frozenKeys) : undefined);
+      {
+        treeKey,
+        entryCount: store.getEntryCount(),
+        nodeCount: nodes.size,
+        root,
+        createdAt: new Date().toISOString(),
+      },
+      frozenKeys.size > 0 ? Array.from(frozenKeys) : undefined,
+    );
   }
 
   restoreSnapshot(
@@ -408,7 +434,11 @@ export class SmtService {
     try {
       const restored = restoreSmtSnapshot(snapshot);
       const store = this.manager.getOrCreate(treeKey);
-      store.restoreFromState(restored.nodes, restored.root, restored.frozenKeys);
+      store.restoreFromState(
+        restored.nodes,
+        restored.root,
+        restored.frozenKeys,
+      );
       return { root: restored.root, nodeCount: restored.nodes.size };
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -423,7 +453,9 @@ export class SmtService {
    * avoid loading the entire audit store into memory at once.
    */
   replayEvents(
-    eventsOrFetcher: AuditEvent[] | ((offset: number, limit: number) => AuditEvent[]),
+    eventsOrFetcher:
+      | AuditEvent[]
+      | ((offset: number, limit: number) => AuditEvent[]),
     totalCount?: number,
   ): number {
     this.suppressCheckpoints = true;
@@ -496,7 +528,10 @@ export class SmtService {
   private async restoreMetadata(): Promise<void> {
     let raw: string;
     try {
-      raw = await readFile(join(this.config.checkpointDir, "_metadata.json"), "utf-8");
+      raw = await readFile(
+        join(this.config.checkpointDir, "_metadata.json"),
+        "utf-8",
+      );
     } catch {
       return; // No metadata file yet
     }
@@ -510,21 +545,30 @@ export class SmtService {
       if (Array.isArray(data.conversationChains)) {
         this.conversationChains = new Map(
           data.conversationChains.map(
-            ([tk, chains]: [string, [string, ChainEntry[]][]]) => [tk, new Map(chains)],
+            ([tk, chains]: [string, [string, ChainEntry[]][]]) => [
+              tk,
+              new Map(chains),
+            ],
           ),
         );
       }
       if (Array.isArray(data.epochEntries)) {
         this.epochEntries = new Map(
           data.epochEntries.map(
-            ([tk, epochs]: [string, [number, string[]][]]) => [tk, new Map(epochs)],
+            ([tk, epochs]: [string, [number, string[]][]]) => [
+              tk,
+              new Map(epochs),
+            ],
           ),
         );
       }
       if (Array.isArray(data.exportedProofs)) {
         this.exportedProofs = new Map(
           data.exportedProofs.map(
-            ([tk, epochs]: [string, [number, object[]][]]) => [tk, new Map(epochs)],
+            ([tk, epochs]: [string, [number, object[]][]]) => [
+              tk,
+              new Map(epochs),
+            ],
           ),
         );
       }
@@ -543,18 +587,23 @@ export class SmtService {
     // starting the next one. Prevents concurrent checkpointAll calls from
     // interleaving their clear-then-write sequences on the same LevelDB.
     const prev = this.checkpointInFlight ?? Promise.resolve();
-    const work = prev.catch(() => {}).then(() =>
-      Promise.all([
-        this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
-          const msg = err instanceof Error ? err.message : "Unknown error";
-          console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
-        }),
-        this.checkpointMetadata().catch((err) => {
-          const msg = err instanceof Error ? err.message : "Unknown error";
-          console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
-        }),
-      ]).then(() => {}),
-    );
+    const work = prev
+      .catch(() => {})
+      .then(() =>
+        Promise.all([
+          this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+          }),
+          this.checkpointMetadata().catch((err) => {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            console.error(
+              "[audit-plugin:smt] Metadata checkpoint failed:",
+              msg,
+            );
+          }),
+        ]).then(() => {}),
+      );
     this.checkpointInFlight = work;
     work.finally(() => {
       if (this.checkpointInFlight === work) {
@@ -568,14 +617,20 @@ export class SmtService {
     const cutoff = currentEpoch - this.config.pruneAfterEpochs;
 
     for (const [treeKey, treeEpochs] of this.epochEntries) {
-      const expiredEpochs = Array.from(treeEpochs.keys()).filter((e) => e < cutoff);
+      const expiredEpochs = Array.from(treeEpochs.keys()).filter(
+        (e) => e < cutoff,
+      );
 
       for (const epoch of expiredEpochs) {
         const result = this.pruneEpoch(treeKey, epoch);
         if ("error" in result) {
-          console.error(`[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`);
+          console.error(
+            `[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`,
+          );
         } else if (result.pruned > 0) {
-          console.error(`[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`);
+          console.error(
+            `[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`,
+          );
         }
       }
     }

@@ -80,6 +80,7 @@ describe("SMT Logic", () => {
       const state = makeState();
 
       const result = insertEntry(store, {
+        eventId: "evt-001",
         treeKey: "t1",
         rawHash: "aa1122",
         censoredHash: null,
@@ -103,6 +104,7 @@ describe("SMT Logic", () => {
       const state = makeState();
 
       const result = insertEntry(store, {
+        eventId: "evt-002",
         treeKey: "t1",
         rawHash: "aa1122",
         censoredHash: "bb3344",
@@ -124,6 +126,7 @@ describe("SMT Logic", () => {
       const state = makeState();
 
       const r1 = insertEntry(store, {
+        eventId: "evt-003",
         treeKey: "t1",
         rawHash: "ee0001",
         censoredHash: null,
@@ -136,6 +139,7 @@ describe("SMT Logic", () => {
       assert.equal(r1.chainPrev, null);
 
       const r2 = insertEntry(store, {
+        eventId: "evt-004",
         treeKey: "t1",
         rawHash: "ee0002",
         censoredHash: null,
@@ -154,6 +158,7 @@ describe("SMT Logic", () => {
 
       // Insert one entry first
       insertEntry(store, {
+        eventId: "evt-005",
         treeKey: "t1",
         rawHash: "ee0001",
         censoredHash: null,
@@ -164,6 +169,7 @@ describe("SMT Logic", () => {
       });
 
       const result = insertEntry(store, {
+        eventId: "evt-006",
         treeKey: "t1",
         rawHash: "ee0002",
         censoredHash: null,
@@ -182,6 +188,7 @@ describe("SMT Logic", () => {
       const state = makeState();
 
       insertEntry(store, {
+        eventId: "evt-007",
         treeKey: "t1",
         rawHash: "cc0011",
         censoredHash: "dd0022",
@@ -200,6 +207,7 @@ describe("SMT Logic", () => {
       const state = makeState();
 
       const result = insertEntry(store, {
+        eventId: "evt-008",
         treeKey: "t1",
         rawHash: "cc0011",
         censoredHash: "dd0022",
