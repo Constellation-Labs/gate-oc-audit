@@ -162,7 +162,11 @@ class ActiveAnchorService implements AnchorService {
             }
 
             const seqEnd = this.store.maxSequenceSince(startSeq);
-            if (seqEnd === undefined) return;
+            if (seqEnd === undefined) {
+                // Theoretically unreachable — countSince just confirmed events exist
+                console.error("[audit-plugin:de-anchor] maxSequenceSince returned undefined despite positive count, skipping anchor");
+                return;
+            }
 
             console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
             const txHash = await this.submitFingerprint(smtRoot);
@@ -370,9 +374,6 @@ export class WalletAnchorService extends ActiveAnchorService {
             verifyFn: (h) => client.fingerprints.getByHash(h),
             authLabel: "x402 wallet",
         });
-
-        // Drop this scope's reference to the key — the value is already held by the base class and the wallet/client objects
-        rawKey = "";
 
         console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
     }
