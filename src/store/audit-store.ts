@@ -54,6 +54,7 @@ interface EventRow {
 
 /** Strip gzip header (RFC 1952) and 8-byte trailer, returning the raw deflate stream. */
 function stripGzipWrapper(gz: Buffer): Buffer {
+  if (gz.length < 18) throw new Error("gzip buffer too short (< 18 bytes)");
   let offset = 10; // fixed header
   const flags = gz[3];
   if (flags & 0x04) { offset += gz.readUInt16LE(offset) + 2; }     // FEXTRA
@@ -159,6 +160,7 @@ export class AuditStore {
     getLastCheckpoint: Database.Statement;
     insertCheckpoint: Database.Statement;
     countSince: Database.Statement;
+    maxSequenceSince: Database.Statement;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db") {
@@ -199,6 +201,7 @@ export class AuditStore {
         `INSERT INTO integrity_checkpoints (${CP_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
+      maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
     };
   }
 
@@ -472,6 +475,12 @@ export class AuditStore {
   /** Returns the count of events at or after a given sequence. */
   countSince(seqStart: number): number {
     return (this.stmts.countSince.get(seqStart) as { c: number }).c;
+  }
+
+  /** Returns the highest sequence number at or after a given sequence, or undefined if none. */
+  maxSequenceSince(seqStart: number): number | undefined {
+    const row = this.stmts.maxSequenceSince.get(seqStart) as { seq: number | null };
+    return row.seq ?? undefined;
   }
 
   isDegraded(): boolean {

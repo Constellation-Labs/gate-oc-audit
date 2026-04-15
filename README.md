@@ -242,5 +242,5 @@ The `--link` flag symlinks the local directory instead of copying, so changes ar
 
 ```bash
 npm run build
-openclaw daemon restart
+openclaw gateway restart
 ```

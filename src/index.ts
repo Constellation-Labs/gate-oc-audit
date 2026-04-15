@@ -12,6 +12,18 @@ import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
 
+/**
+ * Handler-style tool definition accepted by the OpenClaw plugin runtime.
+ * The SDK types export AgentTool (label + execute) but registerTool also
+ * accepts this shape at runtime. Kept here to avoid scattering `as any`.
+ */
+interface PluginHandlerTool {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    handler: (params: Record<string, unknown>) => unknown;
+}
+
 export default (() => {
     let _registered = false;
     let _store: AuditStore | undefined;
@@ -195,7 +207,7 @@ export default (() => {
 
             // Declared here so the tool handler closures can reference it;
             // constructed later in the "Background services" section.
-            let deAnchor!: AnchorService;
+            let deAnchor: AnchorService | undefined;
 
             // --- Agent-callable tools ---
 
@@ -211,7 +223,7 @@ export default (() => {
                     const hasWalletKeyFile = typeof config.deWalletKeyFile === "string" && config.deWalletKeyFile.length > 0;
 
                     if (hasApiKey && hasOrgId && hasTenantId) {
-                        if (!deAnchor.isActive()) {
+                        if (!deAnchor?.isActive()) {
                             return {
                                 status: "misconfigured",
                                 method: "API key",
@@ -235,7 +247,7 @@ export default (() => {
                     }
 
                     if (hasWalletKeyFile) {
-                        if (!deAnchor.isActive()) {
+                        if (!deAnchor?.isActive()) {
                             return {
                                 status: "misconfigured",
                                 method: "x402 wallet",
@@ -268,7 +280,7 @@ export default (() => {
                         ].join("\n"),
                     };
                 },
-            } as any);
+            } satisfies PluginHandlerTool as any);
 
             api.registerTool({
                 name: "audit_smt",
@@ -353,7 +365,7 @@ export default (() => {
                             return {error: `Unknown action: ${action}`};
                     }
                 },
-            } as any);
+            } satisfies PluginHandlerTool as any);
 
             // --- Background services ---
 
