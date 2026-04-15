@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { basename, extname, resolve, sep } from "node:path";
 import type { AuditStore } from "../store/audit-store.js";
 import type { ToolScanner } from "../scanner.js";
 import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
+import { fileHash } from "../util/fs.js";
 
 interface ManifestEntry {
   contentHash: string;
@@ -26,11 +26,6 @@ const MANIFEST_TO_EVENT: Record<ManifestType, EventType> = {
 };
 
 const CODE_EXTENSIONS = new Set([".js", ".ts", ".mjs", ".cjs", ".mts", ".cts"]);
-
-function fileHash(filePath: string): string {
-  const content = readFileSync(filePath);
-  return createHash("sha256").update(content).digest("hex");
-}
 
 function fileLinesCount(filePath: string): number {
   try {
@@ -138,16 +133,16 @@ export class ConfigWatcher {
       if (rawChangeType === "removed") {
         if (!existing) return;
         this.manifest.delete(resolvedPath);
-        try { this.store.deleteManifest(resolvedPath); } catch (err) {
+        try { this.store.deleteManifest(`${manifestType}:${resolvedPath}`); } catch (err) {
           console.error("[audit-plugin] Failed to delete config manifest:", err instanceof Error ? err.message : err);
         }
       } else {
         const hash = fileHash(resolvedPath);
-        if (rawChangeType === "added" && existing?.contentHash === hash) return;
-        if (rawChangeType === "modified" && existing?.contentHash === hash) return;
+        if (hash === undefined) return;
+        if (existing?.contentHash === hash) return;
 
         this.manifest.set(resolvedPath, { contentHash: hash, filePath: resolvedPath });
-        try { this.store.upsertManifest(resolvedPath, manifestType, hash, resolvedPath); } catch (err) {
+        try { this.store.upsertManifest(`${manifestType}:${resolvedPath}`, manifestType, hash, resolvedPath); } catch (err) {
           console.error("[audit-plugin] Failed to upsert config manifest:", err instanceof Error ? err.message : err);
         }
 
@@ -235,12 +230,15 @@ export class ConfigWatcher {
 
   private loadManifestFromStore(): void {
     try {
-      for (const row of this.store.getManifests()) {
-        if (row.filePath) {
-          this.manifest.set(row.filePath, {
-            contentHash: row.contentHash,
-            filePath: row.filePath,
-          });
+      const configTypes: ManifestType[] = ["skills", "tools", "soul", "cron"];
+      for (const mt of configTypes) {
+        for (const row of this.store.getManifestsByType(mt)) {
+          if (row.filePath) {
+            this.manifest.set(row.filePath, {
+              contentHash: row.contentHash,
+              filePath: row.filePath,
+            });
+          }
         }
       }
     } catch {

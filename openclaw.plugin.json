@@ -73,6 +73,24 @@
       "redactToolArgs": {
         "type": "boolean",
         "description": "Replace tool arguments with hash before syncing to gateway (default: false)"
+      },
+      "fileWatchPatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Glob patterns for files to watch for changes (e.g. [\"src/**/*.ts\", \"config/*.json\"])"
+      },
+      "fileWatchIntervalMs": {
+        "type": "number",
+        "description": "Polling interval in milliseconds for file watching when fileWatchUsePolling is true (default: 1000)"
+      },
+      "fileWatchIgnorePatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Glob patterns to exclude from file watching (e.g. [\"**/node_modules/**\", \"**/.git/**\"])"
+      },
+      "fileWatchUsePolling": {
+        "type": "boolean",
+        "description": "Use polling instead of native fs events for file watching (default: false). Enable for network mounts."
       }
     },
     "additionalProperties": false

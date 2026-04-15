@@ -152,7 +152,7 @@ export class AuditStore {
   private insertStmt: Database.Statement;
 
   private stmts: {
-    getManifests: Database.Statement;
+    getManifestsByType: Database.Statement;
     upsertManifest: Database.Statement;
     deleteManifest: Database.Statement;
     getCheckpoints: Database.Statement;
@@ -186,11 +186,11 @@ export class AuditStore {
     const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
 
     this.stmts = {
-      getManifests: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests"),
+      getManifestsByType: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests WHERE manifest_type = ?"),
       upsertManifest: this.db.prepare(
         `INSERT INTO config_manifests (id, manifest_type, content_hash, file_path, captured_at)
          VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, captured_at = excluded.captured_at`,
+         ON CONFLICT(id) DO UPDATE SET manifest_type = excluded.manifest_type, content_hash = excluded.content_hash, captured_at = excluded.captured_at`,
       ),
       deleteManifest: this.db.prepare("DELETE FROM config_manifests WHERE id = ?"),
       getCheckpoints: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_start ASC`),
@@ -439,10 +439,10 @@ export class AuditStore {
     return (pageSize * pageCount) / (1024 * 1024);
   }
 
-  // --- Config manifest operations (used by ConfigWatcher) ---
+  // --- Config manifest operations (used by ConfigWatcher and FileWatcher) ---
 
-  getManifests(): Array<{ id: string; contentHash: string; filePath: string | null }> {
-    return (this.stmts.getManifests.all() as Array<{ id: string; content_hash: string; file_path: string | null }>)
+  getManifestsByType(manifestType: string): Array<{ id: string; contentHash: string; filePath: string | null }> {
+    return (this.stmts.getManifestsByType.all(manifestType) as Array<{ id: string; content_hash: string; file_path: string | null }>)
       .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path }));
   }
 

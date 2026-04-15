@@ -41,7 +41,8 @@ export type EventType =
   | "config.skill_changed"
   | "config.soul_changed"
   | "config.cron_changed"
-  | "security.scan_result";
+  | "security.scan_result"
+  | "system.file_changed";
 
 export type ConfigChangeType = "added" | "modified" | "removed";
 
@@ -66,6 +67,14 @@ export interface ScanResultMetadata {
   toolName: string;
   filePath: string;
   findings: ScanFinding[];
+}
+
+export interface FileChangeMetadata {
+  filePath: string;
+  changeType: ConfigChangeType;
+  contentHash: string;
+  previousHash?: string;
+  fileSize?: number;
 }
 
 export interface PromptMetadata {
