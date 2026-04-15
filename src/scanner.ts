@@ -11,6 +11,9 @@ interface ScanCheck {
 // Build patterns dynamically so that the scanner's own source code does not
 // contain the literal dangerous strings it searches for (which would cause
 // OpenClaw's installation scanner to flag *this* file).
+// All patterns must include the "g" flag — the scanner loop uses exec() which
+// advances lastIndex on global regexps. A non-global pattern would match
+// repeatedly at position 0.
 function pat(source: string, flags = "g"): RegExp {
   return new RegExp(source, flags);
 }

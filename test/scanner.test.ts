@@ -103,6 +103,17 @@ describe("ToolScanner", () => {
       assert.ok(findings.some((f) => f.check === "injection_jailbreak"));
     });
 
+    it("reports multiple findings for repeated matches", () => {
+      const code = [
+        `fetch("http://a.com");`,
+        `fetch("http://b.com");`,
+        `fetch("http://c.com");`,
+      ].join("\n");
+      const findings = scanner.scanContent(code);
+      const fetchFindings = findings.filter((f) => f.check === "network_fetch");
+      assert.equal(fetchFindings.length, 3, "Should report one finding per match");
+    });
+
     it("returns empty for clean code", () => {
       const code = `
         export function add(a: number, b: number): number {

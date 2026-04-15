@@ -525,16 +525,22 @@ export class SmtService {
   }
 
   private checkpoint(): void {
-    const work = Promise.all([
-      this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
-      }),
-      this.checkpointMetadata().catch((err) => {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
-      }),
-    ]).then(() => {});
+    // Serialize checkpoints: wait for any in-flight checkpoint to finish before
+    // starting the next one. Prevents concurrent checkpointAll calls from
+    // interleaving their clear-then-write sequences on the same LevelDB.
+    const prev = this.checkpointInFlight ?? Promise.resolve();
+    const work = prev.catch(() => {}).then(() =>
+      Promise.all([
+        this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
+          const msg = err instanceof Error ? err.message : "Unknown error";
+          console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+        }),
+        this.checkpointMetadata().catch((err) => {
+          const msg = err instanceof Error ? err.message : "Unknown error";
+          console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
+        }),
+      ]).then(() => {}),
+    );
     this.checkpointInFlight = work;
     work.finally(() => {
       if (this.checkpointInFlight === work) {
