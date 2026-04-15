@@ -371,7 +371,7 @@ export class WalletAnchorService extends ActiveAnchorService {
             authLabel: "x402 wallet",
         });
 
-        // Clear the local copy — the key is now held only by the base class and the wallet/client objects
+        // Drop this scope's reference to the key — the value is already held by the base class and the wallet/client objects
         rawKey = "";
 
         console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
