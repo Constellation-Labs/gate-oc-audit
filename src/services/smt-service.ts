@@ -7,7 +7,7 @@
  */
 
 import { createRequire } from "module";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, rename } from "node:fs/promises";
 
 import { join } from "node:path";
 import { TreeManager, type TreeInfo } from "../store/smt-tree-manager.js";
@@ -88,6 +88,7 @@ export class SmtService {
 
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
+  private checkpointInFlight: Promise<void> | undefined;
   private restored = false;
   private needsFirstCheckpoint = true;
   private suppressCheckpoints = false;
@@ -147,6 +148,11 @@ export class SmtService {
     if (this.pruneTimer) {
       clearInterval(this.pruneTimer);
       this.pruneTimer = undefined;
+    }
+    // Wait for any in-flight checkpoint to complete before running the final one
+    if (this.checkpointInFlight) {
+      await this.checkpointInFlight.catch(() => {});
+      this.checkpointInFlight = undefined;
     }
     // Final checkpoint on shutdown — each step is independent so a tree
     // checkpoint failure doesn't prevent metadata from being persisted.
@@ -306,11 +312,29 @@ export class SmtService {
     }
     treeExports.set(epoch, proofs);
 
-    // Delete entries from SMT
+    // Delete entries from SMT and clean up associated metadata
     for (const h of hashes) {
       store.delete(h);
+      this.leafValues.delete(h);
     }
     treeEpochs?.delete(epoch);
+
+    // Clean up conversation chain entries that reference pruned hashes
+    const prunedSet = new Set(hashes);
+    const treeChains = this.conversationChains.get(treeKey);
+    if (treeChains) {
+      for (const [convId, chain] of treeChains) {
+        const filtered = chain.filter((e) => !prunedSet.has(e.rawHash));
+        if (filtered.length === 0) {
+          treeChains.delete(convId);
+        } else {
+          treeChains.set(convId, filtered);
+        }
+      }
+      if (treeChains.size === 0) {
+        this.conversationChains.delete(treeKey);
+      }
+    }
 
     return {
       pruned: hashes.length,
@@ -446,7 +470,9 @@ export class SmtService {
         lastInsertedSeq: this.lastInsertedSeq,
       };
       const filePath = join(this.config.checkpointDir, "_metadata.json");
-      await writeFile(filePath, JSON.stringify(data));
+      const tmpPath = filePath + ".tmp";
+      await writeFile(tmpPath, JSON.stringify(data));
+      await rename(tmpPath, filePath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
@@ -499,13 +525,21 @@ export class SmtService {
   }
 
   private checkpoint(): void {
-    this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
-    });
-    this.checkpointMetadata().catch((err) => {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
+    const work = Promise.all([
+      this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+      }),
+      this.checkpointMetadata().catch((err) => {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
+      }),
+    ]).then(() => {});
+    this.checkpointInFlight = work;
+    work.finally(() => {
+      if (this.checkpointInFlight === work) {
+        this.checkpointInFlight = undefined;
+      }
     });
   }
 
@@ -514,30 +548,17 @@ export class SmtService {
     const cutoff = currentEpoch - this.config.pruneAfterEpochs;
 
     for (const [treeKey, treeEpochs] of this.epochEntries) {
-      const store = this.manager.get(treeKey);
-      if (!store) continue;
-
       const expiredEpochs = Array.from(treeEpochs.keys()).filter((e) => e < cutoff);
 
       for (const epoch of expiredEpochs) {
-        const hashes = treeEpochs.get(epoch) || [];
-        const proofs = hashes.map((h) => store.createProof(h));
-
-        let treeExports = this.exportedProofs.get(treeKey);
-        if (!treeExports) {
-          treeExports = new Map();
-          this.exportedProofs.set(treeKey, treeExports);
+        const result = this.pruneEpoch(treeKey, epoch);
+        if ("error" in result) {
+          console.error(`[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`);
+        } else {
+          console.error(
+            `[audit-plugin] Pruned epoch ${epoch} from SMT tree ${treeKey}: ${result.pruned} entries`,
+          );
         }
-        treeExports.set(epoch, proofs);
-
-        for (const h of hashes) {
-          store.delete(h);
-        }
-        treeEpochs.delete(epoch);
-
-        console.error(
-          `[audit-plugin] Pruned epoch ${epoch} from SMT tree ${treeKey}: ${hashes.length} entries`,
-        );
       }
     }
   }

@@ -5,8 +5,8 @@
  * and hashing to ensure cross-compatibility.
  */
 
-import { randomUUID } from "node:crypto";
 import { createRequire } from "module";
+import { uuidv7 } from "uuidv7";
 import type {
   SeqNos,
   ConversationChains,
@@ -108,7 +108,7 @@ export function insertEntry(
     return { error: `Tree ${treeKey} has reached max size (${maxTreeSize})` };
   }
 
-  const auditEventId = randomUUID();
+  const auditEventId = uuidv7();
   const seqNo = getNextSeqNo(seqNos, treeKey);
   const chainPrev = getChainPrev(conversationChains, treeKey, conversationId);
   const epoch = getCurrentEpoch();

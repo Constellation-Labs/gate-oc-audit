@@ -138,8 +138,8 @@ export class ToolScanner {
       }
 
       check.pattern.lastIndex = 0;
-      const match = check.pattern.exec(content);
-      if (match) {
+      let match: RegExpExecArray | null;
+      while ((match = check.pattern.exec(content)) !== null) {
         const line = filePath ? this.getLineNumber(content, match.index) : undefined;
         findings.push({
           check: check.name,
@@ -147,6 +147,8 @@ export class ToolScanner {
           description: check.description,
           line,
         });
+        // For non-global patterns, break to avoid infinite loop
+        if (!check.pattern.global) break;
       }
     }
 

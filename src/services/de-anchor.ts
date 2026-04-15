@@ -13,7 +13,8 @@ const {DedClient} = require2("@constellation-network/digital-evidence-sdk/networ
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const CIRCUIT_BREAKER_THRESHOLD = 5;
-const CIRCUIT_BREAKER_RESET_MS = 30 * 1000;
+const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
+const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
 const DE_MAINNET_API = "https://de-api.constellationnetwork.io/v1";
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -92,6 +93,7 @@ class ActiveAnchorService implements AnchorService {
     private readonly authLabel: string;
 
     private consecutiveFailures = 0;
+    private circuitOpenCount = 0;
     private circuitOpenUntil = 0;
     private appendsSinceLastCheckpoint = 0;
 
@@ -159,7 +161,8 @@ class ActiveAnchorService implements AnchorService {
                 return;
             }
 
-            const seqEnd = startSeq + eventCount - 1;
+            const seqEnd = this.store.maxSequenceSince(startSeq);
+            if (seqEnd === undefined) return;
 
             console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
             const txHash = await this.submitFingerprint(smtRoot);
@@ -168,6 +171,7 @@ class ActiveAnchorService implements AnchorService {
             this.store.insertCheckpoint(checkpointId, startSeq, seqEnd, smtRoot, eventCount, txHash);
 
             this.consecutiveFailures = 0;
+            this.circuitOpenCount = 0;
             this.appendsSinceLastCheckpoint = 0;
             console.error(
                 `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
@@ -236,6 +240,8 @@ class ActiveAnchorService implements AnchorService {
     private isCircuitOpen(): boolean {
         if (this.consecutiveFailures < CIRCUIT_BREAKER_THRESHOLD) return false;
         if (Date.now() >= this.circuitOpenUntil) {
+            // Allow one retry attempt — consecutiveFailures stays high so
+            // recordFailure can escalate circuitOpenCount if it fails again.
             this.consecutiveFailures = CIRCUIT_BREAKER_THRESHOLD - 1;
             return false;
         }
@@ -245,9 +251,11 @@ class ActiveAnchorService implements AnchorService {
     private recordFailure(): void {
         this.consecutiveFailures++;
         if (this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
-            this.circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_RESET_MS;
+            const delayMs = Math.min(CIRCUIT_BREAKER_BASE_MS * 2 ** this.circuitOpenCount, CIRCUIT_BREAKER_MAX_MS);
+            this.circuitOpenCount++;
+            this.circuitOpenUntil = Date.now() + delayMs;
             console.error(
-                `[audit-plugin:de-anchor] Circuit breaker open — will retry after ${CIRCUIT_BREAKER_RESET_MS / 1000}s`,
+                `[audit-plugin:de-anchor] Circuit breaker open — will retry after ${delayMs / 1000}s`,
             );
         }
     }
@@ -362,6 +370,9 @@ export class WalletAnchorService extends ActiveAnchorService {
             verifyFn: (h) => client.fingerprints.getByHash(h),
             authLabel: "x402 wallet",
         });
+
+        // Clear the local copy — the key is now held only by the base class and the wallet/client objects
+        rawKey = "";
 
         console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
     }
