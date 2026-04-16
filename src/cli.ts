@@ -216,23 +216,19 @@ export async function cliSmtHandler(
     case "verify-proof": {
       try {
         const proof = JSON.parse(opts.proof);
-        const knownRoots = smtService.getKnownRoots(store?.getCheckpointedRoots());
-        if (knownRoots.size === 0) {
-          console.error("UNVERIFIABLE — no SMT trees or checkpoints found to verify against.");
-          process.exitCode = 2;
-          return;
-        }
-        if (!knownRoots.has(proof.root)) {
-          console.error("INVALID — proof root does not match any known tree or checkpointed root.");
-          process.exitCode = 1;
-          return;
-        }
-        const valid = smtService.verifyProof(proof);
-        if (valid) {
-          console.log("OK — proof is valid.");
-        } else {
-          console.error("INVALID — proof verification failed.");
-          process.exitCode = 1;
+        const result = smtService.verifyProofWithRoots(proof, store?.getCheckpointedRoots());
+        switch (result.status) {
+          case "valid":
+            console.log("OK — proof is valid.");
+            break;
+          case "unverifiable":
+            console.error(`UNVERIFIABLE — ${result.reason}.`);
+            process.exitCode = 2;
+            break;
+          case "invalid":
+            console.error(`INVALID — ${result.reason}.`);
+            process.exitCode = 1;
+            break;
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";

@@ -325,14 +325,15 @@ export default (() => {
                         case "verify": {
                             const proof = params.proof as any;
                             if (!proof) return {error: "proof is required"};
-                            const knownRoots = smt.getKnownRoots(getStore().getCheckpointedRoots());
-                            if (knownRoots.size === 0) {
-                                return {valid: false, unverifiable: true, error: "No SMT trees or checkpoints found to verify against"};
+                            const result = smt.verifyProofWithRoots(proof, getStore().getCheckpointedRoots());
+                            switch (result.status) {
+                                case "valid":
+                                    return {valid: true};
+                                case "unverifiable":
+                                    return {valid: false, unverifiable: true, error: result.reason};
+                                case "invalid":
+                                    return {valid: false, error: result.reason};
                             }
-                            if (!knownRoots.has(proof.root)) {
-                                return {valid: false, error: "Proof root does not match any known tree or checkpointed root"};
-                            }
-                            return {valid: smt.verifyProof(proof)};
                         }
                         case "trees": {
                             return {trees: smt.listTrees()};

@@ -34,6 +34,11 @@ import type {
 } from "../types/smt.js";
 import { getMachineId } from "../util/machine-id.js";
 
+export type VerifyResult =
+  | { status: "valid" }
+  | { status: "invalid"; reason: string }
+  | { status: "unverifiable"; reason: string };
+
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
   canonicalize: (obj: unknown) => string;
@@ -294,11 +299,9 @@ export class SmtService {
    * Verify a proof's internal consistency (siblings hash to the claimed root).
    *
    * @param expectedRoot If provided, proof.root must equal this value before
-   *   the sibling check runs. **Omitting it skips root legitimacy checking —
-   *   only safe when the caller has already verified the root independently.**
-   *   External-facing paths (CLI `smt verify-proof`, agent tool `audit_smt { action: "verify" }`)
-   *   must always supply a known root; calling without one on an untrusted proof
-   *   re-introduces the fabricated-tree vulnerability.
+   *   the sibling check runs. Omitting it skips root legitimacy checking —
+   *   only safe when the caller has already verified the root independently.
+   *   External-facing paths should use {@link verifyProofWithRoots} instead.
    */
   verifyProof(proof: SmtProof, expectedRoot?: string): boolean {
     if (expectedRoot !== undefined && proof.root !== expectedRoot) {
@@ -306,6 +309,29 @@ export class SmtService {
     }
     const verifier = this.manager.getOrCreate("__verifier__");
     return verifier.verifyProof(proof);
+  }
+
+  /**
+   * Verify a proof end-to-end: root legitimacy against known roots, then
+   * internal hash-chain consistency. This is the method external-facing paths
+   * (CLI `smt verify-proof`, agent tool `audit_smt { action: "verify" }`)
+   * should use — it cannot be called without the root legitimacy check.
+   */
+  verifyProofWithRoots(
+    proof: SmtProof,
+    checkpointedRoots?: Iterable<string>,
+  ): VerifyResult {
+    const knownRoots = this.getKnownRoots(checkpointedRoots);
+    if (knownRoots.size === 0) {
+      return { status: "unverifiable", reason: "No SMT trees or checkpoints found to verify against" };
+    }
+    if (!knownRoots.has(proof.root)) {
+      return { status: "invalid", reason: "Proof root does not match any known tree or checkpointed root" };
+    }
+    if (!this.verifyProof(proof)) {
+      return { status: "invalid", reason: "Proof verification failed" };
+    }
+    return { status: "valid" };
   }
 
   getRoot(treeKey?: string): { root: string; entryCount: number } | null {
