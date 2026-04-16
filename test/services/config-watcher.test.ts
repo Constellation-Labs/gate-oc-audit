@@ -174,8 +174,8 @@ describe("ConfigWatcher", () => {
     await smtService.start();
     limiter.setSmtService(smtService);
 
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     try {
-      const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
       await watcher.start();
       await sleep(500);
 
@@ -185,7 +185,6 @@ describe("ConfigWatcher", () => {
       );
 
       await sleep(1500);
-      watcher.stop();
 
       const events = store.query({ category: "config" });
       assert.ok(events.length > 0, "Should have config events");
@@ -199,6 +198,7 @@ describe("ConfigWatcher", () => {
       assert.equal(proof!.membership, true, "Proof should confirm membership");
       assert.equal(smtService.verifyProof(proof!), true, "Proof should verify");
     } finally {
+      watcher.stop();
       await smtService.stop();
       rmSync(dirname(smtCheckpointDir), { recursive: true, force: true });
     }
