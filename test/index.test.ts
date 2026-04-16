@@ -2,6 +2,7 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync, existsSync } from "node:fs";
 import plugin from "../src/index.js";
+import { AuditStore } from "../src/store/audit-store.js";
 
 const testDbPath = `/tmp/audit-plugin-test-${process.pid}.db`;
 
@@ -78,5 +79,16 @@ describe("plugin entry point", () => {
     assert.equal(result.valid, false);
     assert.equal(result.unverifiable, true);
     assert.ok(result.error.includes("No SMT trees or checkpoints"));
+
+    // audit_smt verify rejects foreign root when known roots exist
+    // Insert a checkpoint so getCheckpointedRoots() returns a non-empty set
+    const helperStore = new AuditStore(testDbPath);
+    helperStore.insertCheckpoint("cp-1", 1, 1, "cc".repeat(32), 1, null);
+    helperStore.close();
+
+    const foreignResult = smtTool.handler({ action: "verify", proof: { root: "dd".repeat(32), key: "00", siblings: [], membership: true } }) as any;
+    assert.equal(foreignResult.valid, false);
+    assert.equal(foreignResult.unverifiable, undefined);
+    assert.ok(foreignResult.error.includes("does not match any known"));
   });
 });
