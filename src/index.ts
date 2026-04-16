@@ -325,7 +325,8 @@ export default (() => {
                         case "verify": {
                             const proof = params.proof as any;
                             if (!proof) return {error: "proof is required"};
-                            const result = smt.verifyProofWithRoots(proof, getStore().getCheckpointedRoots());
+                            const knownRoots = smt.getKnownRoots(getStore().getCheckpointedRoots());
+                            const result = smt.verifyProofWithRoots(proof, knownRoots);
                             switch (result.status) {
                                 case "valid":
                                     return {valid: true};

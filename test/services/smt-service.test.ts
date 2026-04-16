@@ -98,7 +98,7 @@ describe("SmtService", () => {
 
     const rawHash = service.computeRawHash(event);
     const proof = service.createProof(rawHash)!;
-    assert.equal(service.verifyProofWithRoots(proof).status, "valid");
+    assert.equal(service.verifyProofWithRoots(proof, service.getKnownRoots()).status, "valid");
   });
 
   it("dual-hash: inserts both raw and censored leaves", () => {
@@ -278,7 +278,7 @@ describe("SmtService", () => {
 
     // Pre-freeze proofs still verify
     for (const p of preFreezeProofs) {
-      assert.equal(service.verifyProofWithRoots(p).status, "valid", "pre-freeze proof must still verify");
+      assert.equal(service.verifyProofWithRoots(p, service.getKnownRoots()).status, "valid", "pre-freeze proof must still verify");
     }
   });
 
@@ -299,7 +299,7 @@ describe("SmtService", () => {
     const proofAfter = service.createProof(hash, treeKey)!;
     assert.equal(proofAfter.frozen, true);
     assert.equal(proofAfter.membership, true, "leaf is still in the tree");
-    assert.equal(service.verifyProofWithRoots(proofAfter).status, "valid");
+    assert.equal(service.verifyProofWithRoots(proofAfter, service.getKnownRoots()).status, "valid");
   });
 
   it("pruneEpoch with empty epoch returns zero counts", () => {
@@ -462,7 +462,7 @@ describe("SmtService", () => {
     assert.equal(proofB.membership, true);
 
     // Service A rejects it — root R_B is not a known root
-    const result = service.verifyProofWithRoots(proofB);
+    const result = service.verifyProofWithRoots(proofB, service.getKnownRoots());
     assert.equal(result.status, "invalid");
   });
 
@@ -472,13 +472,14 @@ describe("SmtService", () => {
 
     const rawHash = service.computeRawHash(event);
     const proof = service.createProof(rawHash)!;
+    const knownRoots = service.getKnownRoots();
 
     // Valid proof passes
-    assert.equal(service.verifyProofWithRoots(proof).status, "valid");
+    assert.equal(service.verifyProofWithRoots(proof, knownRoots).status, "valid");
 
     // Tampered proof fails internal check even though root is known
     const tampered = { ...proof, siblings: [] };
-    assert.equal(service.verifyProofWithRoots(tampered).status, "invalid");
+    assert.equal(service.verifyProofWithRoots(tampered, knownRoots).status, "invalid");
   });
 
   it("replayEvents supports batched fetcher callback", () => {

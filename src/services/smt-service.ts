@@ -311,9 +311,8 @@ export class SmtService {
    */
   verifyProofWithRoots(
     proof: SmtProof,
-    checkpointedRoots?: Iterable<string>,
+    knownRoots: Set<string>,
   ): VerifyResult {
-    const knownRoots = this.getKnownRoots(checkpointedRoots);
     if (knownRoots.size === 0) {
       return { status: "unverifiable", reason: "No SMT trees or checkpoints found to verify against" };
     }

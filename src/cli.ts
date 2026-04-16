@@ -109,6 +109,8 @@ export async function cliVerifyHandler(
   } else {
     let allValid = true;
 
+    const knownRoots = smtService.getKnownRoots(store.getCheckpointedRoots());
+
     for (const tree of trees) {
       console.log(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
 
@@ -120,7 +122,7 @@ export async function cliVerifyHandler(
       for (const event of recentEvents) {
         const rawHash = smtService.computeRawHash(event);
         const proof = smtService.createProof(rawHash, tree.key);
-        if (proof && proof.membership && smtService.verifyProofWithRoots(proof, store.getCheckpointedRoots()).status === "valid") {
+        if (proof && proof.membership && smtService.verifyProofWithRoots(proof, knownRoots).status === "valid") {
           verified++;
         } else if (proof && !proof.membership) {
           // Event not in this tree — may be in a different tree
@@ -216,7 +218,8 @@ export async function cliSmtHandler(
     case "verify-proof": {
       try {
         const proof = JSON.parse(opts.proof);
-        const result = smtService.verifyProofWithRoots(proof, store?.getCheckpointedRoots());
+        const knownRoots = smtService.getKnownRoots(store?.getCheckpointedRoots());
+        const result = smtService.verifyProofWithRoots(proof, knownRoots);
         switch (result.status) {
           case "valid":
             console.log("OK — proof is valid.");
