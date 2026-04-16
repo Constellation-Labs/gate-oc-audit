@@ -335,7 +335,6 @@ export default (() => {
                                 case "invalid":
                                     return {valid: false, error: result.reason};
                             }
-                            break;
                         }
                         case "trees": {
                             return {trees: smt.listTrees()};
