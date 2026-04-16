@@ -23,8 +23,6 @@ describe("ConfigWatcher", () => {
   let dbPath: string;
   let store: AuditStore;
   let limiter: RateLimiter;
-  let smtService: SmtService;
-  let smtCheckpointDir: string;
   let openclawDir: string;
   let scanner: ToolScanner;
   let notifier: NotificationService;
@@ -32,17 +30,7 @@ describe("ConfigWatcher", () => {
   beforeEach(async () => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
-    smtCheckpointDir = join(mkdtempSync(join(tmpdir(), "smt-cfgwatch-")), "checkpoints");
-    smtService = new SmtService({
-      smt: {
-        checkpointIntervalMs: 0,
-        pruneAfterEpochs: 0,
-        checkpointDir: smtCheckpointDir,
-      },
-    });
-    await smtService.start();
     limiter = new RateLimiter(store);
-    limiter.setSmtService(smtService);
     scanner = new ToolScanner();
     notifier = new NotificationService(); // no webhook URL — won't send
 
@@ -52,10 +40,8 @@ describe("ConfigWatcher", () => {
   });
 
   afterEach(async () => {
-    await smtService.stop();
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
-    rmSync(dirname(smtCheckpointDir), { recursive: true, force: true });
     rmSync(openclawDir, { recursive: true, force: true });
   });
 
@@ -177,28 +163,44 @@ describe("ConfigWatcher", () => {
   });
 
   it("config change events get SMT proofs", async () => {
-    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
-    await watcher.start();
-    await sleep(500);
+    const smtCheckpointDir = join(mkdtempSync(join(tmpdir(), "smt-cfgwatch-")), "checkpoints");
+    const smtService = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: smtCheckpointDir,
+      },
+    });
+    await smtService.start();
+    limiter.setSmtService(smtService);
 
-    writeFileSync(
-      join(openclawDir, "skills", "proven-skill.ts"),
-      'export function run() { return "proven"; }',
-    );
+    try {
+      const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+      await watcher.start();
+      await sleep(500);
 
-    await sleep(1500);
-    watcher.stop();
+      writeFileSync(
+        join(openclawDir, "skills", "proven-skill.ts"),
+        'export function run() { return "proven"; }',
+      );
 
-    const events = store.query({ category: "config" });
-    assert.ok(events.length > 0, "Should have config events");
+      await sleep(1500);
+      watcher.stop();
 
-    const configEvent = events.find((e: AuditEvent) => e.eventType === "config.skill_changed");
-    assert.ok(configEvent, "Should have a skill_changed event");
+      const events = store.query({ category: "config" });
+      assert.ok(events.length > 0, "Should have config events");
 
-    const rawHash = smtService.computeRawHash(configEvent!);
-    const proof = smtService.createProof(rawHash);
-    assert.ok(proof, "Should produce a proof for the config event");
-    assert.equal(proof!.membership, true, "Proof should confirm membership");
-    assert.equal(smtService.verifyProof(proof!), true, "Proof should verify");
+      const configEvent = events.find((e: AuditEvent) => e.eventType === "config.skill_changed");
+      assert.ok(configEvent, "Should have a skill_changed event");
+
+      const rawHash = smtService.computeRawHash(configEvent!);
+      const proof = smtService.createProof(rawHash);
+      assert.ok(proof, "Should produce a proof for the config event");
+      assert.equal(proof!.membership, true, "Proof should confirm membership");
+      assert.equal(smtService.verifyProof(proof!), true, "Proof should verify");
+    } finally {
+      await smtService.stop();
+      rmSync(dirname(smtCheckpointDir), { recursive: true, force: true });
+    }
   });
 });
