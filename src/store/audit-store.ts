@@ -463,6 +463,10 @@ export class AuditStore {
     return (this.stmts.getCheckpoints.all() as CheckpointRow[]).map(rowToCheckpoint);
   }
 
+  getCheckpointedRoots(): string[] {
+    return this.getCheckpoints().map((cp) => cp.smtRoot);
+  }
+
   getLastCheckpoint(): CheckpointRecord | undefined {
     const row = this.stmts.getLastCheckpoint.get() as CheckpointRow | undefined;
     return row ? rowToCheckpoint(row) : undefined;

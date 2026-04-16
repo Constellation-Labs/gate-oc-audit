@@ -264,6 +264,18 @@ describe("AuditStore.prune", () => {
     db2.close();
   });
 
+  it("getCheckpointedRoots returns SMT roots from checkpoints", () => {
+    store.insertCheckpoint("cp-1", 1, 3, "root-aaa", 3, null);
+    store.insertCheckpoint("cp-2", 4, 6, "root-bbb", 3, "tx-123");
+
+    const roots = store.getCheckpointedRoots();
+    assert.deepEqual(roots, ["root-aaa", "root-bbb"]);
+  });
+
+  it("getCheckpointedRoots returns empty array when no checkpoints", () => {
+    assert.deepEqual(store.getCheckpointedRoots(), []);
+  });
+
   it("deletes both synced and unsynced old events", () => {
     for (let i = 0; i < 4; i++) insert(store, { metadata: { i } });
 

@@ -290,7 +290,10 @@ export class SmtService {
     return proof;
   }
 
-  verifyProof(proof: SmtProof): boolean {
+  verifyProof(proof: SmtProof, expectedRoot?: string): boolean {
+    if (expectedRoot !== undefined && proof.root !== expectedRoot) {
+      return false;
+    }
     const verifier = this.manager.getOrCreate("__verifier__");
     return verifier.verifyProof(proof);
   }
@@ -304,6 +307,14 @@ export class SmtService {
 
   listTrees(): TreeInfo[] {
     return this.manager.listTrees().filter((t) => t.key !== "__verifier__");
+  }
+
+  getKnownRoots(checkpointedRoots?: Iterable<string>): Set<string> {
+    const roots = new Set(this.listTrees().map((t) => t.root));
+    if (checkpointedRoots) {
+      for (const r of checkpointedRoots) roots.add(r);
+    }
+    return roots;
   }
 
   getChain(treeKey: string, conversationId: string): ChainEntry[] {

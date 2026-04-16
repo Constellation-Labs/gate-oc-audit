@@ -420,6 +420,84 @@ describe("SmtService", () => {
     );
   });
 
+  it("getKnownRoots returns current tree roots", () => {
+    service.onEventAppended(makeEvent({ sequence: 1 }));
+    const root = service.getCurrentSmtRoot()!;
+    const knownRoots = service.getKnownRoots();
+    assert.equal(knownRoots.size, 1);
+    assert.ok(knownRoots.has(root));
+  });
+
+  it("getKnownRoots merges checkpointed roots", () => {
+    service.onEventAppended(makeEvent({ sequence: 1 }));
+    const root = service.getCurrentSmtRoot()!;
+    const knownRoots = service.getKnownRoots(["checkpoint-root-1", "checkpoint-root-2"]);
+    assert.equal(knownRoots.size, 3);
+    assert.ok(knownRoots.has(root));
+    assert.ok(knownRoots.has("checkpoint-root-1"));
+    assert.ok(knownRoots.has("checkpoint-root-2"));
+  });
+
+  it("getKnownRoots returns empty set when no trees and no checkpoints", () => {
+    const knownRoots = service.getKnownRoots();
+    assert.equal(knownRoots.size, 0);
+  });
+
+  it("rejects fabricated proof with wrong root even if internally consistent", () => {
+    // Service A: insert events, producing root R_A
+    const eventA = makeEvent({ sequence: 1 });
+    service.onEventAppended(eventA);
+    const rootA = service.getCurrentSmtRoot()!;
+    assert.ok(rootA);
+
+    // Service B: insert different events, producing root R_B
+    const serviceB = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}-b`,
+      },
+    });
+    const eventB = makeEvent({ sequence: 2, description: "different event" });
+    serviceB.onEventAppended(eventB);
+    const rootB = serviceB.getCurrentSmtRoot()!;
+    assert.ok(rootB);
+    assert.notEqual(rootA, rootB);
+
+    // Get a valid proof from service B — internally consistent with root R_B
+    const hashB = serviceB.computeRawHash(eventB);
+    const proofB = serviceB.createProof(hashB)!;
+    assert.ok(proofB);
+    assert.equal(proofB.membership, true);
+    assert.equal(proofB.root, rootB);
+
+    // Without expectedRoot: stateless check passes (the vulnerability)
+    assert.equal(service.verifyProof(proofB), true);
+
+    // With expectedRoot = R_A: rejected because proof.root !== R_A
+    assert.equal(service.verifyProof(proofB, rootA), false);
+
+    // With expectedRoot = R_B: passes (root matches + internally consistent)
+    assert.equal(service.verifyProof(proofB, rootB), true);
+  });
+
+  it("verifyProof with matching expectedRoot still validates internal consistency", () => {
+    const event = makeEvent();
+    service.onEventAppended(event);
+    const root = service.getCurrentSmtRoot()!;
+
+    const rawHash = service.computeRawHash(event);
+    const proof = service.createProof(rawHash)!;
+    assert.equal(proof.root, root);
+
+    // Valid proof with correct expectedRoot passes
+    assert.equal(service.verifyProof(proof, root), true);
+
+    // Tampered proof with correct expectedRoot fails internal check
+    const tampered = { ...proof, siblings: [] };
+    assert.equal(service.verifyProof(tampered, root), false);
+  });
+
   it("replayEvents supports batched fetcher callback", () => {
     const events = Array.from({ length: 5 }, (_, i) =>
       makeEvent({ sequence: i + 1 }),

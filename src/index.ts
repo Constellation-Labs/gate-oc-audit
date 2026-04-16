@@ -117,7 +117,7 @@ export default (() => {
                     .command("verify")
                     .description("Verify an SMT proof")
                     .requiredOption("--proof <json>", "Proof JSON")
-                    .action((opts) => cliSmtHandler(getSmtService(), "verify-proof", opts));
+                    .action((opts) => cliSmtHandler(getSmtService(), "verify-proof", opts, getStore()));
 
                 smt
                     .command("trees")
@@ -325,6 +325,13 @@ export default (() => {
                         case "verify": {
                             const proof = params.proof as any;
                             if (!proof) return {error: "proof is required"};
+                            const knownRoots = smt.getKnownRoots(getStore().getCheckpointedRoots());
+                            if (knownRoots.size === 0) {
+                                return {valid: false, error: "No SMT trees or checkpoints found to verify against"};
+                            }
+                            if (!knownRoots.has(proof.root)) {
+                                return {valid: false, error: "Proof root does not match any known tree or checkpointed root"};
+                            }
                             return {valid: smt.verifyProof(proof)};
                         }
                         case "trees": {
