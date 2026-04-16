@@ -295,15 +295,7 @@ export class SmtService {
     return proof;
   }
 
-  /**
-   * Verify a proof's internal consistency (siblings hash to the claimed root).
-   *
-   * @param expectedRoot If provided, proof.root must equal this value before
-   *   the sibling check runs. Omitting it skips root legitimacy checking —
-   *   only safe when the caller has already verified the root independently.
-   *   External-facing paths should use {@link verifyProofWithRoots} instead.
-   */
-  verifyProof(proof: SmtProof, expectedRoot?: string): boolean {
+  private verifyProof(proof: SmtProof, expectedRoot?: string): boolean {
     if (expectedRoot !== undefined && proof.root !== expectedRoot) {
       return false;
     }

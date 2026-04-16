@@ -98,7 +98,7 @@ describe("SmtService", () => {
 
     const rawHash = service.computeRawHash(event);
     const proof = service.createProof(rawHash)!;
-    assert.equal(service.verifyProof(proof), true);
+    assert.equal(service.verifyProofWithRoots(proof).status, "valid");
   });
 
   it("dual-hash: inserts both raw and censored leaves", () => {
@@ -278,11 +278,7 @@ describe("SmtService", () => {
 
     // Pre-freeze proofs still verify
     for (const p of preFreezeProofs) {
-      assert.equal(
-        service.verifyProof(p),
-        true,
-        "pre-freeze proof must still verify",
-      );
+      assert.equal(service.verifyProofWithRoots(p).status, "valid", "pre-freeze proof must still verify");
     }
   });
 
@@ -303,7 +299,7 @@ describe("SmtService", () => {
     const proofAfter = service.createProof(hash, treeKey)!;
     assert.equal(proofAfter.frozen, true);
     assert.equal(proofAfter.membership, true, "leaf is still in the tree");
-    assert.equal(service.verifyProof(proofAfter), true);
+    assert.equal(service.verifyProofWithRoots(proofAfter).status, "valid");
   });
 
   it("pruneEpoch with empty epoch returns zero counts", () => {
@@ -447,8 +443,6 @@ describe("SmtService", () => {
     // Service A: insert events, producing root R_A
     const eventA = makeEvent({ sequence: 1 });
     service.onEventAppended(eventA);
-    const rootA = service.getCurrentSmtRoot()!;
-    assert.ok(rootA);
 
     // Service B: insert different events, producing root R_B
     const serviceB = new SmtService({
@@ -460,42 +454,31 @@ describe("SmtService", () => {
     });
     const eventB = makeEvent({ sequence: 2, description: "different event" });
     serviceB.onEventAppended(eventB);
-    const rootB = serviceB.getCurrentSmtRoot()!;
-    assert.ok(rootB);
-    assert.notEqual(rootA, rootB);
 
     // Get a valid proof from service B — internally consistent with root R_B
     const hashB = serviceB.computeRawHash(eventB);
     const proofB = serviceB.createProof(hashB)!;
     assert.ok(proofB);
     assert.equal(proofB.membership, true);
-    assert.equal(proofB.root, rootB);
 
-    // Without expectedRoot: stateless check passes (the vulnerability)
-    assert.equal(service.verifyProof(proofB), true);
-
-    // With expectedRoot = R_A: rejected because proof.root !== R_A
-    assert.equal(service.verifyProof(proofB, rootA), false);
-
-    // With expectedRoot = R_B: passes (root matches + internally consistent)
-    assert.equal(service.verifyProof(proofB, rootB), true);
+    // Service A rejects it — root R_B is not a known root
+    const result = service.verifyProofWithRoots(proofB);
+    assert.equal(result.status, "invalid");
   });
 
-  it("verifyProof with matching expectedRoot still validates internal consistency", () => {
+  it("verifyProofWithRoots rejects tampered proof with known root", () => {
     const event = makeEvent();
     service.onEventAppended(event);
-    const root = service.getCurrentSmtRoot()!;
 
     const rawHash = service.computeRawHash(event);
     const proof = service.createProof(rawHash)!;
-    assert.equal(proof.root, root);
 
-    // Valid proof with correct expectedRoot passes
-    assert.equal(service.verifyProof(proof, root), true);
+    // Valid proof passes
+    assert.equal(service.verifyProofWithRoots(proof).status, "valid");
 
-    // Tampered proof with correct expectedRoot fails internal check
+    // Tampered proof fails internal check even though root is known
     const tampered = { ...proof, siblings: [] };
-    assert.equal(service.verifyProof(tampered, root), false);
+    assert.equal(service.verifyProofWithRoots(tampered).status, "invalid");
   });
 
   it("replayEvents supports batched fetcher callback", () => {

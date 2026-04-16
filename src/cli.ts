@@ -120,7 +120,7 @@ export async function cliVerifyHandler(
       for (const event of recentEvents) {
         const rawHash = smtService.computeRawHash(event);
         const proof = smtService.createProof(rawHash, tree.key);
-        if (proof && proof.membership && smtService.verifyProof(proof, tree.root)) {
+        if (proof && proof.membership && smtService.verifyProofWithRoots(proof, store.getCheckpointedRoots()).status === "valid") {
           verified++;
         } else if (proof && !proof.membership) {
           // Event not in this tree — may be in a different tree

@@ -248,17 +248,17 @@ async function main() {
   for (const event of events) {
     const rawHash = smtService.computeRawHash(event);
     const proof = smtService.createProof(rawHash);
-    if (proof && proof.membership && smtService.verifyProof(proof)) {
+    if (proof && proof.membership && smtService.verifyProofWithRoots(proof).status === "valid") {
       proofsPassed++;
     } else {
-      console.error(`  FAIL proof for event #${event.sequence} (${event.eventType}): membership=${proof?.membership}, valid=${proof ? smtService.verifyProof(proof) : "no proof"}`);
+      console.error(`  FAIL proof for event #${event.sequence} (${event.eventType}): membership=${proof?.membership}, valid=${proof ? smtService.verifyProofWithRoots(proof).status : "no proof"}`);
       proofsFailed++;
       errors++;
     }
 
     const censoredHash = smtService.computeCensoredHash(event);
     const censoredProof = smtService.createProof(censoredHash);
-    if (censoredProof && censoredProof.membership && smtService.verifyProof(censoredProof)) {
+    if (censoredProof && censoredProof.membership && smtService.verifyProofWithRoots(censoredProof).status === "valid") {
       proofsPassed++;
     } else {
       console.error(`  FAIL censored proof for event #${event.sequence} (${event.eventType})`);

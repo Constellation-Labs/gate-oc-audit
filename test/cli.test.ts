@@ -127,7 +127,7 @@ describe("CLI: audit verify", () => {
     listTrees: () => [],
     getRoot: () => null,
     createProof: () => null,
-    verifyProof: () => false,
+    verifyProofWithRoots: () => ({ status: "unverifiable" as const, reason: "mock" }),
     computeRawHash: () => "aa".repeat(32),
     computeCensoredHash: () => "bb".repeat(32),
   } as any;
