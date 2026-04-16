@@ -214,6 +214,16 @@ openclaw audit smt chain <conversationId> --tree <key>  # Show conversation chai
 
 Proof verification checks both internal consistency (siblings hash to the claimed root) and root legitimacy (the proof's root matches a current tree root or a DE-checkpointed root). A self-consistent proof with an unknown root is rejected.
 
+Exit codes for `smt verify`:
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | Proof is valid — internally consistent and root matches a known anchor |
+| 1 | INVALID — root not recognized by this node, or proof is internally inconsistent |
+| 2 | UNVERIFIABLE — no SMT trees or DE checkpoints exist to verify against |
+
+**Live-root window:** proofs are verified against current tree roots and DE-checkpointed roots. When a new event advances the tree from root R1 to R2, proofs generated at R1 will be rejected unless a checkpoint captured R1. On active systems there is always a brief window between tree advancement and the next checkpoint where recently-generated proofs cannot be verified. To avoid this, verify proofs before appending new events, or ensure the checkpoint interval is short enough for your use case.
+
 ## How the Sparse Merkle Tree works
 
 Every audit event is committed as dual-hash (raw + censored) leaves in a Sparse Merkle Tree. The raw hash covers all event fields; the censored hash covers only the event type, category, and timestamp (for privacy-preserving verification).
