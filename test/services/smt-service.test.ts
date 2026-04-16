@@ -85,7 +85,9 @@ describe("SmtService", () => {
     const event = makeEvent();
     service.onEventAppended(event);
 
-    const proof = service.createProof("ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00");
+    const proof = service.createProof(
+      "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+    );
     assert.ok(proof);
     assert.equal(proof!.membership, false);
   });
@@ -175,7 +177,10 @@ describe("SmtService", () => {
       // Events land in the current epoch (hour-based: Date.now() / 3_600_000)
       const currentEpoch = Math.floor(Date.now() / (1000 * 60 * 60));
       const result = svc1.pruneEpoch(treeKey, currentEpoch);
-      assert.ok(!("error" in result) && result.pruned > 0, "should have pruned current epoch");
+      assert.ok(
+        !("error" in result) && result.pruned > 0,
+        "should have pruned current epoch",
+      );
       const prunedEpoch = currentEpoch;
 
       // Verify proofs exist before shutdown
@@ -191,7 +196,11 @@ describe("SmtService", () => {
       await svc2.start();
 
       const after = svc2.getExportedProofs(treeKey, prunedEpoch!) as any;
-      assert.equal(after.proofCount, before.proofCount, "exportedProofs should survive restart");
+      assert.equal(
+        after.proofCount,
+        before.proofCount,
+        "exportedProofs should survive restart",
+      );
 
       await svc2.stop();
     } finally {
@@ -213,8 +222,16 @@ describe("SmtService", () => {
     assert.ok(result.pruned > 0);
 
     const rootAfter = service.getCurrentSmtRoot();
-    assert.equal(rootAfter, rootBefore, "root must not change after freeze-prune");
-    assert.equal(result.root, rootBefore, "returned root must match pre-freeze root");
+    assert.equal(
+      rootAfter,
+      rootBefore,
+      "root must not change after freeze-prune",
+    );
+    assert.equal(
+      result.root,
+      rootBefore,
+      "returned root must match pre-freeze root",
+    );
   });
 
   it("pruneEpoch exported proofs have frozen: true", () => {
@@ -229,7 +246,11 @@ describe("SmtService", () => {
     const exported = service.getExportedProofs(treeKey, currentEpoch) as any;
     assert.ok(exported.proofCount > 0);
     for (const proof of exported.proofs) {
-      assert.equal(proof.frozen, true, "exported proofs should be annotated frozen");
+      assert.equal(
+        proof.frozen,
+        true,
+        "exported proofs should be annotated frozen",
+      );
     }
   });
 
@@ -257,7 +278,11 @@ describe("SmtService", () => {
 
     // Pre-freeze proofs still verify
     for (const p of preFreezeProofs) {
-      assert.equal(service.verifyProof(p), true, "pre-freeze proof must still verify");
+      assert.equal(
+        service.verifyProof(p),
+        true,
+        "pre-freeze proof must still verify",
+      );
     }
   });
 
@@ -350,7 +375,49 @@ describe("SmtService", () => {
     // Re-appending the frozen event should be a no-op
     svc2.onEventAppended(event);
     assert.equal(svc2.getCurrentSmtRoot(treeKey), rootBefore);
-    assert.equal(svc2.getRoot(treeKey)!.entryCount, service.getRoot(treeKey)!.entryCount);
+    assert.equal(
+      svc2.getRoot(treeKey)!.entryCount,
+      service.getRoot(treeKey)!.entryCount,
+    );
+  });
+
+  it("replaying identical events produces the same root", () => {
+    const events = Array.from({ length: 3 }, (_, i) =>
+      makeEvent({ id: `event-${i}`, sequence: i + 1 }),
+    );
+
+    const svc1 = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}-a`,
+      },
+    });
+    const svc2 = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}-b`,
+      },
+    });
+
+    for (const event of events) {
+      svc1.onEventAppended(event);
+    }
+    for (const event of events) {
+      svc2.onEventAppended(event);
+    }
+
+    const root1 = svc1.getCurrentSmtRoot();
+    const root2 = svc2.getCurrentSmtRoot();
+
+    assert.ok(root1, "svc1 should have a root");
+    assert.ok(root2, "svc2 should have a root");
+    assert.equal(
+      root1,
+      root2,
+      "Two services receiving identical events must produce identical SMT roots",
+    );
   });
 
   it("replayEvents supports batched fetcher callback", () => {
@@ -368,5 +435,4 @@ describe("SmtService", () => {
     assert.equal(trees.length, 1);
     assert.ok(trees[0].entryCount >= 5);
   });
-
 });

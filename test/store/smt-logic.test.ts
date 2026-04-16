@@ -96,6 +96,7 @@ describe("SMT Logic", () => {
       assert.equal(result.entryCount, 1);
       assert.equal(result.seqNo, 1);
       assert.equal(result.chainPrev, null);
+      assert.equal(result.auditEventId, "evt-001");
       assert.ok(result.rawLeafValue);
     });
 

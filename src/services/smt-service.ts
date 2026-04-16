@@ -200,7 +200,6 @@ export class SmtService {
       const store = this.manager.getOrCreate(treeKey);
       const timestamp = Math.floor(new Date(event.createdAt).getTime() / 1000);
       const conversationId = event.sessionId ?? this.machineId;
-      const eventId = event.id;
 
       const rawHash = this.computeRawHash(event);
       const censoredHash = this.computeCensoredHash(event);
@@ -213,7 +212,7 @@ export class SmtService {
       }
 
       const result = insertEntry(store, {
-        eventId,
+        eventId: event.id,
         treeKey,
         rawHash,
         censoredHash,
