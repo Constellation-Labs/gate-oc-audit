@@ -372,7 +372,7 @@ export default (() => {
             console.error(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
 
             const retention = new RetentionService(activeStore, config);
-            const configWatcher = new ConfigWatcher(activeStore, scanner, activeNotifier, config);
+            const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
             deAnchor = createDeAnchorService(activeStore, config, activeNotifier);
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
