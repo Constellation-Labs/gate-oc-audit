@@ -6,7 +6,6 @@
  */
 
 import { createRequire } from "module";
-import { uuidv7 } from "uuidv7";
 import type {
   SeqNos,
   ConversationChains,
@@ -93,6 +92,7 @@ export function insertEntry(
   opts: InsertOptions,
 ): InsertResult | InsertError {
   const {
+    eventId,
     treeKey,
     rawHash,
     censoredHash,
@@ -108,7 +108,6 @@ export function insertEntry(
     return { error: `Tree ${treeKey} has reached max size (${maxTreeSize})` };
   }
 
-  const auditEventId = uuidv7();
   const seqNo = getNextSeqNo(seqNos, treeKey);
   const chainPrev = getChainPrev(conversationChains, treeKey, conversationId);
   const epoch = getCurrentEpoch();
@@ -116,7 +115,7 @@ export function insertEntry(
   const rawLeafValue: string = sdk.canonicalize({
     timestamp,
     seqNo,
-    auditEventId,
+    auditEventId: eventId,
     hashType: "raw",
     chainPrev,
   });
@@ -129,7 +128,7 @@ export function insertEntry(
     rawHash,
     timestamp,
     seqNo,
-    auditEventId,
+    auditEventId: eventId,
   });
 
   let censoredLeafValue: string | undefined;
@@ -138,7 +137,7 @@ export function insertEntry(
     censoredLeafValue = sdk.canonicalize({
       timestamp,
       seqNo: censoredSeqNo,
-      auditEventId,
+      auditEventId: eventId,
       hashType: "censored",
       chainPrev,
     });
@@ -153,7 +152,7 @@ export function insertEntry(
     ...(censoredHash ? { censoredKey: censoredHash } : {}),
     root: store.getRoot(),
     entryCount: store.getEntryCount(),
-    auditEventId,
+    auditEventId: eventId,
     seqNo,
     chainPrev,
     rawLeafValue,

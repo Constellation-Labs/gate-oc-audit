@@ -26,6 +26,7 @@ export type ExportedProofs = Map<string, Map<number, object[]>>;
 export type LeafValues = Map<string, string>;
 
 export interface InsertOptions {
+  eventId: string;
   treeKey: string;
   rawHash: string;
   censoredHash: string | null;
