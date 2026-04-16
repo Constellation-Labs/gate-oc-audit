@@ -327,7 +327,7 @@ export default (() => {
                             if (!proof) return {error: "proof is required"};
                             const knownRoots = smt.getKnownRoots(getStore().getCheckpointedRoots());
                             if (knownRoots.size === 0) {
-                                return {valid: false, error: "No SMT trees or checkpoints found to verify against"};
+                                return {valid: false, unverifiable: true, error: "No SMT trees or checkpoints found to verify against"};
                             }
                             if (!knownRoots.has(proof.root)) {
                                 return {valid: false, error: "Proof root does not match any known tree or checkpointed root"};

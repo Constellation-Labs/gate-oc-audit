@@ -12,20 +12,27 @@ function cleanupTestDb(): void {
   }
 }
 
+interface RegisteredTool {
+  name: string;
+  handler: (params: Record<string, unknown>) => unknown;
+}
+
 function createMockApi(dbPath: string) {
   const registeredHooks: string[] = [];
   const registeredCli: unknown[] = [];
   const registeredServices: unknown[] = [];
+  const registeredTools: RegisteredTool[] = [];
 
   return {
     registeredHooks,
     registeredCli,
     registeredServices,
+    registeredTools,
     on(hook: string) { registeredHooks.push(hook); },
     registerHook() {},
     registerService(s: unknown) { registeredServices.push(s); },
     registerCli(r: unknown, opts?: unknown) { registeredCli.push({ r, opts }); },
-    registerTool() {},
+    registerTool(tool: RegisteredTool) { registeredTools.push(tool); },
     registerCommand() {},
     registerHttpRoute() {},
     pluginConfig: { dbPath },
@@ -62,5 +69,14 @@ describe("plugin entry point", () => {
 
     assert.equal(api.registeredCli.length, 1);
     assert.equal(api.registeredServices.length, 5); // smt, retention, config-watcher, de-anchor, file-watcher
+
+    // audit_smt verify returns unverifiable when no trees exist
+    const smtTool = api.registeredTools.find((t) => t.name === "audit_smt");
+    assert.ok(smtTool, "audit_smt tool should be registered");
+
+    const result = smtTool.handler({ action: "verify", proof: { root: "ab".repeat(32), key: "00", siblings: [], membership: true } }) as any;
+    assert.equal(result.valid, false);
+    assert.equal(result.unverifiable, true);
+    assert.ok(result.error.includes("No SMT trees or checkpoints"));
   });
 });

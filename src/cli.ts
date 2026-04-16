@@ -218,8 +218,8 @@ export async function cliSmtHandler(
         const proof = JSON.parse(opts.proof);
         const knownRoots = smtService.getKnownRoots(store?.getCheckpointedRoots());
         if (knownRoots.size === 0) {
-          console.error("INVALID — no SMT trees or checkpoints found to verify against.");
-          process.exitCode = 1;
+          console.error("UNVERIFIABLE — no SMT trees or checkpoints found to verify against.");
+          process.exitCode = 2;
           return;
         }
         if (!knownRoots.has(proof.root)) {

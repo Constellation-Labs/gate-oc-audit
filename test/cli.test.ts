@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { AuditStore } from "../src/store/audit-store.js";
-import { cliAuditHandler, cliVerifyHandler, cliExportHandler } from "../src/cli.js";
-import type { AuditEventInsert } from "../src/types/events.js";
+import { cliAuditHandler, cliVerifyHandler, cliExportHandler, cliSmtHandler } from "../src/cli.js";
+import { SmtService } from "../src/services/smt-service.js";
+import type { AuditEvent, AuditEventInsert } from "../src/types/events.js";
 
 function makeTempDb(): string {
   return join(mkdtempSync(join(tmpdir(), "audit-cli-")), "test.db");
@@ -227,5 +228,104 @@ describe("CLI: audit export", () => {
     const lines = stdout.trim().split("\n");
     assert.equal(lines.length, 1);
     assert.ok(lines[0].includes("tool.invoked"));
+  });
+});
+
+function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
+  return {
+    id: crypto.randomUUID(),
+    sequence: 1,
+    source: "openclaw-plugin",
+    machineId: "test-machine",
+    eventType: "session.start",
+    category: "system",
+    description: "test",
+    metadata: { test: true },
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeSmtService(): SmtService {
+  return new SmtService({
+    smt: {
+      checkpointIntervalMs: 0,
+      pruneAfterEpochs: 0,
+      checkpointDir: `/tmp/smt-cli-test-${process.pid}-${Date.now()}`,
+    },
+  });
+}
+
+describe("CLI: smt verify-proof", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let smtService: SmtService;
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    smtService = makeSmtService();
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("rejects fabricated proof from a different tree via CLI", async () => {
+    // Build a legitimate tree with service A
+    const event = makeEvent({ sequence: 1 });
+    smtService.onEventAppended(event);
+
+    // Build a fabricated tree with service B
+    const serviceB = makeSmtService();
+    const fakeEvent = makeEvent({ sequence: 2, description: "fabricated" });
+    serviceB.onEventAppended(fakeEvent);
+    const fakeHash = serviceB.computeRawHash(fakeEvent);
+    const fakeProof = serviceB.createProof(fakeHash)!;
+    assert.ok(fakeProof.membership);
+
+    const savedExitCode = process.exitCode;
+    try {
+      const { stderr } = await captureConsoleAsync(() =>
+        cliSmtHandler(smtService, "verify-proof", { proof: JSON.stringify(fakeProof) }, store),
+      );
+      assert.ok(stderr.includes("INVALID"));
+      assert.ok(stderr.includes("does not match any known"));
+      assert.equal(process.exitCode, 1);
+    } finally {
+      process.exitCode = savedExitCode;
+    }
+  });
+
+  it("returns UNVERIFIABLE when no trees or checkpoints exist", async () => {
+    // Fresh service with no events — no known roots
+    const emptyService = makeSmtService();
+    const dummyProof = { root: "ab".repeat(32), key: "00", siblings: [], membership: true };
+
+    const savedExitCode = process.exitCode;
+    try {
+      const { stderr } = await captureConsoleAsync(() =>
+        cliSmtHandler(emptyService, "verify-proof", { proof: JSON.stringify(dummyProof) }, store),
+      );
+      assert.ok(stderr.includes("UNVERIFIABLE"));
+      assert.equal(process.exitCode, 2);
+    } finally {
+      process.exitCode = savedExitCode;
+    }
+  });
+
+  it("accepts a valid proof from the same tree via CLI", async () => {
+    const event = makeEvent({ sequence: 1 });
+    smtService.onEventAppended(event);
+
+    const rawHash = smtService.computeRawHash(event);
+    const proof = smtService.createProof(rawHash)!;
+    assert.ok(proof.membership);
+
+    const { stdout } = await captureConsoleAsync(() =>
+      cliSmtHandler(smtService, "verify-proof", { proof: JSON.stringify(proof) }, store),
+    );
+    assert.ok(stdout.includes("OK"));
   });
 });
