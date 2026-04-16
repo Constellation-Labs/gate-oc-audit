@@ -295,10 +295,7 @@ export class SmtService {
     return proof;
   }
 
-  private verifyProof(proof: SmtProof, expectedRoot?: string): boolean {
-    if (expectedRoot !== undefined && proof.root !== expectedRoot) {
-      return false;
-    }
+  private verifyProof(proof: SmtProof): boolean {
     const verifier = this.manager.getOrCreate("__verifier__");
     return verifier.verifyProof(proof);
   }
