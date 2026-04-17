@@ -21,8 +21,6 @@ function isUnsafeUrl(raw: string): string | undefined {
   let url: URL;
   try { url = new URL(raw); } catch { return "malformed URL"; }
   if (url.protocol !== "https:" && url.protocol !== "http:") return `disallowed protocol ${url.protocol}`;
-  const host = url.hostname;
-  if (/^169\.254\./.test(host)) return "link-local address";
   return undefined;
 }
 

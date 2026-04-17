@@ -202,6 +202,10 @@ class ActiveAnchorService implements AnchorService {
             const message = err instanceof Error ? err.message : "Unknown error";
             console.error("[audit-plugin:de-anchor] Anchor failed:", message);
         } finally {
+            // Reset unconditionally: authoritative gating uses store.countSince(startSeq),
+            // so the counter is only a hint for when notifyAppend should dispatch. Resetting
+            // on failure prevents unbounded growth (which would dispatch on every append
+            // while DE is down); the timer with timerMinEvents=1 handles retry cadence.
             this.appendsSinceLastCheckpoint = 0;
             this.anchorInFlight = false;
         }
