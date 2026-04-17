@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { basename, extname, resolve, sep } from "node:path";
 import type { AuditStore } from "../store/audit-store.js";
+import type { RateLimiter } from "../rate-limiter.js";
 import type { ToolScanner } from "../scanner.js";
 import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
@@ -38,6 +39,7 @@ function fileLinesCount(filePath: string): number {
 
 export class ConfigWatcher {
   private store: AuditStore;
+  private limiter: RateLimiter;
   private scanner: ToolScanner;
   private notifier: NotificationService;
   private watcher: { close(): Promise<void>; on(event: string, listener: (...args: any[]) => void): any } | undefined;
@@ -47,11 +49,13 @@ export class ConfigWatcher {
 
   constructor(
     store: AuditStore,
+    limiter: RateLimiter,
     scanner: ToolScanner,
     notifier: NotificationService,
     config: Record<string, unknown> = {},
   ) {
     this.store = store;
+    this.limiter = limiter;
     this.scanner = scanner;
     this.notifier = notifier;
 
@@ -178,7 +182,7 @@ export class ConfigWatcher {
         diffSummary,
       };
 
-      this.store.append({
+      this.limiter.append({
         eventType,
         category: "config",
         description: `${manifestType} ${effectiveChangeType}: ${artifactName}`,
@@ -190,7 +194,7 @@ export class ConfigWatcher {
       if (effectiveChangeType !== "removed" && this.isCodeFile(resolvedPath)) {
         scanFindings = this.scanner.scan(resolvedPath);
         if (scanFindings.length > 0) {
-          this.store.append({
+          this.limiter.append({
             eventType: "security.scan_result",
             category: "security",
             description: `Scan: ${scanFindings.length} finding(s) in ${artifactName}`,

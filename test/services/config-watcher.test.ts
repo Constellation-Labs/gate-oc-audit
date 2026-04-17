@@ -5,6 +5,8 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { AuditStore } from "../../src/store/audit-store.js";
 import { ConfigWatcher } from "../../src/services/config-watcher.js";
+import { RateLimiter } from "../../src/rate-limiter.js";
+import { SmtService } from "../../src/services/smt-service.js";
 import { ToolScanner } from "../../src/scanner.js";
 import { NotificationService } from "../../src/services/notifications.js";
 import type { AuditEvent } from "../../src/types/events.js";
@@ -20,13 +22,15 @@ function sleep(ms: number): Promise<void> {
 describe("ConfigWatcher", () => {
   let dbPath: string;
   let store: AuditStore;
+  let limiter: RateLimiter;
   let openclawDir: string;
   let scanner: ToolScanner;
   let notifier: NotificationService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
+    limiter = new RateLimiter(store);
     scanner = new ToolScanner();
     notifier = new NotificationService(); // no webhook URL — won't send
 
@@ -35,14 +39,14 @@ describe("ConfigWatcher", () => {
     mkdirSync(join(openclawDir, "tools"), { recursive: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
     rmSync(openclawDir, { recursive: true, force: true });
   });
 
   it("detects new skill file", async () => {
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
 
     // Give watcher time to initialize
@@ -66,7 +70,7 @@ describe("ConfigWatcher", () => {
     // Create file before watcher starts
     writeFileSync(join(openclawDir, "tools", "my-tool.ts"), "version 1");
 
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     await sleep(500);
 
@@ -84,7 +88,7 @@ describe("ConfigWatcher", () => {
   });
 
   it("runs scanner on code files and logs findings", async () => {
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     await sleep(500);
 
@@ -104,7 +108,7 @@ describe("ConfigWatcher", () => {
   });
 
   it("updates config_manifests table", async () => {
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     await sleep(500);
 
@@ -122,7 +126,7 @@ describe("ConfigWatcher", () => {
     const filePath = join(openclawDir, "skills", "temp.ts");
     writeFileSync(filePath, "content");
 
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     await sleep(500);
 
@@ -138,14 +142,14 @@ describe("ConfigWatcher", () => {
   });
 
   it("stop is idempotent", async () => {
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     watcher.stop();
     watcher.stop(); // should not throw
   });
 
   it("does not scan non-code files", async () => {
-    const watcher = new ConfigWatcher(store, scanner, notifier, { openclawDir });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
     await sleep(500);
 
@@ -156,5 +160,47 @@ describe("ConfigWatcher", () => {
 
     const scanEvents = store.query({ category: "security" });
     assert.equal(scanEvents.length, 0, "Should not scan non-code files");
+  });
+
+  it("config change events get SMT proofs", async () => {
+    const smtCheckpointDir = join(mkdtempSync(join(tmpdir(), "smt-cfgwatch-")), "checkpoints");
+    const smtService = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: smtCheckpointDir,
+      },
+    });
+    await smtService.start();
+    limiter.setSmtService(smtService);
+
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+    try {
+      await watcher.start();
+      await sleep(500);
+
+      writeFileSync(
+        join(openclawDir, "skills", "proven-skill.ts"),
+        'export function run() { return "proven"; }',
+      );
+
+      await sleep(1500);
+
+      const events = store.query({ category: "config" });
+      assert.ok(events.length > 0, "Should have config events");
+
+      const configEvent = events.find((e: AuditEvent) => e.eventType === "config.skill_changed");
+      assert.ok(configEvent, "Should have a skill_changed event");
+
+      const rawHash = smtService.computeRawHash(configEvent!);
+      const proof = smtService.createProof(rawHash);
+      assert.ok(proof, "Should produce a proof for the config event");
+      assert.equal(proof!.membership, true, "Proof should confirm membership");
+      assert.equal(smtService.verifyProof(proof!), true, "Proof should verify");
+    } finally {
+      watcher.stop();
+      await smtService.stop();
+      rmSync(dirname(smtCheckpointDir), { recursive: true, force: true });
+    }
   });
 });
