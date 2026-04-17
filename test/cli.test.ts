@@ -26,13 +26,19 @@ function captureConsole(fn: () => void): { stdout: string; stderr: string } {
   const logs: string[] = [];
   const errors: string[] = [];
   const origLog = console.log;
+  const origInfo = console.info;
+  const origWarn = console.warn;
   const origErr = console.error;
   console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.info = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.warn = (...args: unknown[]) => errors.push(args.map(String).join(" "));
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
   try {
     fn();
   } finally {
     console.log = origLog;
+    console.info = origInfo;
+    console.warn = origWarn;
     console.error = origErr;
   }
   return { stdout: logs.join("\n"), stderr: errors.join("\n") };
@@ -42,13 +48,19 @@ async function captureConsoleAsync(fn: () => Promise<void>): Promise<{ stdout: s
   const logs: string[] = [];
   const errors: string[] = [];
   const origLog = console.log;
+  const origInfo = console.info;
+  const origWarn = console.warn;
   const origErr = console.error;
   console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.info = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.warn = (...args: unknown[]) => errors.push(args.map(String).join(" "));
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
   try {
     await fn();
   } finally {
     console.log = origLog;
+    console.info = origInfo;
+    console.warn = origWarn;
     console.error = origErr;
   }
   return { stdout: logs.join("\n"), stderr: errors.join("\n") };

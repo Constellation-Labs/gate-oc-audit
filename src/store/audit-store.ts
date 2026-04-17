@@ -218,7 +218,7 @@ export class AuditStore {
       if (isNew) throw err; // Fresh DB failed — nothing to recover
       const message = err instanceof Error ? err.message : "Unknown error";
       console.error(`[audit-plugin] Database corrupt or unreadable: ${message}`);
-      console.error("[audit-plugin] Preserving old DB and creating fresh database");
+      console.warn("[audit-plugin] Preserving old DB and creating fresh database");
 
       // Preserve the old DB for forensic recovery
       const backupPath = `${resolvedPath}.corrupt.${Date.now()}`;
@@ -230,7 +230,7 @@ export class AuditStore {
             renameSync(resolvedPath + suffix, backupPath + suffix);
           }
         }
-        console.error(`[audit-plugin] Old database preserved at ${backupPath}`);
+        console.warn(`[audit-plugin] Old database preserved at ${backupPath}`);
       } catch {
         console.error("[audit-plugin] Failed to rename corrupt DB, overwriting");
       }
@@ -252,12 +252,12 @@ export class AuditStore {
       try {
         metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
-        console.error("[audit-plugin] Metadata is not serializable, skipping event");
+        console.warn("[audit-plugin] Metadata is not serializable, skipping event");
         return undefined;
       }
 
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
-        console.error(
+        console.warn(
           `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, skipping event`,
         );
         return undefined;
@@ -270,7 +270,7 @@ export class AuditStore {
         ? insert.content
         : undefined;
       if (insert.content && !rawContent) {
-        console.error(`[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
+        console.warn(`[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
       }
       const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
 

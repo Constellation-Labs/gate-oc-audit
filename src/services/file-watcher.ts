@@ -74,7 +74,7 @@ export class FileWatcher {
     try {
       chokidar = await import("chokidar");
     } catch {
-      console.error("[audit-plugin] chokidar not available, file watching disabled");
+      console.warn("[audit-plugin] chokidar not available, file watching disabled");
       return;
     }
 
@@ -86,7 +86,7 @@ export class FileWatcher {
       isMatch = pm.isMatch ?? pm;
       if (typeof isMatch !== "function") throw new Error("isMatch not found");
     } catch {
-      console.error("[audit-plugin] picomatch not available, file watching disabled");
+      console.warn("[audit-plugin] picomatch not available, file watching disabled");
       return;
     }
 
@@ -104,7 +104,7 @@ export class FileWatcher {
     const baseDirs = [...new Set(resolvedPatterns.map(globParent))].filter((d) => existsSync(d));
 
     if (baseDirs.length === 0) {
-      console.error("[audit-plugin] No existing directories found for file watch patterns");
+      console.warn("[audit-plugin] No existing directories found for file watch patterns");
       return;
     }
 

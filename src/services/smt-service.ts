@@ -108,7 +108,7 @@ export class SmtService {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
       const trees = this.manager.listTrees();
-      console.error(
+      console.info(
         `[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`,
       );
     } catch (err) {
@@ -118,7 +118,7 @@ export class SmtService {
   }
 
   async start(): Promise<void> {
-    console.error(
+    console.info(
       `[audit-plugin:smt] Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`,
     );
 
@@ -140,7 +140,7 @@ export class SmtService {
       this.pruneTimer.unref();
     }
 
-    console.error("[audit-plugin:smt] Started successfully");
+    console.info("[audit-plugin:smt] Started successfully");
   }
 
   async stop(): Promise<void> {
@@ -190,7 +190,7 @@ export class SmtService {
   onEventAppended(event: AuditEvent): void {
     try {
       if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        console.error(
+        console.warn(
           "[audit-plugin:smt] Storage cap reached, skipping insert",
         );
         return;
@@ -226,7 +226,7 @@ export class SmtService {
       });
 
       if ("error" in result) {
-        console.error(`[audit-plugin:smt] Insert rejected: ${result.error}`);
+        console.warn(`[audit-plugin:smt] Insert rejected: ${result.error}`);
         return;
       }
 
@@ -623,11 +623,11 @@ export class SmtService {
       for (const epoch of expiredEpochs) {
         const result = this.pruneEpoch(treeKey, epoch);
         if ("error" in result) {
-          console.error(
+          console.warn(
             `[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`,
           );
         } else if (result.pruned > 0) {
-          console.error(
+          console.info(
             `[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`,
           );
         }

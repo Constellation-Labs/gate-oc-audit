@@ -228,8 +228,8 @@ describe("AuditStore", () => {
 
     it("drops content exceeding MAX_CONTENT_SIZE and logs warning", () => {
       const warnings: string[] = [];
-      const origErr = console.error;
-      console.error = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+      const origWarn = console.warn;
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
       try {
         const bigContent = "x".repeat(5 * 1024 * 1024 + 1);
         const event = store.append(sampleInsert({ content: bigContent }))!;
@@ -237,7 +237,7 @@ describe("AuditStore", () => {
         assert.equal(event.content, undefined);
         assert.ok(warnings.some((w) => w.includes("Content exceeds")));
       } finally {
-        console.error = origErr;
+        console.warn = origWarn;
       }
     });
 

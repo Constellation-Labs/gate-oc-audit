@@ -33,7 +33,7 @@ export class NotificationService {
     if (webhookUrl) {
       const reason = isUnsafeUrl(webhookUrl);
       if (reason) {
-        console.error(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
+        console.warn(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
       } else {
         this.webhookUrl = webhookUrl;
       }
