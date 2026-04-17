@@ -145,7 +145,7 @@ export default (() => {
             // through any of them.
             if (_registered) {
                 if (_store && _limiter) {
-                    registerHooks(api, _store, _limiter);
+                    registerHooks(api, _store, _limiter, config);
                 }
                 console.warn("[audit-plugin] Re-registered hooks on new api instance");
                 return;
@@ -164,7 +164,7 @@ export default (() => {
             _limiter = limiter;
             // Hooks are re-registered on every API instance (see guard above);
             // tools below are only registered here, on the first call.
-            registerHooks(api, store, limiter);
+            registerHooks(api, store, limiter, config);
 
             // LLM cost tracking via diagnostic events (separate subscription path)
             import("openclaw/plugin-sdk").then(({onDiagnosticEvent}) => {
@@ -172,6 +172,7 @@ export default (() => {
                 onDiagnosticEvent((evt: Record<string, unknown>) => {
                     if (evt.type !== "model.usage") return;
                     try {
+                        //note that this is not redacted
                         limiter.append({
                             eventType: "prompt.response",
                             category: "prompt",

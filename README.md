@@ -54,6 +54,15 @@ Add config under `plugins.entries` in your OpenClaw configuration:
 |---|---|---|
 | `notificationWebhook` | — | Webhook URL for alerts (config changes, integrity violations, DE divergence) |
 
+#### Redaction
+
+| Option | Default | Description |
+|---|---|---|
+| `redactPromptText` | `false` | Replace content of `prompt.*` and `message.*` events with `"sha256:<hex>"` before DB write. Length metadata (`contentLength` / `promptLength`) is preserved. |
+| `redactToolArgs` | `false` | Replace `tool.invoked` `metadata.args` with `{ hash: "sha256:<hex>" }` (hash computed over canonicalized JSON of the already key-sanitized args). |
+
+Hashes allow independent verification — anyone with the original plaintext can re-hash and confirm it matches the audit record, without the plaintext ever touching the DB.
+
 #### Sparse Merkle Tree
 
 Nested under the `smt` key:

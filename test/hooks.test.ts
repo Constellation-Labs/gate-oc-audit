@@ -4,10 +4,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import Database from "better-sqlite3";
 import { AuditStore } from "../src/store/audit-store.js";
 import { sanitizeArgs, registerHooks } from "../src/hooks.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+
+const require2 = createRequire(import.meta.url);
+const sdk = require2("@constellation-network/digital-evidence-sdk") as {
+  canonicalize: (obj: unknown) => string;
+};
 
 function makeTempDb(): string {
   return join(mkdtempSync(join(tmpdir(), "audit-hooks-test-")), "test.db");
@@ -732,5 +739,182 @@ describe("registerHooks", () => {
       fireHook(api, "before_model_resolve", {}, { sessionId: "s1" });
       store = new AuditStore(makeTempDb());
     });
+  });
+});
+
+// --- Redaction ---
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
+}
+
+function readContent(dbPath: string, sequence = 1): string | null {
+  const db = new Database(dbPath);
+  const row = db.prepare("SELECT content_gz FROM audit_events WHERE sequence = ?").get(sequence) as
+    | { content_gz: Buffer | null }
+    | undefined;
+  db.close();
+  if (!row?.content_gz) return null;
+  return gunzipSync(row.content_gz).toString();
+}
+
+describe("redactToolArgs", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let api: ReturnType<typeof createMockApi>;
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    api = createMockApi();
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("flag off: tool.invoked metadata.args is sanitized object", () => {
+    registerHooks(api, store, undefined, {});
+    fireHook(api, "before_tool_call",
+      { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
+      { sessionId: "s1" },
+    );
+    const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+    assert.equal(meta.args.path, "/tmp/x");
+    assert.equal(meta.args.apiKey, "[REDACTED]");
+    assert.ok(!("hash" in meta.args));
+  });
+
+  it("flag on: metadata.args is { hash: 'sha256:<hex>' } only", () => {
+    registerHooks(api, store, undefined, { redactToolArgs: true });
+    fireHook(api, "before_tool_call",
+      { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
+      { sessionId: "s1" },
+    );
+    const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+    assert.deepEqual(Object.keys(meta.args), ["hash"]);
+    assert.match(meta.args.hash, /^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("flag on: hash is computed over canonicalized post-sanitize args", () => {
+    registerHooks(api, store, undefined, { redactToolArgs: true });
+    const params = { path: "/tmp/x", password: "hunter2" };
+    fireHook(api, "before_tool_call",
+      { toolName: "t", params },
+      { sessionId: "s1" },
+    );
+    const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+    const expected = "sha256:" + sha256Hex(sdk.canonicalize({ path: "/tmp/x", password: "[REDACTED]" }));
+    assert.equal(meta.args.hash, expected);
+  });
+
+  it("flag on: hash is stable across identical inputs", () => {
+    registerHooks(api, store, undefined, { redactToolArgs: true });
+    fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
+    fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
+    const events = getEvents(dbPath);
+    const h1 = JSON.parse(events[0].metadata).args.hash;
+    const h2 = JSON.parse(events[1].metadata).args.hash;
+    assert.equal(h1, h2);
+  });
+});
+
+describe("redactPromptText", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let api: ReturnType<typeof createMockApi>;
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    api = createMockApi();
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  const contentCases: Array<{
+    hook: string;
+    event: (content: string) => Record<string, unknown>;
+    ctx: Record<string, unknown>;
+    eventType: string;
+  }> = [
+    {
+      hook: "llm_input",
+      event: (content) => ({ provider: "p", model: "m", prompt: content, historyMessages: [], imagesCount: 0 }),
+      ctx: { sessionId: "s1" },
+      eventType: "prompt.input",
+    },
+    {
+      hook: "llm_output",
+      event: (content) => ({ provider: "p", model: "m", assistantTexts: [content], usage: {} }),
+      ctx: { sessionId: "s1" },
+      eventType: "prompt.response",
+    },
+    {
+      hook: "message_received",
+      event: (content) => ({ from: "user-1", content }),
+      ctx: { channelId: "telegram", conversationId: "c1" },
+      eventType: "message.received",
+    },
+    {
+      hook: "message_sent",
+      event: (content) => ({ to: "user-1", content, success: true }),
+      ctx: { channelId: "telegram", conversationId: "c1" },
+      eventType: "message.sent",
+    },
+    {
+      hook: "message_sending",
+      event: (content) => ({ to: "user-1", content }),
+      ctx: { channelId: "discord", conversationId: "c1" },
+      eventType: "message.sending",
+    },
+  ];
+
+  for (const { hook, event, ctx, eventType } of contentCases) {
+    it(`flag off: ${eventType} stores plaintext content`, () => {
+      registerHooks(api, store, undefined, {});
+      const content = `plaintext for ${eventType}`;
+      fireHook(api, hook, event(content), ctx);
+      assert.equal(readContent(dbPath), content);
+    });
+
+    it(`flag on: ${eventType} stores sha256 hash of original content`, () => {
+      registerHooks(api, store, undefined, { redactPromptText: true });
+      const content = `sensitive prompt for ${eventType}`;
+      fireHook(api, hook, event(content), ctx);
+      assert.equal(readContent(dbPath), "sha256:" + sha256Hex(content));
+    });
+
+    it(`flag on: ${eventType} preserves metadata length fields`, () => {
+      registerHooks(api, store, undefined, { redactPromptText: true });
+      const content = "a".repeat(100);
+      fireHook(api, hook, event(content), ctx);
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      const recordedLength =
+        meta.contentLength ?? meta.promptLength;
+      if (recordedLength !== undefined) assert.equal(recordedLength, 100);
+    });
+  }
+
+  it("flag on: tool.result content is NOT hashed (category is tool)", () => {
+    registerHooks(api, store, undefined, { redactPromptText: true });
+    fireHook(api, "after_tool_call",
+      { toolName: "bash", durationMs: 10, result: "script output here", params: {} },
+      { sessionId: "s1" },
+    );
+    assert.equal(readContent(dbPath), "script output here");
+  });
+
+  it("flag on: prompt event without content is a no-op (prompt.build has no content field)", () => {
+    registerHooks(api, store, undefined, { redactPromptText: true });
+    fireHook(api, "before_prompt_build",
+      { prompt: "short", messages: [] },
+      { sessionId: "s1" },
+    );
+    assert.equal(readContent(dbPath), null);
   });
 });
