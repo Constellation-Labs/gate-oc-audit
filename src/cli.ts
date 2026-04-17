@@ -109,6 +109,8 @@ export async function cliVerifyHandler(
   } else {
     let allValid = true;
 
+    const knownRoots = smtService.getKnownRoots(store.getCheckpointedRoots());
+
     for (const tree of trees) {
       console.log(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
 
@@ -120,7 +122,7 @@ export async function cliVerifyHandler(
       for (const event of recentEvents) {
         const rawHash = smtService.computeRawHash(event);
         const proof = smtService.createProof(rawHash, tree.key);
-        if (proof && proof.membership && smtService.verifyProof(proof)) {
+        if (proof && proof.membership && smtService.verifyProofWithRoots(proof, knownRoots).status === "valid") {
           verified++;
         } else if (proof && !proof.membership) {
           // Event not in this tree — may be in a different tree
@@ -189,6 +191,7 @@ export async function cliSmtHandler(
   smtService: SmtService,
   action: string,
   opts: Record<string, string>,
+  store?: AuditStore,
 ): Promise<void> {
   await smtService.ensureReady();
   switch (action) {
@@ -215,12 +218,20 @@ export async function cliSmtHandler(
     case "verify-proof": {
       try {
         const proof = JSON.parse(opts.proof);
-        const valid = smtService.verifyProof(proof);
-        if (valid) {
-          console.log("OK — proof is valid.");
-        } else {
-          console.error("INVALID — proof verification failed.");
-          process.exitCode = 1;
+        const knownRoots = smtService.getKnownRoots(store?.getCheckpointedRoots());
+        const result = smtService.verifyProofWithRoots(proof, knownRoots);
+        switch (result.status) {
+          case "valid":
+            console.log("OK — proof is valid.");
+            break;
+          case "unverifiable":
+            console.error(`UNVERIFIABLE — ${result.reason}.`);
+            process.exitCode = 2;
+            break;
+          case "invalid":
+            console.error(`INVALID — ${result.reason}.`);
+            process.exitCode = 1;
+            break;
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";

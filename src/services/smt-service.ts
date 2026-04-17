@@ -34,6 +34,11 @@ import type {
 } from "../types/smt.js";
 import { getMachineId } from "../util/machine-id.js";
 
+export type VerifyResult =
+  | { status: "valid" }
+  | { status: "invalid"; reason: string }
+  | { status: "unverifiable"; reason: string };
+
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
   canonicalize: (obj: unknown) => string;
@@ -290,9 +295,31 @@ export class SmtService {
     return proof;
   }
 
-  verifyProof(proof: SmtProof): boolean {
+  private verifyProof(proof: SmtProof): boolean {
     const verifier = this.manager.getOrCreate("__verifier__");
     return verifier.verifyProof(proof);
+  }
+
+  /**
+   * Verify a proof end-to-end: root legitimacy against known roots, then
+   * internal hash-chain consistency. This is the method external-facing paths
+   * (CLI `smt verify-proof`, agent tool `audit_smt { action: "verify" }`)
+   * should use — it cannot be called without the root legitimacy check.
+   */
+  verifyProofWithRoots(
+    proof: SmtProof,
+    knownRoots: Set<string>,
+  ): VerifyResult {
+    if (knownRoots.size === 0) {
+      return { status: "unverifiable", reason: "No SMT trees or checkpoints found to verify against" };
+    }
+    if (!knownRoots.has(proof.root)) {
+      return { status: "invalid", reason: "Proof root does not match any known tree or checkpointed root" };
+    }
+    if (!this.verifyProof(proof)) {
+      return { status: "invalid", reason: "Proof verification failed" };
+    }
+    return { status: "valid" };
   }
 
   getRoot(treeKey?: string): { root: string; entryCount: number } | null {
@@ -304,6 +331,14 @@ export class SmtService {
 
   listTrees(): TreeInfo[] {
     return this.manager.listTrees().filter((t) => t.key !== "__verifier__");
+  }
+
+  getKnownRoots(checkpointedRoots?: Iterable<string>): Set<string> {
+    const roots = new Set(this.listTrees().map((t) => t.root));
+    if (checkpointedRoots) {
+      for (const r of checkpointedRoots) roots.add(r);
+    }
+    return roots;
   }
 
   getChain(treeKey: string, conversationId: string): ChainEntry[] {

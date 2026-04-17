@@ -184,13 +184,13 @@ openclaw audit list --category prompt --session <session-id>
 
 ### Verify integrity
 
-Walk the full hash chain and confirm no events have been tampered with:
+Verify SMT proofs for recent events and check DE checkpoint consistency:
 
 ```bash
 openclaw audit verify
 ```
 
-Exits with code `0` if the chain is intact, `1` if tampering is detected.
+Exits with code `0` if all proofs and checkpoints are valid, `1` if any verification fails.
 
 ### Export
 
@@ -199,6 +199,30 @@ openclaw audit export          # JSON Lines (default)
 openclaw audit export csv      # CSV format
 openclaw audit export --type tool.invoked --limit 100
 ```
+
+### SMT operations
+
+```bash
+openclaw audit smt root                     # Show current SMT root and entry count
+openclaw audit smt root --tree <key>        # Root for a specific tree
+openclaw audit smt trees                    # List all SMT trees
+openclaw audit smt proof <hash>             # Generate inclusion/exclusion proof for a hash
+openclaw audit smt proof <hash> --tree <key>
+openclaw audit smt verify --proof '<json>'  # Verify a proof against known tree/checkpointed roots
+openclaw audit smt chain <conversationId> --tree <key>  # Show conversation chain
+```
+
+Proof verification checks both internal consistency (siblings hash to the claimed root) and root legitimacy (the proof's root matches a current tree root or a DE-checkpointed root). A self-consistent proof with an unknown root is rejected.
+
+Exit codes for `smt verify`:
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | Proof is valid — internally consistent and root matches a known anchor |
+| 1 | INVALID — root not recognized by this node, or proof is internally inconsistent |
+| 2 | UNVERIFIABLE — no SMT trees or DE checkpoints exist to verify against |
+
+**Live-root window:** proofs are verified against current tree roots and DE-checkpointed roots. When a new event advances the tree from root R1 to R2, proofs generated at R1 will be rejected unless a checkpoint captured R1. On active systems there is always a brief window between tree advancement and the next checkpoint where recently-generated proofs cannot be verified. To avoid this, verify proofs before appending new events, or ensure the checkpoint interval is short enough for your use case.
 
 ## How the Sparse Merkle Tree works
 

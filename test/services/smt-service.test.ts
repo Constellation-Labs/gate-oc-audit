@@ -98,7 +98,7 @@ describe("SmtService", () => {
 
     const rawHash = service.computeRawHash(event);
     const proof = service.createProof(rawHash)!;
-    assert.equal(service.verifyProof(proof), true);
+    assert.equal(service.verifyProofWithRoots(proof, service.getKnownRoots()).status, "valid");
   });
 
   it("dual-hash: inserts both raw and censored leaves", () => {
@@ -278,11 +278,7 @@ describe("SmtService", () => {
 
     // Pre-freeze proofs still verify
     for (const p of preFreezeProofs) {
-      assert.equal(
-        service.verifyProof(p),
-        true,
-        "pre-freeze proof must still verify",
-      );
+      assert.equal(service.verifyProofWithRoots(p, service.getKnownRoots()).status, "valid", "pre-freeze proof must still verify");
     }
   });
 
@@ -303,7 +299,7 @@ describe("SmtService", () => {
     const proofAfter = service.createProof(hash, treeKey)!;
     assert.equal(proofAfter.frozen, true);
     assert.equal(proofAfter.membership, true, "leaf is still in the tree");
-    assert.equal(service.verifyProof(proofAfter), true);
+    assert.equal(service.verifyProofWithRoots(proofAfter, service.getKnownRoots()).status, "valid");
   });
 
   it("pruneEpoch with empty epoch returns zero counts", () => {
@@ -418,6 +414,72 @@ describe("SmtService", () => {
       root2,
       "Two services receiving identical events must produce identical SMT roots",
     );
+  });
+
+  it("getKnownRoots returns current tree roots", () => {
+    service.onEventAppended(makeEvent({ sequence: 1 }));
+    const root = service.getCurrentSmtRoot()!;
+    const knownRoots = service.getKnownRoots();
+    assert.equal(knownRoots.size, 1);
+    assert.ok(knownRoots.has(root));
+  });
+
+  it("getKnownRoots merges checkpointed roots", () => {
+    service.onEventAppended(makeEvent({ sequence: 1 }));
+    const root = service.getCurrentSmtRoot()!;
+    const knownRoots = service.getKnownRoots(["checkpoint-root-1", "checkpoint-root-2"]);
+    assert.equal(knownRoots.size, 3);
+    assert.ok(knownRoots.has(root));
+    assert.ok(knownRoots.has("checkpoint-root-1"));
+    assert.ok(knownRoots.has("checkpoint-root-2"));
+  });
+
+  it("getKnownRoots returns empty set when no trees and no checkpoints", () => {
+    const knownRoots = service.getKnownRoots();
+    assert.equal(knownRoots.size, 0);
+  });
+
+  it("rejects fabricated proof with wrong root even if internally consistent", () => {
+    // Service A: insert events, producing root R_A
+    const eventA = makeEvent({ sequence: 1 });
+    service.onEventAppended(eventA);
+
+    // Service B: insert different events, producing root R_B
+    const serviceB = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        checkpointDir: `/tmp/smt-test-${process.pid}-${Date.now()}-b`,
+      },
+    });
+    const eventB = makeEvent({ sequence: 2, description: "different event" });
+    serviceB.onEventAppended(eventB);
+
+    // Get a valid proof from service B — internally consistent with root R_B
+    const hashB = serviceB.computeRawHash(eventB);
+    const proofB = serviceB.createProof(hashB)!;
+    assert.ok(proofB);
+    assert.equal(proofB.membership, true);
+
+    // Service A rejects it — root R_B is not a known root
+    const result = service.verifyProofWithRoots(proofB, service.getKnownRoots());
+    assert.equal(result.status, "invalid");
+  });
+
+  it("verifyProofWithRoots rejects tampered proof with known root", () => {
+    const event = makeEvent();
+    service.onEventAppended(event);
+
+    const rawHash = service.computeRawHash(event);
+    const proof = service.createProof(rawHash)!;
+    const knownRoots = service.getKnownRoots();
+
+    // Valid proof passes
+    assert.equal(service.verifyProofWithRoots(proof, knownRoots).status, "valid");
+
+    // Tampered proof fails internal check even though root is known
+    const tampered = { ...proof, siblings: [] };
+    assert.equal(service.verifyProofWithRoots(tampered, knownRoots).status, "invalid");
   });
 
   it("replayEvents supports batched fetcher callback", () => {
