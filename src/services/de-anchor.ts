@@ -16,7 +16,12 @@ const DEFAULT_TIMER_MIN_EVENTS = 1;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
 const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
-const DE_MAINNET_API = "https://de-api.constellationnetwork.io/v1";
+const DE_ENV_URLS = {
+    integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net",
+    mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net",
+} as const;
+type DeEnv = keyof typeof DE_ENV_URLS;
+const DEFAULT_DE_ENV: DeEnv = "mainnet";
 const FETCH_TIMEOUT_MS = 15_000;
 
 type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
@@ -32,6 +37,13 @@ export interface AnchorService {
     start(): Promise<void>;
     stop(): void;
     notifyAppend(): void;
+    /**
+     * Anchor the current SMT root to DE if enough events have accumulated.
+     * @param minEvents Floor for anchoring. When omitted, uses `deEventThreshold`
+     *   (the same value used by the event-count trigger in `notifyAppend`).
+     *   Timer ticks pass `deTimerMinEvents` (default 1) to allow anchoring
+     *   smaller batches on a schedule.
+     */
     anchorIfNeeded(minEvents?: number): Promise<void>;
 }
 
@@ -145,7 +157,6 @@ class ActiveAnchorService implements AnchorService {
         this.appendsSinceLastCheckpoint++;
         if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
             console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
-            this.appendsSinceLastCheckpoint = 0;
             this.anchorIfNeeded().catch(() => {});
         }
     }
@@ -183,16 +194,15 @@ class ActiveAnchorService implements AnchorService {
 
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
-            this.appendsSinceLastCheckpoint = 0;
             console.error(
                 `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
             );
         } catch (err) {
-            this.appendsSinceLastCheckpoint = 0;
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
             console.error("[audit-plugin:de-anchor] Anchor failed:", message);
         } finally {
+            this.appendsSinceLastCheckpoint = 0;
             this.anchorInFlight = false;
         }
     }
@@ -280,8 +290,14 @@ class ActiveAnchorService implements AnchorService {
 // ---------------------------------------------------------------------------
 
 function parseBaseConfig(config: Record<string, unknown>) {
+    // `deApiUrl` is an internal override (used by tests to point at localhost).
+    // User-facing config accepts only `deEnv`, which maps to a fixed URL.
+    const envKey = typeof config.deEnv === "string" && config.deEnv in DE_ENV_URLS
+        ? (config.deEnv as DeEnv)
+        : DEFAULT_DE_ENV;
+    const deApiUrl = typeof config.deApiUrl === "string" ? config.deApiUrl : DE_ENV_URLS[envKey];
     return {
-        deApiUrl: typeof config.deApiUrl === "string" ? config.deApiUrl : DE_MAINNET_API,
+        deApiUrl,
         eventThreshold: typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD,
         timerMinEvents: Math.max(1, typeof config.deTimerMinEvents === "number" ? config.deTimerMinEvents : DEFAULT_TIMER_MIN_EVENTS),
         intervalMs: typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS,

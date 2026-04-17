@@ -29,9 +29,10 @@
         "type": "string",
         "description": "Digital Evidence API key for audit trail anchoring"
       },
-      "deApiUrl": {
+      "deEnv": {
         "type": "string",
-        "description": "Digital Evidence API URL (default: https://de-api.constellationnetwork.io/v1)"
+        "enum": ["integration", "mainnet"],
+        "description": "Digital Evidence network environment (default: mainnet)"
       },
       "deOrgId": {
         "type": "string",

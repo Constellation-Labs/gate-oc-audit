@@ -85,8 +85,8 @@ Nested under the `smt` key:
 |---|---|---|
 | `fileWatchPatterns` | `[]` | Glob patterns for files to monitor for changes |
 | `fileWatchIgnorePatterns` | `[]` | Glob patterns to exclude from file watching |
-| `fileWatchIntervalMs` | `5000` | Polling interval for file changes (ms, min 100) |
-| `fileWatchUsePolling` | `true` | Use polling instead of native FS events |
+| `fileWatchIntervalMs` | `1000` | Polling interval for file changes (ms, min 100) |
+| `fileWatchUsePolling` | `false` | Use polling instead of native FS events |
 
 #### Config watching
 
@@ -159,7 +159,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 | `deTenantId` | — | Tenant UUID (required with API key) |
 | `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
 | `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints (see note below) |
-| `deApiUrl` | `https://de-api.constellationnetwork.io/v1` | DE API endpoint |
+| `deEnv` | `mainnet` | DE network environment (`integration` or `mainnet`) |
 | `deEventThreshold` | `100` | Events to accumulate before anchoring (event-count trigger) |
 | `deTimerMinEvents` | `1` | Minimum events required to anchor on a timer tick (clamped to >= 1) |
 | `deIntervalMs` | `300000` | Interval between timer-triggered anchoring attempts (ms) |
