@@ -147,7 +147,7 @@ export default (() => {
                 if (_store && _limiter) {
                     registerHooks(api, _store, _limiter);
                 }
-                console.error("[audit-plugin] Already registered, re-registered hooks on new api instance");
+                console.warn("[audit-plugin] Re-registered hooks on new api instance");
                 return;
             }
             _registered = true;
