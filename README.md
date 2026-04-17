@@ -33,11 +33,66 @@ Add config under `plugins.entries` in your OpenClaw configuration:
 }
 ```
 
+#### Storage
+
 | Option | Default | Description |
 |---|---|---|
 | `dbPath` | `~/.openclaw/audit.db` | Path to the SQLite database file |
 | `localRetentionDays` | `365` | Delete events older than this many days |
 | `localMaxSizeMb` | `500` | Prune oldest events when the DB exceeds this size |
+
+#### Rate limiting
+
+| Option | Default | Description |
+|---|---|---|
+| `rateLimitPerSec` | `100` | Max audit events written per second |
+| `rateLimitBufferSize` | `10000` | Buffer capacity for events that exceed the rate limit |
+
+#### Notifications
+
+| Option | Default | Description |
+|---|---|---|
+| `notificationWebhook` | — | Webhook URL for alerts (config changes, integrity violations, DE divergence) |
+
+#### Sparse Merkle Tree
+
+Nested under the `smt` key:
+
+```json
+{
+  "config": {
+    "smt": {
+      "treeKey": "auto",
+      "maxTreeSize": 500000
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `smt.treeKey` | `auto` | Tree identifier (`auto` derives from machine ID) |
+| `smt.maxTreeSize` | `500000` | Max leaves per tree |
+| `smt.checkpointDir` | `~/.openclaw/smt-checkpoints` | Directory for tree checkpoint files |
+| `smt.checkpointIntervalMs` | `300000` | Interval between tree checkpoints (ms) |
+| `smt.epochDurationMs` | `3600000` | Epoch duration for subtree freezing (ms) |
+| `smt.pruneAfterEpochs` | `0` (disabled) | Freeze subtrees older than this many epochs |
+| `smt.storageCapBytes` | `524288000` (500 MB) | Max estimated in-memory tree storage |
+
+#### File watching
+
+| Option | Default | Description |
+|---|---|---|
+| `fileWatchPatterns` | `[]` | Glob patterns for files to monitor for changes |
+| `fileWatchIgnorePatterns` | `[]` | Glob patterns to exclude from file watching |
+| `fileWatchIntervalMs` | `1000` | Polling interval for file changes (ms, min 100) |
+| `fileWatchUsePolling` | `false` | Use polling instead of native FS events |
+
+#### Config watching
+
+| Option | Default | Description |
+|---|---|---|
+| `openclawDir` | `~/.openclaw` | Path to the OpenClaw config directory to watch for skill/tool/soul/cron changes |
 
 ### Digital Evidence anchoring
 
@@ -104,9 +159,10 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 | `deTenantId` | — | Tenant UUID (required with API key) |
 | `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
 | `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints (see note below) |
-| `deApiUrl` | `https://de-api.constellationnetwork.io/v1` | DE API endpoint |
-| `deEventThreshold` | `100` | Events to accumulate before anchoring |
-| `deIntervalMs` | `300000` | Max time between anchoring attempts (ms) |
+| `deEnv` | `mainnet` | DE network environment (`integration` or `mainnet`) |
+| `deEventThreshold` | `100` | Events to accumulate before anchoring (event-count trigger) |
+| `deTimerMinEvents` | `1` | Minimum events required to anchor on a timer tick (clamped to >= 1) |
+| `deIntervalMs` | `300000` | Interval between timer-triggered anchoring attempts (ms) |
 
 > **Ephemeral signing keys:** When `deSigningKey` is not configured, a new key pair is generated on each startup. This means fingerprints from different sessions are signed with different keys and cannot be verified against a single identity. Pin `deSigningKey` in your config if you need cross-session verifiable provenance.
 

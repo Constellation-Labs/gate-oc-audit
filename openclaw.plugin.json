@@ -29,9 +29,10 @@
         "type": "string",
         "description": "Digital Evidence API key for audit trail anchoring"
       },
-      "deApiUrl": {
+      "deEnv": {
         "type": "string",
-        "description": "Digital Evidence API URL (default: https://de-api.constellationnetwork.io/v1)"
+        "enum": ["integration", "mainnet"],
+        "description": "Digital Evidence network environment (default: mainnet)"
       },
       "deOrgId": {
         "type": "string",
@@ -52,6 +53,10 @@
       "deEventThreshold": {
         "type": "number",
         "description": "Number of events to accumulate before anchoring to DE (default: 100)"
+      },
+      "deTimerMinEvents": {
+        "type": "number",
+        "description": "Minimum events required to anchor on a timer tick (default: 1, clamped to >= 1)"
       },
       "deIntervalMs": {
         "type": "number",

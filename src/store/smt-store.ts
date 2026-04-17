@@ -32,7 +32,7 @@ export interface SmtSnapshot {
 }
 
 function sha256Hash(childNodes: (string | bigint)[]): string {
-  const input = childNodes.map((n) => String(n)).join("");
+  const input = childNodes.map((n) => { const s = String(n); return `${s.length}:${s}`; }).join("|");
   return sdk.hashDocument(input);
 }
 

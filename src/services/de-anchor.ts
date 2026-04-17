@@ -12,10 +12,16 @@ const {DedClient} = require2("@constellation-network/digital-evidence-sdk/networ
 
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMER_MIN_EVENTS = 1;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
 const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
-const DE_MAINNET_API = "https://de-api.constellationnetwork.io/v1";
+const DE_ENV_URLS = {
+    integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net",
+    mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net",
+} as const;
+type DeEnv = keyof typeof DE_ENV_URLS;
+const DEFAULT_DE_ENV: DeEnv = "mainnet";
 const FETCH_TIMEOUT_MS = 15_000;
 
 type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
@@ -31,7 +37,14 @@ export interface AnchorService {
     start(): Promise<void>;
     stop(): void;
     notifyAppend(): void;
-    anchorIfNeeded(): Promise<void>;
+    /**
+     * Anchor the current SMT root to DE if enough events have accumulated.
+     * @param minEvents Floor for anchoring. When omitted, uses `deEventThreshold`
+     *   (the same value used by the event-count trigger in `notifyAppend`).
+     *   Timer ticks pass `deTimerMinEvents` (default 1) to allow anchoring
+     *   smaller batches on a schedule.
+     */
+    anchorIfNeeded(minEvents?: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +68,7 @@ export class NoOpAnchorService implements AnchorService {
 
     notifyAppend(): void { /* no-op */ }
 
-    async anchorIfNeeded(): Promise<void> { /* no-op */ }
+    async anchorIfNeeded(_minEvents?: number): Promise<void> { /* no-op */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +83,7 @@ interface ActiveAnchorConfig {
     deTenantId: string;
     deSigningKey: string;
     eventThreshold: number;
+    timerMinEvents: number;
     intervalMs: number;
     submitFn: SubmitFn;
     verifyFn?: VerifyFn;
@@ -87,6 +101,7 @@ class ActiveAnchorService implements AnchorService {
     private readonly deTenantId: string;
     private readonly deSigningKey: string;
     private readonly eventThreshold: number;
+    private readonly timerMinEvents: number;
     private readonly intervalMs: number;
     private readonly submitFn: SubmitFn;
     private readonly verifyFn: VerifyFn | undefined;
@@ -96,6 +111,7 @@ class ActiveAnchorService implements AnchorService {
     private circuitOpenCount = 0;
     private circuitOpenUntil = 0;
     private appendsSinceLastCheckpoint = 0;
+    private anchorInFlight = false;
 
     constructor(cfg: ActiveAnchorConfig) {
         this.store = cfg.store;
@@ -105,6 +121,7 @@ class ActiveAnchorService implements AnchorService {
         this.deTenantId = cfg.deTenantId;
         this.deSigningKey = cfg.deSigningKey;
         this.eventThreshold = cfg.eventThreshold;
+        this.timerMinEvents = cfg.timerMinEvents;
         this.intervalMs = cfg.intervalMs;
         this.submitFn = cfg.submitFn;
         this.verifyFn = cfg.verifyFn;
@@ -120,11 +137,11 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async start(): Promise<void> {
-        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, interval: ${this.intervalMs}ms`);
+        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
         await this.verifyCheckpoints();
-        await this.anchorIfNeeded();
-        this.timer = setInterval(() => this.anchorIfNeeded(), this.intervalMs);
+        await this.anchorIfNeeded(this.timerMinEvents);
+        this.timer = setInterval(() => this.anchorIfNeeded(this.timerMinEvents), this.intervalMs);
         this.timer.unref();
         console.error("[audit-plugin:de-anchor] Started successfully");
     }
@@ -140,20 +157,21 @@ class ActiveAnchorService implements AnchorService {
         this.appendsSinceLastCheckpoint++;
         if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
             console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
-            this.appendsSinceLastCheckpoint = 0;
             this.anchorIfNeeded().catch(() => {});
         }
     }
 
-    async anchorIfNeeded(): Promise<void> {
+    async anchorIfNeeded(minEvents: number = this.eventThreshold): Promise<void> {
+        if (this.anchorInFlight) return;
         if (this.isCircuitOpen()) return;
 
+        this.anchorInFlight = true;
         try {
             const lastCheckpoint = this.store.getLastCheckpoint();
             const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
 
             const eventCount = this.store.countSince(startSeq);
-            if (eventCount < this.eventThreshold) return;
+            if (eventCount < minEvents) return;
 
             const smtRoot = this.smtService?.getCurrentSmtRoot();
             if (!smtRoot) {
@@ -176,7 +194,6 @@ class ActiveAnchorService implements AnchorService {
 
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
-            this.appendsSinceLastCheckpoint = 0;
             console.error(
                 `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
             );
@@ -184,6 +201,13 @@ class ActiveAnchorService implements AnchorService {
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
             console.error("[audit-plugin:de-anchor] Anchor failed:", message);
+        } finally {
+            // Reset unconditionally: authoritative gating uses store.countSince(startSeq),
+            // so the counter is only a hint for when notifyAppend should dispatch. Resetting
+            // on failure prevents unbounded growth (which would dispatch on every append
+            // while DE is down); the timer with timerMinEvents=1 handles retry cadence.
+            this.appendsSinceLastCheckpoint = 0;
+            this.anchorInFlight = false;
         }
     }
 
@@ -270,9 +294,16 @@ class ActiveAnchorService implements AnchorService {
 // ---------------------------------------------------------------------------
 
 function parseBaseConfig(config: Record<string, unknown>) {
+    // `deApiUrl` is an internal override (used by tests to point at localhost).
+    // User-facing config accepts only `deEnv`, which maps to a fixed URL.
+    const envKey = typeof config.deEnv === "string" && config.deEnv in DE_ENV_URLS
+        ? (config.deEnv as DeEnv)
+        : DEFAULT_DE_ENV;
+    const deApiUrl = typeof config.deApiUrl === "string" ? config.deApiUrl : DE_ENV_URLS[envKey];
     return {
-        deApiUrl: typeof config.deApiUrl === "string" ? config.deApiUrl : DE_MAINNET_API,
+        deApiUrl,
         eventThreshold: typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD,
+        timerMinEvents: Math.max(1, typeof config.deTimerMinEvents === "number" ? config.deTimerMinEvents : DEFAULT_TIMER_MIN_EVENTS),
         intervalMs: typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS,
     };
 }
@@ -313,6 +344,7 @@ export class ApiKeyAnchorService extends ActiveAnchorService {
             deTenantId,
             deSigningKey,
             eventThreshold: base.eventThreshold,
+            timerMinEvents: base.timerMinEvents,
             intervalMs: base.intervalMs,
             submitFn: (s) => client.fingerprints.submit(s),
             verifyFn: (h) => client.fingerprints.getByHash(h),
@@ -369,6 +401,7 @@ export class WalletAnchorService extends ActiveAnchorService {
             deTenantId: client.tenantId,
             deSigningKey: rawKey,
             eventThreshold: base.eventThreshold,
+            timerMinEvents: base.timerMinEvents,
             intervalMs: base.intervalMs,
             submitFn,
             verifyFn: (h) => client.fingerprints.getByHash(h),
