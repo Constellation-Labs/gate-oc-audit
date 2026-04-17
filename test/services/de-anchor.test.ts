@@ -118,6 +118,91 @@ describe("DeAnchorService", () => {
             }
         });
 
+        it("anchors below threshold when minEvents override is provided", async () => {
+            let received = false;
+            const server = createServer((req, res) => {
+                received = true;
+                res.writeHead(200, {"Content-Type": "application/json"});
+                res.end(JSON.stringify([{accepted: true, hash: "timer-tx-hash", eventId: "evt-1", errors: []}]));
+            });
+
+            await new Promise<void>((r) => server.listen(0, r));
+            const port = (server.address() as { port: number }).port;
+
+            try {
+                for (let i = 0; i < 3; i++) insert(store, {metadata: {i}});
+
+                const service = new ApiKeyAnchorService(store, {
+                    deApiKey: "test-key",
+                    deApiUrl: `http://localhost:${port}/v1`,
+                    deOrgId: "11111111-1111-1111-1111-111111111111",
+                    deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    deEventThreshold: 100,
+                });
+
+                const mockSmtService = {getCurrentSmtRoot: () => "a".repeat(64)} as any;
+                service.setSmtService(mockSmtService);
+
+                // Without override — should NOT anchor (3 < 100)
+                await service.anchorIfNeeded();
+                assert.ok(!received, "Should not anchor with default threshold");
+
+                // With minEvents=1 — should anchor (3 >= 1)
+                await service.anchorIfNeeded(1);
+                assert.ok(received, "Should anchor when minEvents=1");
+
+                const checkpoint = store.getLastCheckpoint();
+                assert.ok(checkpoint);
+                assert.equal(checkpoint!.eventCount, 3);
+                assert.equal(checkpoint!.deTxHash, "timer-tx-hash");
+            } finally {
+                await new Promise<void>((r) => server.close(() => r()));
+            }
+        });
+
+        it("does not anchor when below custom timerMinEvents", async () => {
+            let received = false;
+            const server = createServer((req, res) => {
+                received = true;
+                res.writeHead(200, {"Content-Type": "application/json"});
+                res.end(JSON.stringify([{accepted: true, hash: "min3-tx-hash", eventId: "evt-1", errors: []}]));
+            });
+
+            await new Promise<void>((r) => server.listen(0, r));
+            const port = (server.address() as { port: number }).port;
+
+            try {
+                for (let i = 0; i < 2; i++) insert(store, {metadata: {i}});
+
+                const service = new ApiKeyAnchorService(store, {
+                    deApiKey: "test-key",
+                    deApiUrl: `http://localhost:${port}/v1`,
+                    deOrgId: "11111111-1111-1111-1111-111111111111",
+                    deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    deEventThreshold: 100,
+                    deTimerMinEvents: 3,
+                });
+
+                const mockSmtService = {getCurrentSmtRoot: () => "a".repeat(64)} as any;
+                service.setSmtService(mockSmtService);
+
+                // 2 events < timerMinEvents of 3 — should NOT anchor
+                await service.anchorIfNeeded(3);
+                assert.ok(!received, "Should not anchor when below timerMinEvents");
+
+                // Add one more event (total 3) — should anchor
+                insert(store, {metadata: {i: 2}});
+                await service.anchorIfNeeded(3);
+                assert.ok(received, "Should anchor when at timerMinEvents");
+
+                const checkpoint = store.getLastCheckpoint();
+                assert.ok(checkpoint);
+                assert.equal(checkpoint!.eventCount, 3);
+            } finally {
+                await new Promise<void>((r) => server.close(() => r()));
+            }
+        });
+
         it("respects circuit breaker after failures", async () => {
             let callCount = 0;
             const server = createServer((req, res) => {

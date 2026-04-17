@@ -17,11 +17,27 @@ export interface NotificationPayload {
   }>;
 }
 
+function isUnsafeUrl(raw: string): string | undefined {
+  let url: URL;
+  try { url = new URL(raw); } catch { return "malformed URL"; }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return `disallowed protocol ${url.protocol}`;
+  const host = url.hostname;
+  if (/^169\.254\./.test(host)) return "link-local address";
+  return undefined;
+}
+
 export class NotificationService {
   private webhookUrl: string | undefined;
 
   constructor(webhookUrl?: string) {
-    this.webhookUrl = webhookUrl;
+    if (webhookUrl) {
+      const reason = isUnsafeUrl(webhookUrl);
+      if (reason) {
+        console.error(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
+      } else {
+        this.webhookUrl = webhookUrl;
+      }
+    }
   }
 
   async notifyConfigChange(
