@@ -62,22 +62,13 @@
         "type": "number",
         "description": "Maximum time between DE anchoring attempts in milliseconds (default: 300000)"
       },
-      "syncEnabled": {
-        "type": "boolean",
-        "description": "Master switch for syncing events to gateway (default: true)"
-      },
-      "syncExcludeCategories": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Event categories to never sync to gateway (e.g. [\"tool\"])"
-      },
       "redactPromptText": {
         "type": "boolean",
-        "description": "Replace prompt content with hash before syncing to gateway (default: false)"
+        "description": "Replace prompt/message content with sha256 hash before storing (default: false)"
       },
       "redactToolArgs": {
         "type": "boolean",
-        "description": "Replace tool arguments with hash before syncing to gateway (default: false)"
+        "description": "Replace tool-call arguments with sha256 hash before storing (default: false)"
       },
       "fileWatchPatterns": {
         "type": "array",

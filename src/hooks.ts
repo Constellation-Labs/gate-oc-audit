@@ -1,7 +1,14 @@
+import { createRequire } from "module";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 import type { RateLimiter } from "./rate-limiter.js";
+
+const require2 = createRequire(import.meta.url);
+const sdk = require2("@constellation-network/digital-evidence-sdk") as {
+  canonicalize: (obj: unknown) => string;
+  hashDocument: (content: string | Buffer) => string;
+};
 
 const SENSITIVE_KEY =
   /secret|password|token|api.?key|auth|credential|passphrase|jwt|bearer|cookie|private.?key/i;
@@ -30,19 +37,6 @@ export function sanitizeArgs(params: Record<string, unknown>): Record<string, un
   return sanitize(params) as Record<string, unknown>;
 }
 
-function safeAppend(store: AuditStore, limiter: RateLimiter | undefined, insert: AuditEventInsert): void {
-  try {
-    if (limiter) {
-      limiter.append(insert);
-    } else {
-      store.append(insert);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[audit-plugin]", message);
-  }
-}
-
 /** Fallback chain for sender identity — `from` is empty on webchat/TUI connections. */
 function resolveSender(evt: { from?: string; metadata?: Record<string, unknown> }): string {
   return (
@@ -58,13 +52,41 @@ function resolveRecipient(evt: { to?: string }): string {
   return evt.to || "unknown";
 }
 
-export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter?: RateLimiter): void {
+export function registerHooks(
+  api: OpenClawPluginApi,
+  store: AuditStore,
+  limiter?: RateLimiter,
+  config: Record<string, unknown> = {},
+): void {
+  const redactContent = config.redactPromptText === true;
+  const redactToolArgs = config.redactToolArgs === true;
+
+  const safeAppend = (insert: AuditEventInsert): void => {
+    if (
+      redactContent &&
+      typeof insert.content === "string" &&
+      (insert.category === "prompt" || insert.category === "message")
+    ) {
+      insert = { ...insert, content: "sha256:" + sdk.hashDocument(insert.content) };
+    }
+    try {
+      if (limiter) {
+        limiter.append(insert);
+      } else {
+        store.append(insert);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error("[audit-plugin]", message);
+    }
+  };
+
   // --- Model & prompt build ---
 
   api.on(
     "before_model_resolve",
     (evt, ctx) => {
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.model_resolve",
         category: "prompt",
@@ -78,7 +100,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "before_prompt_build",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.build",
         category: "prompt",
@@ -91,7 +113,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "agent_end",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.end",
         category: "agent",
@@ -103,21 +125,26 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
 
   api.on(
     "before_tool_call",
-    (evt, ctx) =>
-      safeAppend(store, limiter, {
+    (evt, ctx) => {
+      const sanitized = sanitizeArgs(evt.params);
+      const args = redactToolArgs
+        ? { hash: "sha256:" + sdk.hashDocument(sdk.canonicalize(sanitized)) }
+        : sanitized;
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "tool.invoked",
         category: "tool",
         description: `Tool invoked: ${evt.toolName}`,
-        metadata: { toolName: evt.toolName, args: sanitizeArgs(evt.params) },
-      }),
+        metadata: { toolName: evt.toolName, args },
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "after_tool_call",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "tool.result",
         category: "tool",
@@ -136,7 +163,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "tool_result_persist",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionKey,
         eventType: "tool.persisted",
         category: "tool",
@@ -154,7 +181,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "llm_input",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.input",
         category: "prompt",
@@ -177,7 +204,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
     "message_received",
     (evt, ctx) => {
       const sender = resolveSender(evt);
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.received",
         category: "message",
@@ -201,7 +228,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
     "message_sent",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sent",
         category: "message",
@@ -226,7 +253,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
     "message_sending",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sending",
         category: "message",
@@ -246,7 +273,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "inbound_claim",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.claimed",
         category: "message",
@@ -265,7 +292,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "before_dispatch",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.dispatched",
         category: "message",
@@ -283,7 +310,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "before_message_write",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionKey,
         eventType: "message.write",
         category: "message",
@@ -298,7 +325,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "llm_output",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.response",
         category: "prompt",
@@ -321,7 +348,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "before_compaction",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_start",
         category: "agent",
@@ -338,7 +365,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "after_compaction",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_end",
         category: "agent",
@@ -355,7 +382,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "before_reset",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.reset",
         category: "agent",
@@ -372,7 +399,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "session_start",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "session.start",
         category: "system",
@@ -388,7 +415,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "session_end",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
@@ -407,7 +434,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "subagent_spawning",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawning",
         category: "agent",
@@ -425,7 +452,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "subagent_spawned",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawned",
         category: "agent",
@@ -444,7 +471,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "subagent_delivery_target",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_delivery",
         category: "agent",
@@ -464,7 +491,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "subagent_ended",
     (evt, ctx) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_ended",
         category: "agent",
@@ -486,7 +513,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "gateway_start",
     (evt) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         eventType: "gateway.start",
         category: "gateway",
         description: `Gateway started on port ${evt.port}`,
@@ -498,7 +525,7 @@ export function registerHooks(api: OpenClawPluginApi, store: AuditStore, limiter
   api.on(
     "gateway_stop",
     (evt) =>
-      safeAppend(store, limiter, {
+      safeAppend({
         eventType: "gateway.stop",
         category: "gateway",
         description: `Gateway stopped: ${evt.reason ?? "shutdown"}`,
