@@ -314,9 +314,12 @@ Running `openclaw security audit --deep` may report a `potential-exfiltration` w
 ```bash
 npm install
 npm run build    # Compile TypeScript to dist/
-npm test         # Run the test suite
+npm test         # Run the full test suite (unit + e2e)
+npm run test:e2e # Run only the e2e suite (test/e2e.test.ts)
 npm run clean    # Remove dist/
 ```
+
+The e2e suite simulates openclaw firing lifecycle events through the plugin's hook pipeline and verifies the resulting audit trail, SMT proofs, CLI handlers, and Digital Evidence publishing (against a local mock DE server). It runs as a separate CI job (`.github/workflows/e2e.yml`) in addition to the main `ci.yml`.
 
 ### Local install
 
