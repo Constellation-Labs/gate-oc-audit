@@ -159,7 +159,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 | `deTenantId` | — | Tenant UUID (required with API key) |
 | `deWalletKeyFile` | — | Path to wallet private key file (alternative to API key) |
 | `deSigningKey` | auto-generated | SECP256K1 private key (64-char hex) for signing fingerprints (see note below) |
-| `deEnv` | `mainnet` | DE network environment (`integration` or `mainnet`) |
+| `deEnv` | `mainnet` | DE network environment (`test`, `integration`, or `mainnet`). `test` requires the `DE_TEST_URL` environment variable pointing at a loopback URL (`http(s)://localhost`, `127.0.0.1`, or `[::1]`); used for local development only. |
 | `deEventThreshold` | `100` | Events to accumulate before anchoring (event-count trigger) |
 | `deTimerMinEvents` | `1` | Minimum events required to anchor on a timer tick (clamped to >= 1) |
 | `deIntervalMs` | `300000` | Interval between timer-triggered anchoring attempts (ms) |

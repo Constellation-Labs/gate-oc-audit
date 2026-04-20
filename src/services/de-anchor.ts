@@ -20,9 +20,53 @@ const DE_ENV_URLS = {
     integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net/v1",
     mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net/v1",
 } as const;
-type DeEnv = keyof typeof DE_ENV_URLS;
+export type DeEnv = "test" | keyof typeof DE_ENV_URLS;
 const DEFAULT_DE_ENV: DeEnv = "mainnet";
+const DE_TEST_URL_ENV_VAR = "DE_TEST_URL";
 const FETCH_TIMEOUT_MS = 15_000;
+
+function isDeEnv(v: string): v is DeEnv {
+    return v === "test" || v === "integration" || v === "mainnet";
+}
+
+/**
+ * Validate a URL intended for use as the DE base URL in `deEnv=test` mode.
+ * Accepts only http(s) against loopback hosts (localhost, 127.0.0.1, ::1).
+ * Throws a descriptive Error on anything else.
+ */
+export function validateTestUrl(url: string): void {
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} is not a valid URL: ${url}`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} must use http:// or https:// (got ${parsed.protocol})`);
+    }
+    const host = parsed.hostname;
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+    if (!loopback) {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} must point at loopback (localhost, 127.0.0.1, or [::1]); got ${host}`);
+    }
+}
+
+/**
+ * Resolve the DE base URL for a given environment.
+ * - `integration` / `mainnet`: static map.
+ * - `test`: reads DE_TEST_URL env var, validates it; throws if missing or invalid.
+ */
+export function resolveBaseUrl(env: DeEnv): string {
+    if (env === "test") {
+        const url = process.env[DE_TEST_URL_ENV_VAR];
+        if (!url || url.length === 0) {
+            throw new Error(`deEnv="test" requires the ${DE_TEST_URL_ENV_VAR} environment variable to be set`);
+        }
+        validateTestUrl(url);
+        return url;
+    }
+    return DE_ENV_URLS[env];
+}
 
 type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
 type VerifyFn = (hash: string) => Promise<unknown>;
@@ -78,6 +122,8 @@ export class NoOpAnchorService implements AnchorService {
 interface ActiveAnchorConfig {
     store: AuditStore;
     notifier?: NotificationService;
+    deEnv: DeEnv;
+    deApiUrl: string;
     deOrgId: string;
     deTenantId: string;
     deSigningKey: string;
@@ -95,6 +141,8 @@ class ActiveAnchorService implements AnchorService {
     private smtService: SmtService | undefined;
     private timer: ReturnType<typeof setInterval> | undefined;
 
+    private readonly deEnv: DeEnv;
+    private readonly deApiUrl: string;
     private readonly deOrgId: string;
     private readonly deTenantId: string;
     private readonly deSigningKey: string;
@@ -114,6 +162,8 @@ class ActiveAnchorService implements AnchorService {
     constructor(cfg: ActiveAnchorConfig) {
         this.store = cfg.store;
         this.notifier = cfg.notifier;
+        this.deEnv = cfg.deEnv;
+        this.deApiUrl = cfg.deApiUrl;
         this.deOrgId = cfg.deOrgId;
         this.deTenantId = cfg.deTenantId;
         this.deSigningKey = cfg.deSigningKey;
@@ -134,6 +184,7 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async start(): Promise<void> {
+        console.error(`[audit-plugin:de-anchor] plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
         console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
         await this.verifyCheckpoints();
@@ -309,11 +360,12 @@ class ActiveAnchorService implements AnchorService {
 // ---------------------------------------------------------------------------
 
 function parseBaseConfig(config: Record<string, unknown>) {
-    const envKey = typeof config.deEnv === "string" && config.deEnv in DE_ENV_URLS
-        ? (config.deEnv as DeEnv)
+    const envKey: DeEnv = typeof config.deEnv === "string" && isDeEnv(config.deEnv)
+        ? config.deEnv
         : DEFAULT_DE_ENV;
     return {
-        deApiUrl: DE_ENV_URLS[envKey],
+        deEnv: envKey,
+        deApiUrl: resolveBaseUrl(envKey),
         eventThreshold: typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD,
         timerMinEvents: Math.max(1, typeof config.deTimerMinEvents === "number" ? config.deTimerMinEvents : DEFAULT_TIMER_MIN_EVENTS),
         intervalMs: typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS,
@@ -351,6 +403,8 @@ export class ApiKeyAnchorService extends ActiveAnchorService {
         super({
             store,
             notifier,
+            deEnv: base.deEnv,
+            deApiUrl: base.deApiUrl,
             deOrgId,
             deTenantId,
             deSigningKey,
@@ -359,7 +413,7 @@ export class ApiKeyAnchorService extends ActiveAnchorService {
             intervalMs: base.intervalMs,
             submitFn: (s) => client.fingerprints.submit(s),
             verifyFn: (h) => client.fingerprints.getByHash(h),
-            authLabel: `API key (${base.deApiUrl})`,
+            authLabel: "API key",
         });
     }
 }
@@ -411,6 +465,8 @@ export class WalletAnchorService extends ActiveAnchorService {
         super({
             store,
             notifier,
+            deEnv: base.deEnv,
+            deApiUrl: base.deApiUrl,
             deOrgId: client.orgId,
             deTenantId: client.tenantId,
             deSigningKey: rawKey,
@@ -419,7 +475,7 @@ export class WalletAnchorService extends ActiveAnchorService {
             intervalMs: base.intervalMs,
             submitFn,
             verifyFn: (h) => client.fingerprints.getByHash(h),
-            authLabel: `x402 wallet (${base.deApiUrl})`,
+            authLabel: "x402 wallet",
         });
 
         console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);

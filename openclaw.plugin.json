@@ -31,8 +31,8 @@
       },
       "deEnv": {
         "type": "string",
-        "enum": ["integration", "mainnet"],
-        "description": "Digital Evidence network environment (default: mainnet)"
+        "enum": ["test", "integration", "mainnet"],
+        "description": "Digital Evidence network environment (default: mainnet). 'test' requires the DE_TEST_URL environment variable pointing at a loopback URL; used for local development only."
       },
       "deOrgId": {
         "type": "string",
