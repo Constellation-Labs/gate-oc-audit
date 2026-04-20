@@ -17,12 +17,56 @@ const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
 const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
 const DE_ENV_URLS = {
-    integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net",
-    mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net",
+    integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net/v1",
+    mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net/v1",
 } as const;
-type DeEnv = keyof typeof DE_ENV_URLS;
+export type DeEnv = "test" | keyof typeof DE_ENV_URLS;
 const DEFAULT_DE_ENV: DeEnv = "mainnet";
+const DE_TEST_URL_ENV_VAR = "DE_TEST_URL";
 const FETCH_TIMEOUT_MS = 15_000;
+
+function isDeEnv(v: string): v is DeEnv {
+    return v === "test" || v === "integration" || v === "mainnet";
+}
+
+/**
+ * Validate a URL intended for use as the DE base URL in `deEnv=test` mode.
+ * Accepts only http(s) against loopback hosts (localhost, 127.0.0.1, ::1).
+ * Throws a descriptive Error on anything else.
+ */
+export function validateTestUrl(url: string): void {
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} is not a valid URL: ${url}`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} must use http:// or https:// (got ${parsed.protocol})`);
+    }
+    const host = parsed.hostname;
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+    if (!loopback) {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} must point at loopback (localhost, 127.0.0.1, or [::1]); got ${host}`);
+    }
+}
+
+/**
+ * Resolve the DE base URL for a given environment.
+ * - `integration` / `mainnet`: static map.
+ * - `test`: reads DE_TEST_URL env var, validates it; throws if missing or invalid.
+ */
+export function resolveBaseUrl(env: DeEnv): string {
+    if (env === "test") {
+        const url = process.env[DE_TEST_URL_ENV_VAR];
+        if (!url || url.length === 0) {
+            throw new Error(`deEnv="test" requires the ${DE_TEST_URL_ENV_VAR} environment variable to be set`);
+        }
+        validateTestUrl(url);
+        return url;
+    }
+    return DE_ENV_URLS[env];
+}
 
 type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
 type VerifyFn = (hash: string) => Promise<unknown>;
@@ -78,6 +122,7 @@ export class NoOpAnchorService implements AnchorService {
 interface ActiveAnchorConfig {
     store: AuditStore;
     notifier?: NotificationService;
+    deEnv: DeEnv;
     deApiUrl: string;
     deOrgId: string;
     deTenantId: string;
@@ -96,6 +141,7 @@ class ActiveAnchorService implements AnchorService {
     private smtService: SmtService | undefined;
     private timer: ReturnType<typeof setInterval> | undefined;
 
+    private readonly deEnv: DeEnv;
     private readonly deApiUrl: string;
     private readonly deOrgId: string;
     private readonly deTenantId: string;
@@ -116,6 +162,7 @@ class ActiveAnchorService implements AnchorService {
     constructor(cfg: ActiveAnchorConfig) {
         this.store = cfg.store;
         this.notifier = cfg.notifier;
+        this.deEnv = cfg.deEnv;
         this.deApiUrl = cfg.deApiUrl;
         this.deOrgId = cfg.deOrgId;
         this.deTenantId = cfg.deTenantId;
@@ -137,11 +184,14 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async start(): Promise<void> {
-        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, url: ${this.deApiUrl}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
+        console.error(`[audit-plugin:de-anchor] plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
+        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
         await this.verifyCheckpoints();
         await this.anchorIfNeeded(this.timerMinEvents);
-        this.timer = setInterval(() => this.anchorIfNeeded(this.timerMinEvents), this.intervalMs);
+        this.timer = setInterval(() => {
+            this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
+        }, this.intervalMs);
         this.timer.unref();
         console.error("[audit-plugin:de-anchor] Started successfully");
     }
@@ -163,7 +213,11 @@ class ActiveAnchorService implements AnchorService {
 
     async anchorIfNeeded(minEvents: number = this.eventThreshold): Promise<void> {
         if (this.anchorInFlight) return;
-        if (this.isCircuitOpen()) return;
+        if (this.isCircuitOpen()) {
+            const waitMs = this.circuitOpenUntil - Date.now();
+            console.error(`[audit-plugin:de-anchor] WARN anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
+            return;
+        }
 
         this.anchorInFlight = true;
         try {
@@ -194,9 +248,15 @@ class ActiveAnchorService implements AnchorService {
 
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
-            console.error(
-                `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash ?? "submitted"}`,
-            );
+            if (txHash) {
+                console.error(
+                    `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
+                );
+            } else {
+                console.error(
+                    `[audit-plugin:de-anchor] WARN DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
+                );
+            }
         } catch (err) {
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
@@ -229,10 +289,14 @@ class ActiveAnchorService implements AnchorService {
                                 console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
                                 notifier
                                     ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
-                                    .catch(() => {});
+                                    .catch((notifyErr) => {
+                                        const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
+                                        console.error(`[audit-plugin:de-anchor] WARN divergence notification failed for checkpoint ${cp.id}: ${msg}`);
+                                    });
                             }
-                        } catch {
-                            // Don't fail startup on DE API errors
+                        } catch (err) {
+                            const msg = err instanceof Error ? err.message : "Unknown error";
+                            console.error(`[audit-plugin:de-anchor] WARN verify API call failed for checkpoint ${cp.id}: ${msg}`);
                         }
                     }),
             );
@@ -260,7 +324,9 @@ class ActiveAnchorService implements AnchorService {
         const results = await this.submitFn([submission]);
         const result = results[0];
         if (!result?.accepted) {
-            throw new Error(`DE rejected fingerprint: ${result?.errors?.join(", ") ?? "unknown reason"}`);
+            const reason = result?.errors?.join(", ") ?? "unknown reason";
+            console.error(`[audit-plugin:de-anchor] WARN DE rejected fingerprint — root: ${smtRoot.slice(0, 16)}…, reason: ${reason}, response: ${JSON.stringify(result)}`);
+            throw new Error(`DE rejected fingerprint: ${reason}`);
         }
         return result.hash ?? result.eventId ?? null;
     }
@@ -294,14 +360,12 @@ class ActiveAnchorService implements AnchorService {
 // ---------------------------------------------------------------------------
 
 function parseBaseConfig(config: Record<string, unknown>) {
-    // `deApiUrl` is an internal override (used by tests to point at localhost).
-    // User-facing config accepts only `deEnv`, which maps to a fixed URL.
-    const envKey = typeof config.deEnv === "string" && config.deEnv in DE_ENV_URLS
-        ? (config.deEnv as DeEnv)
+    const envKey: DeEnv = typeof config.deEnv === "string" && isDeEnv(config.deEnv)
+        ? config.deEnv
         : DEFAULT_DE_ENV;
-    const deApiUrl = typeof config.deApiUrl === "string" ? config.deApiUrl : DE_ENV_URLS[envKey];
     return {
-        deApiUrl,
+        deEnv: envKey,
+        deApiUrl: resolveBaseUrl(envKey),
         eventThreshold: typeof config.deEventThreshold === "number" ? config.deEventThreshold : DEFAULT_EVENT_THRESHOLD,
         timerMinEvents: Math.max(1, typeof config.deTimerMinEvents === "number" ? config.deTimerMinEvents : DEFAULT_TIMER_MIN_EVENTS),
         intervalMs: typeof config.deIntervalMs === "number" ? config.deIntervalMs : DEFAULT_INTERVAL_MS,
@@ -339,6 +403,7 @@ export class ApiKeyAnchorService extends ActiveAnchorService {
         super({
             store,
             notifier,
+            deEnv: base.deEnv,
             deApiUrl: base.deApiUrl,
             deOrgId,
             deTenantId,
@@ -374,7 +439,7 @@ export class WalletAnchorService extends ActiveAnchorService {
         const {DedX402Client, createEthersSigner} = require2(
             "@constellation-network/digital-evidence-sdk-x402",
         ) as typeof import("@constellation-network/digital-evidence-sdk-x402");
-        const {ethers} = require2("ethers") as typeof import("ethers");
+        const {ethers} = require2("ethers") as { ethers: { Wallet: new (privateKey: string) => unknown } };
 
         const wallet = new ethers.Wallet(`0x${rawKey}`);
         const baseUrl = base.deApiUrl.replace(/\/v1\/?$/, "");
@@ -390,12 +455,17 @@ export class WalletAnchorService extends ActiveAnchorService {
             if (res.kind === "payment_required") {
                 throw new Error("x402 payment required but could not be fulfilled");
             }
-            return res.kind === "result" ? res.data : res;
+            if (res.kind !== "result") {
+                console.error(`[audit-plugin:de-anchor] WARN x402 submit returned unexpected kind="${res.kind}"`);
+                throw new Error(`x402 submit returned unexpected kind="${res.kind}"`);
+            }
+            return res.data;
         };
 
         super({
             store,
             notifier,
+            deEnv: base.deEnv,
             deApiUrl: base.deApiUrl,
             deOrgId: client.orgId,
             deTenantId: client.tenantId,
@@ -440,12 +510,15 @@ export function createDeAnchorService(
 
     if (deWalletKeyFile) {
         if (!existsSync(deWalletKeyFile)) {
-            return new NoOpAnchorService(`Wallet key file not found: ${deWalletKeyFile}`);
+            return new NoOpAnchorService("wallet key file not found");
         }
         try {
             return new WalletAnchorService(store, deWalletKeyFile, config, notifier);
         } catch (err) {
-            const msg = err instanceof Error ? err.message : "Unknown error";
+            // Scrub filesystem error details (codes like ENOENT/EACCES include the path);
+            // surface logical errors (e.g. invalid hex key) which don't carry fs codes.
+            const code = err && typeof err === "object" && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
+            const msg = code ? "wallet key file unreadable" : (err instanceof Error ? err.message : "Unknown error");
             return new NoOpAnchorService(`Failed to initialize wallet: ${msg}`);
         }
     }

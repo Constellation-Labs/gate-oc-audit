@@ -43,6 +43,7 @@ describe("DeAnchorService", () => {
     afterEach(() => {
         store.close();
         rmSync(dirname(dbPath), {recursive: true, force: true});
+        delete process.env.DE_TEST_URL;
     });
 
     describe("anchorIfNeeded", () => {
@@ -60,9 +61,10 @@ describe("DeAnchorService", () => {
             try {
                 for (let i = 0; i < 5; i++) insert(store);
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new ApiKeyAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deEventThreshold: 100,
@@ -93,9 +95,10 @@ describe("DeAnchorService", () => {
             try {
                 for (let i = 0; i < 10; i++) insert(store, {metadata: {i}});
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new ApiKeyAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deEventThreshold: 5,
@@ -132,9 +135,10 @@ describe("DeAnchorService", () => {
             try {
                 for (let i = 0; i < 3; i++) insert(store, {metadata: {i}});
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new ApiKeyAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deEventThreshold: 100,
@@ -174,9 +178,10 @@ describe("DeAnchorService", () => {
             try {
                 for (let i = 0; i < 2; i++) insert(store, {metadata: {i}});
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new ApiKeyAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deEventThreshold: 100,
@@ -217,9 +222,10 @@ describe("DeAnchorService", () => {
             try {
                 for (let i = 0; i < 10; i++) insert(store, {metadata: {i}});
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new ApiKeyAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deEventThreshold: 5,
@@ -316,9 +322,10 @@ describe("DeAnchorService", () => {
             console.error = (...args: unknown[]) => errors.push(args.join(" "));
 
             try {
+                process.env.DE_TEST_URL = "http://localhost:9999/v1";
                 const service = createDeAnchorService(store, {
                     deApiKey: "test-key",
-                    deApiUrl: "http://localhost:9999/v1",
+                    deEnv: "test",
                     deOrgId: "11111111-1111-1111-1111-111111111111",
                     deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     deWalletKeyFile: keyFile,
@@ -381,8 +388,9 @@ describe("DeAnchorService", () => {
 
                 for (let i = 0; i < 10; i++) insert(store, {metadata: {i}});
 
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
                 const service = new WalletAnchorService(store, keyFile, {
-                    deApiUrl: `http://localhost:${port}/v1`,
+                    deEnv: "test",
                     deEventThreshold: 5,
                 });
                 const mockSmtService = {getCurrentSmtRoot: () => "b".repeat(64)} as any;
