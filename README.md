@@ -177,7 +177,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 
 ## What gets recorded
 
-The plugin hooks into all 26 OpenClaw lifecycle events and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
+The plugin hooks into all 26 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
 
 Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) in tool arguments are automatically redacted before storage.
 
@@ -209,7 +209,19 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 |---|---|---|
 | `tool.invoked` | `before_tool_call` | tool name, sanitized arguments |
 | `tool.result` | `after_tool_call` | tool name, duration (ms), error |
+| `tool.denied` | `after_tool_call` | tool name, duration (ms), reason |
 | `tool.persisted` | `tool_result_persist` | tool name, is synthetic |
+
+`tool.denied` is emitted instead of `tool.result` when a `before_tool_call` hook returns `block: true` or a user/approval flow denies the call. Plugins that set a custom `blockReason` will still surface as `tool.result` with the error populated.
+
+### Cron events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `cron.executed` | `before_model_resolve` | agent ID, run ID, prompt length |
+| `cron.failed` | `agent_end` | agent ID, run ID, duration (ms), error |
+
+Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` marks the start of a cron-triggered run; it is not guaranteed to be paired with a `cron.failed` or `agent.end` if the process exits abnormally before the run completes.
 
 ### Message events
 
