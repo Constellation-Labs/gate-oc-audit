@@ -15,6 +15,18 @@ const SENSITIVE_KEY =
 
 const AUDIT_PRIORITY = 200;
 
+// OpenClaw's engine surfaces tool denials/blocks as thrown errors that reach
+// us via after_tool_call's `error` field. We can't distinguish denials from
+// runtime errors structurally, so we match on the engine's authored phrases.
+// Plugins that set a custom blockReason replace these phrases entirely and
+// will surface as tool.result with the error populated, not tool.denied.
+const ENGINE_DENIAL_PREFIX =
+  /^(Denied by user|Approval (timed out|cancelled|unavailable)|Plugin approval|Tool call blocked)/i;
+
+function isToolDenialError(error: string | undefined): boolean {
+  return error !== undefined && ENGINE_DENIAL_PREFIX.test(error);
+}
+
 function sanitize(value: unknown, seen = new WeakSet()): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
@@ -93,6 +105,15 @@ export function registerHooks(
         description: "Model resolution requested",
         metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       });
+      if (ctx.trigger === "cron") {
+        safeAppend({
+          sessionId: ctx.sessionId,
+          eventType: "cron.executed",
+          category: "cron",
+          description: "Cron-triggered agent run started",
+          metadata: { agentId: ctx.agentId, runId: ctx.runId, promptLength: evt.prompt?.length },
+        });
+      }
     },
     { priority: AUDIT_PRIORITY },
   );
@@ -112,14 +133,29 @@ export function registerHooks(
 
   api.on(
     "agent_end",
-    (evt, ctx) =>
+    (evt, ctx) => {
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.end",
         category: "agent",
         description: "Agent run ended",
         metadata: { durationMs: evt.durationMs, success: evt.success },
-      }),
+      });
+      if (ctx.trigger === "cron" && evt.success === false) {
+        safeAppend({
+          sessionId: ctx.sessionId,
+          eventType: "cron.failed",
+          category: "cron",
+          description: `Cron run failed: ${evt.error || "unknown"}`,
+          metadata: {
+            agentId: ctx.agentId,
+            runId: ctx.runId,
+            durationMs: evt.durationMs,
+            error: evt.error,
+          },
+        });
+      }
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -143,7 +179,21 @@ export function registerHooks(
 
   api.on(
     "after_tool_call",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      if (isToolDenialError(evt.error)) {
+        safeAppend({
+          sessionId: ctx.sessionId,
+          eventType: "tool.denied",
+          category: "tool",
+          description: `Tool denied: ${evt.toolName}`,
+          metadata: {
+            toolName: evt.toolName,
+            durationMs: evt.durationMs,
+            reason: evt.error,
+          },
+        });
+        return;
+      }
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "tool.result",
@@ -156,7 +206,8 @@ export function registerHooks(
           outputLength: typeof evt.result === "string" ? evt.result.length : undefined,
         },
         content: typeof evt.result === "string" ? evt.result : undefined,
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 

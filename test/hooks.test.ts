@@ -204,6 +204,31 @@ describe("registerHooks", () => {
       const meta = JSON.parse(resolveEvent.metadata);
       assert.ok(!("promptLength" in meta));
     });
+
+    it("does not emit cron.executed for non-cron triggers", () => {
+      fireHook(api, "before_model_resolve",
+        { prompt: "hi" },
+        { sessionId: "s1", trigger: "user" },
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events.some((e) => e.event_type === "cron.executed"), false);
+    });
+
+    it("emits cron.executed alongside prompt.model_resolve when trigger is cron", () => {
+      fireHook(api, "before_model_resolve",
+        { prompt: "scheduled work" },
+        { sessionId: "s1", agentId: "a1", runId: "r1", trigger: "cron" },
+      );
+      const events = getEvents(dbPath);
+      const cronEvent = events.find((e) => e.event_type === "cron.executed");
+      assert.ok(cronEvent, "expected cron.executed event");
+      assert.equal(cronEvent.category, "cron");
+      assert.equal(cronEvent.session_id, "s1");
+      const meta = JSON.parse(cronEvent.metadata);
+      assert.equal(meta.agentId, "a1");
+      assert.equal(meta.runId, "r1");
+      assert.equal(meta.promptLength, 14);
+    });
   });
 
   describe("agent_end", () => {
@@ -219,6 +244,41 @@ describe("registerHooks", () => {
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.durationMs, 5000);
       assert.equal(meta.success, true);
+    });
+
+    it("does not emit cron.failed when trigger is cron but success is true", () => {
+      fireHook(api, "agent_end",
+        { durationMs: 100, success: true, messages: [] },
+        { sessionId: "s1", trigger: "cron" },
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events.some((e) => e.event_type === "cron.failed"), false);
+    });
+
+    it("does not emit cron.failed when success is false but trigger is not cron", () => {
+      fireHook(api, "agent_end",
+        { durationMs: 100, success: false, error: "boom", messages: [] },
+        { sessionId: "s1", trigger: "user" },
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events.some((e) => e.event_type === "cron.failed"), false);
+    });
+
+    it("emits cron.failed alongside agent.end when cron run fails", () => {
+      fireHook(api, "agent_end",
+        { durationMs: 250, success: false, error: "timeout", messages: [] },
+        { sessionId: "s1", agentId: "a1", runId: "r1", trigger: "cron" },
+      );
+      const events = getEvents(dbPath);
+      const cronEvent = events.find((e) => e.event_type === "cron.failed");
+      assert.ok(cronEvent, "expected cron.failed event");
+      assert.equal(cronEvent.category, "cron");
+      assert.ok(cronEvent.description.includes("timeout"));
+      const meta = JSON.parse(cronEvent.metadata);
+      assert.equal(meta.agentId, "a1");
+      assert.equal(meta.runId, "r1");
+      assert.equal(meta.durationMs, 250);
+      assert.equal(meta.error, "timeout");
     });
   });
 
@@ -249,6 +309,39 @@ describe("registerHooks", () => {
       assert.equal(meta.toolName, "bash");
       assert.equal(meta.durationMs, 120);
     });
+
+    it("records tool.result when tool errors with a non-denial message", () => {
+      fireHook(api, "after_tool_call",
+        { toolName: "bash", durationMs: 5, error: "ENOENT: no such file", params: {} },
+        { sessionId: "s1", toolName: "bash" },
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "tool.result");
+      assert.equal(JSON.parse(events[0].metadata).error, "ENOENT: no such file");
+    });
+
+    for (const reason of [
+      "Denied by user",
+      "Approval timed out",
+      "Approval cancelled (run aborted)",
+      "Plugin approval required (gateway unavailable)",
+      "Tool call blocked by plugin hook",
+    ]) {
+      it(`records tool.denied for engine denial message: "${reason}"`, () => {
+        fireHook(api, "after_tool_call",
+          { toolName: "bash", durationMs: 3, error: reason, params: {} },
+          { sessionId: "s1", toolName: "bash" },
+        );
+        const events = getEvents(dbPath);
+        assert.equal(events.length, 1, "should emit exactly one event");
+        assert.equal(events[0].event_type, "tool.denied");
+        assert.equal(events[0].category, "tool");
+        assert.ok(events[0].description.includes("bash"));
+        const meta = JSON.parse(events[0].metadata);
+        assert.equal(meta.toolName, "bash");
+        assert.equal(meta.reason, reason);
+      });
+    }
   });
 
   describe("tool_result_persist", () => {

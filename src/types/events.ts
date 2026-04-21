@@ -16,7 +16,11 @@ export type EventType =
   | "prompt.build"
   | "tool.invoked"
   | "tool.result"
+  | "tool.denied"
   | "tool.persisted"
+
+  | "cron.executed"
+  | "cron.failed"
 
   | "message.received"
   | "message.sending"
