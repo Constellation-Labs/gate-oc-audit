@@ -16,7 +16,7 @@
     "test:e2e": "node --import tsx --test test/e2e.test.ts"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "@constellation-network/digital-evidence-sdk": "^0.3.2",
