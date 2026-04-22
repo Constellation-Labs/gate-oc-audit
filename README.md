@@ -177,7 +177,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 
 ## What gets recorded
 
-The plugin hooks into all 26 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
+The plugin hooks into 25 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
 
 Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) in tool arguments are automatically redacted before storage.
 
@@ -212,7 +212,7 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 | `tool.denied` | `after_tool_call` | tool name, duration (ms), reason |
 | `tool.persisted` | `tool_result_persist` | tool name, is synthetic |
 
-`tool.denied` is emitted instead of `tool.result` when a `before_tool_call` hook returns `block: true` or a user/approval flow denies the call. Plugins that set a custom `blockReason` will still surface as `tool.result` with the error populated.
+`tool.denied` is emitted instead of `tool.result` when a `before_tool_call` hook returns `block: true` or a user/approval flow denies the call. Denials with free-form reasons (custom `blockReason` set by a plugin, or engine-side loop-detector blocks) do not match the known phrases and will surface as `tool.result` with the error populated.
 
 ### Cron events
 

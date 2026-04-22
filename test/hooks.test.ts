@@ -180,7 +180,7 @@ describe("registerHooks", () => {
     }
   });
 
-  describe("before_model_resolve emits prompt.model_resolve", () => {
+  describe("before_model_resolve", () => {
     it("records prompt.model_resolve with prompt length and trigger", () => {
       fireHook(api, "before_model_resolve",
         { prompt: "hello world" },
@@ -495,21 +495,6 @@ describe("registerHooks", () => {
       assert.equal(meta.inputTokens, 1500);
       assert.equal(meta.outputTokens, 800);
       assert.equal(meta.cacheReadTokens, 200);
-    });
-  });
-
-  describe("before_model_resolve", () => {
-    it("records prompt.model_resolve", () => {
-      fireHook(api, "before_model_resolve",
-        { prompt: "hello" },
-        { sessionId: "s1" },
-      );
-
-      const events = getEvents(dbPath);
-      const resolveEvent = events.find((e: any) => e.event_type === "prompt.model_resolve");
-      assert.ok(resolveEvent, "expected prompt.model_resolve event");
-      assert.equal(resolveEvent.category, "prompt");
-      assert.equal(JSON.parse(resolveEvent.metadata).promptLength, 5);
     });
   });
 
