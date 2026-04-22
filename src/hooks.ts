@@ -18,8 +18,9 @@ const AUDIT_PRIORITY = 200;
 // OpenClaw's engine surfaces tool denials/blocks as thrown errors that reach
 // us via after_tool_call's `error` field. We can't distinguish denials from
 // runtime errors structurally, so we match on the engine's authored phrases.
-// Plugins that set a custom blockReason replace these phrases entirely and
-// will surface as tool.result with the error populated, not tool.denied.
+// Free-form reasons (plugin-supplied blockReason, engine-side loop-detector
+// blocks) replace these phrases and will surface as tool.result with the
+// error populated, not tool.denied.
 const ENGINE_DENIAL_PREFIX =
   /^(Denied by user|Approval (timed out|cancelled|unavailable)|Plugin approval|Tool call blocked)/i;
 
@@ -185,7 +186,7 @@ export function registerHooks(
           sessionId: ctx.sessionId,
           eventType: "tool.denied",
           category: "tool",
-          description: `Tool denied: ${evt.toolName}`,
+          description: `Tool denied: ${evt.toolName} (${evt.error})`,
           metadata: {
             toolName: evt.toolName,
             durationMs: evt.durationMs,
