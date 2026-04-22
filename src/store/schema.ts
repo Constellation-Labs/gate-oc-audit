@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseSync } from "node:sqlite";
 
 const PRAGMAS = [
   "PRAGMA journal_mode = WAL",
@@ -72,12 +72,24 @@ const DDL = [
 
 const CURRENT_SCHEMA_VERSION = 3;
 
-export function initializeSchema(db: Database.Database): void {
+export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec("BEGIN");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
+}
+
+export function initializeSchema(db: DatabaseSync): void {
   for (const pragma of PRAGMAS) {
-    db.pragma(pragma.replace("PRAGMA ", ""));
+    db.exec(pragma);
   }
 
-  const migrate = db.transaction(() => {
+  runInTransaction(db, () => {
     for (const statement of DDL) {
       db.exec(statement);
     }
@@ -95,6 +107,4 @@ export function initializeSchema(db: Database.Database): void {
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());
     }
   });
-
-  migrate();
 }

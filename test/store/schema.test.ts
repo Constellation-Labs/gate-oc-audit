@@ -1,17 +1,17 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { initializeSchema } from "../../src/store/schema.js";
 
 describe("initializeSchema", () => {
-  let db: Database.Database;
+  let db: DatabaseSync;
 
   afterEach(() => {
     db?.close();
   });
 
   it("creates the audit_events table", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const tables = db
@@ -23,7 +23,7 @@ describe("initializeSchema", () => {
   });
 
   it("creates all expected tables", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const tables = db
@@ -37,7 +37,7 @@ describe("initializeSchema", () => {
   });
 
   it("creates expected indexes", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const indexes = db
@@ -60,7 +60,7 @@ describe("initializeSchema", () => {
   });
 
   it("audit_events has received_at column", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const columns = db.prepare("PRAGMA table_info(audit_events)").all() as { name: string }[];
@@ -69,10 +69,10 @@ describe("initializeSchema", () => {
   });
 
   it("sets WAL journal mode", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
-    const result = db.pragma("journal_mode") as { journal_mode: string }[];
+    const result = db.prepare("PRAGMA journal_mode").all() as { journal_mode: string }[];
     // :memory: databases may report "memory" instead of "wal"
     assert.ok(
       result[0].journal_mode === "wal" || result[0].journal_mode === "memory",
@@ -80,7 +80,7 @@ describe("initializeSchema", () => {
   });
 
   it("is idempotent (can be called twice)", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
     initializeSchema(db);
 

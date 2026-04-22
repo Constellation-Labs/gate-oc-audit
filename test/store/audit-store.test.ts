@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../../src/store/audit-store.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
 
@@ -243,8 +243,8 @@ describe("AuditStore", () => {
 
     it("stores content gzipped in DB", () => {
       const event = store.append(sampleInsert({ content: "hello gzip" }))!;
-      const db = new Database(dbPath);
-      const row = db.prepare("SELECT content_gz FROM audit_events WHERE id = ?").get(event.id) as { content_gz: Buffer };
+      const db = new DatabaseSync(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events WHERE id = ?").get(event.id) as { content_gz: Uint8Array };
       assert.ok(row.content_gz);
       assert.equal(gunzipSync(row.content_gz).toString(), "hello gzip");
       db.close();

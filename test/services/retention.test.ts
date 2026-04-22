@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../../src/store/audit-store.js";
 import { RetentionService } from "../../src/services/retention.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
@@ -41,7 +41,7 @@ describe("RetentionService", () => {
     for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
 
     // Backdate all events to 2 years ago
-    const db = new Database(dbPath);
+    const db = new DatabaseSync(dbPath);
     const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare("UPDATE audit_events SET created_at = @old").run({ old });
     db.close();
@@ -68,7 +68,7 @@ describe("RetentionService", () => {
     for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
 
     // Backdate to 10 days ago
-    const db = new Database(dbPath);
+    const db = new DatabaseSync(dbPath);
     const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare("UPDATE audit_events SET created_at = @old").run({ old });
     db.close();

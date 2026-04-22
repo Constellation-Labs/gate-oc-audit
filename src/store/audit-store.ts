@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { constants, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
@@ -6,7 +6,7 @@ import { uuidv7 } from "uuidv7";
 
 import { createRequire } from "module";
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
-import { initializeSchema } from "./schema.js";
+import { initializeSchema, runInTransaction } from "./schema.js";
 import { getMachineId } from "../util/machine-id.js";
 
 const require2 = createRequire(import.meta.url);
@@ -46,10 +46,14 @@ interface EventRow {
   category: string;
   description: string;
   metadata: string;
-  content_gz?: Buffer | null;
+  content_gz?: Uint8Array | null;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
+}
+
+function toBuffer(u: Uint8Array): Buffer {
+  return Buffer.from(u.buffer, u.byteOffset, u.byteLength);
 }
 
 /** Strip gzip header (RFC 1952) and 8-byte trailer, returning the raw deflate stream. */
@@ -89,8 +93,9 @@ function previewGunzip(gz: Buffer, maxChars: number): string | undefined {
 
 function decodeContent(row: EventRow, previewChars?: number): string | undefined {
   if (!row.content_gz) return undefined;
-  if (previewChars !== undefined) return previewGunzip(row.content_gz, previewChars);
-  return gunzipSync(row.content_gz).toString();
+  const gz = toBuffer(row.content_gz);
+  if (previewChars !== undefined) return previewGunzip(gz, previewChars);
+  return gunzipSync(gz).toString();
 }
 
 function rowToEvent(row: EventRow, contentPreview?: number): AuditEvent {
@@ -146,21 +151,21 @@ function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
 }
 
 export class AuditStore {
-  private db: Database.Database;
+  private db: DatabaseSync;
   private sequence: number;
   private machineId: string;
   private degraded = false;
-  private insertStmt: Database.Statement;
+  private insertStmt: StatementSync;
 
   private stmts: {
-    getManifestsByType: Database.Statement;
-    upsertManifest: Database.Statement;
-    deleteManifest: Database.Statement;
-    getCheckpoints: Database.Statement;
-    getLastCheckpoint: Database.Statement;
-    insertCheckpoint: Database.Statement;
-    countSince: Database.Statement;
-    maxSequenceSince: Database.Statement;
+    getManifestsByType: StatementSync;
+    upsertManifest: StatementSync;
+    deleteManifest: StatementSync;
+    getCheckpoints: StatementSync;
+    getLastCheckpoint: StatementSync;
+    insertCheckpoint: StatementSync;
+    countSince: StatementSync;
+    maxSequenceSince: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db") {
@@ -205,10 +210,10 @@ export class AuditStore {
     };
   }
 
-  private openOrRecover(resolvedPath: string): Database.Database {
+  private openOrRecover(resolvedPath: string): DatabaseSync {
     const isNew = !existsSync(resolvedPath);
     try {
-      const db = new Database(resolvedPath);
+      const db = new DatabaseSync(resolvedPath);
       if (isNew) chmodSync(resolvedPath, DB_FILE_MODE);
       initializeSchema(db);
       // Smoke test: verify the DB is readable
@@ -236,7 +241,7 @@ export class AuditStore {
       }
 
       // Create fresh DB
-      const db = new Database(resolvedPath);
+      const db = new DatabaseSync(resolvedPath);
       chmodSync(resolvedPath, DB_FILE_MODE);
       initializeSchema(db);
       return db;
@@ -351,7 +356,7 @@ export class AuditStore {
                 created_at, received_at, synced_at
          FROM audit_events ${where} ORDER BY sequence ${order} LIMIT @limit OFFSET @offset`,
       )
-      .all({ ...params, limit, offset }) as EventRow[];
+      .all({ ...params, limit, offset }) as unknown as EventRow[];
 
     const previewChars = opts.includeContent ? undefined : opts.contentPreview;
     return rows.map((row) => rowToEvent(row, previewChars));
@@ -364,17 +369,17 @@ export class AuditStore {
   prune(maxAgeDays: number, maxSizeMb: number): number {
     let totalDeleted = 0;
 
-    const doPrune = this.db.transaction(() => {
+    runInTransaction(this.db, () => {
       // Age-based pruning — synced events first, then unsynced
       const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
       const syncedResult = this.db
         .prepare("DELETE FROM audit_events WHERE created_at < @cutoff AND synced_at IS NOT NULL")
         .run({ cutoff });
-      totalDeleted += syncedResult.changes;
+      totalDeleted += Number(syncedResult.changes);
       const unsyncedResult = this.db
         .prepare("DELETE FROM audit_events WHERE created_at < @cutoff")
         .run({ cutoff });
-      totalDeleted += unsyncedResult.changes;
+      totalDeleted += Number(unsyncedResult.changes);
 
       // Size-based pruning — prefer synced events, then oldest overall
       if (this.getDbSizeMb() > maxSizeMb) {
@@ -387,7 +392,7 @@ export class AuditStore {
               )`,
             )
             .run({ batchSize: PRUNE_BATCH_SIZE });
-          deleted = result.changes;
+          deleted = Number(result.changes);
           totalDeleted += deleted;
         } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
 
@@ -400,7 +405,7 @@ export class AuditStore {
                 )`,
               )
               .run({ batchSize: PRUNE_BATCH_SIZE });
-            deleted = result.changes;
+            deleted = Number(result.changes);
             totalDeleted += deleted;
           } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
         }
@@ -426,11 +431,9 @@ export class AuditStore {
       }
     });
 
-    doPrune();
-
     // Reclaim disk space outside the transaction
     if (totalDeleted > 0) {
-      this.db.pragma("incremental_vacuum");
+      this.db.exec("PRAGMA incremental_vacuum");
     }
 
     return totalDeleted;
@@ -460,7 +463,7 @@ export class AuditStore {
   // --- Integrity checkpoint operations (used by DeAnchorService) ---
 
   getCheckpoints(): CheckpointRecord[] {
-    return (this.stmts.getCheckpoints.all() as CheckpointRow[]).map(rowToCheckpoint);
+    return (this.stmts.getCheckpoints.all() as unknown as CheckpointRow[]).map(rowToCheckpoint);
   }
 
   getCheckpointedRoots(): string[] {
