@@ -52,12 +52,9 @@ interface EventRow {
   synced_at: string | null;
 }
 
-function toBuffer(u: Uint8Array): Buffer {
-  return Buffer.from(u.buffer, u.byteOffset, u.byteLength);
-}
-
 /** Strip gzip header (RFC 1952) and 8-byte trailer, returning the raw deflate stream. */
-function stripGzipWrapper(gz: Buffer): Buffer {
+function stripGzipWrapper(u: Uint8Array): Buffer {
+  const gz = Buffer.from(u.buffer, u.byteOffset, u.byteLength);
   if (gz.length < 18) throw new Error("gzip buffer too short (< 18 bytes)");
   let offset = 10; // fixed header
   const flags = gz[3];
@@ -71,7 +68,7 @@ function stripGzipWrapper(gz: Buffer): Buffer {
 }
 
 /** Partially inflate gzipped content, returning at most maxChars characters. */
-function previewGunzip(gz: Buffer, maxChars: number): string | undefined {
+function previewGunzip(gz: Uint8Array, maxChars: number): string | undefined {
   try {
     const raw = stripGzipWrapper(gz);
     const prefix = raw.subarray(0, (maxChars + 1) * 4); //worst case: incompressible text of 4 bytes unicode chars
@@ -93,9 +90,8 @@ function previewGunzip(gz: Buffer, maxChars: number): string | undefined {
 
 function decodeContent(row: EventRow, previewChars?: number): string | undefined {
   if (!row.content_gz) return undefined;
-  const gz = toBuffer(row.content_gz);
-  if (previewChars !== undefined) return previewGunzip(gz, previewChars);
-  return gunzipSync(gz).toString();
+  if (previewChars !== undefined) return previewGunzip(row.content_gz, previewChars);
+  return gunzipSync(row.content_gz).toString();
 }
 
 function rowToEvent(row: EventRow, contentPreview?: number): AuditEvent {

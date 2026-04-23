@@ -8,7 +8,7 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 openclaw plugins install @constellation-network/openclaw-audit-plugin
 ```
 
-Requires `openclaw >= 2026.1.0` as a peer dependency and Node.js ≥ 22.5 (≥ 24 recommended). The plugin uses the built-in `node:sqlite` module; on Node 22.x it must be launched with `--experimental-sqlite`.
+Requires `openclaw >= 2026.1.0` as a peer dependency and Node.js ≥ 22.13 (uses the built-in `node:sqlite` module).
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 

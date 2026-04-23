@@ -79,7 +79,11 @@ export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
     db.exec("COMMIT");
     return result;
   } catch (err) {
-    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackErr) {
+      console.error("[audit-plugin] ROLLBACK failed:", rollbackErr);
+    }
     throw err;
   }
 }
@@ -87,6 +91,11 @@ export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
 export function initializeSchema(db: DatabaseSync): void {
   for (const pragma of PRAGMAS) {
     db.exec(pragma);
+  }
+
+  const mode = (db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
+  if (mode !== "wal" && mode !== "memory") {
+    console.warn(`[audit-plugin] journal_mode fell back to '${mode}' (expected 'wal'); durability/concurrency guarantees are reduced`);
   }
 
   runInTransaction(db, () => {

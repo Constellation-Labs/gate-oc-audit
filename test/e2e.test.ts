@@ -212,10 +212,16 @@ describe("e2e: openclaw session simulation", () => {
   });
 
   it("stores message content gzipped and decompresses on demand", () => {
-    const raw = new DatabaseSync(rig.dbPath)
-      .prepare(`SELECT content_gz FROM audit_events
-                WHERE event_type = 'message.received' ORDER BY sequence DESC LIMIT 1`)
-      .get() as { content_gz: Uint8Array | null };
+    const probe = new DatabaseSync(rig.dbPath);
+    let raw: { content_gz: Uint8Array | null };
+    try {
+      raw = probe
+        .prepare(`SELECT content_gz FROM audit_events
+                  WHERE event_type = 'message.received' ORDER BY sequence DESC LIMIT 1`)
+        .get() as { content_gz: Uint8Array | null };
+    } finally {
+      probe.close();
+    }
     assert.ok(raw.content_gz, "message.received should persist gzipped content");
     assert.equal(gunzipSync(raw.content_gz).toString(), "Summarize src/hooks.ts");
 

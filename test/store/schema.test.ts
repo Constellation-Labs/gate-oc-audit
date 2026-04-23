@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { initializeSchema } from "../../src/store/schema.js";
+import { initializeSchema, runInTransaction } from "../../src/store/schema.js";
 
 describe("initializeSchema", () => {
   let db: DatabaseSync;
@@ -90,4 +90,57 @@ describe("initializeSchema", () => {
 
     assert.ok(tables.length > 0);
   });
+});
+
+describe("runInTransaction", () => {
+  let db: DatabaseSync;
+
+  afterEach(() => {
+    db?.close();
+  });
+
+  function setupTable() {
+    db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE t (v INTEGER NOT NULL)");
+  }
+
+  function count(): number {
+    return (db.prepare("SELECT COUNT(*) AS n FROM t").get() as { n: number }).n;
+  }
+
+  it("commits on success and propagates return value", () => {
+    setupTable();
+    const result = runInTransaction(db, () => {
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(1);
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(2);
+      return "ok";
+    });
+    assert.equal(result, "ok");
+    assert.equal(count(), 2);
+  });
+
+  it("rolls back on thrown error and re-throws", () => {
+    setupTable();
+    assert.throws(() => {
+      runInTransaction(db, () => {
+        db.prepare("INSERT INTO t (v) VALUES (?)").run(1);
+        throw new Error("boom");
+      });
+    }, /boom/);
+    assert.equal(count(), 0);
+  });
+
+  it("releases the lock after rollback (next call succeeds)", () => {
+    setupTable();
+    assert.throws(() => {
+      runInTransaction(db, () => {
+        throw new Error("first");
+      });
+    }, /first/);
+    runInTransaction(db, () => {
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(9);
+    });
+    assert.equal(count(), 1);
+  });
+
 });
