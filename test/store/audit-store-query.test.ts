@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../../src/store/audit-store.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
 
@@ -213,7 +213,7 @@ describe("AuditStore.prune", () => {
     for (let i = 0; i < 5; i++) insert(store, { metadata: { i } });
 
     // Backdate the first 3 events to 2 years ago
-    const db = new Database(dbPath);
+    const db = new DatabaseSync(dbPath);
     const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare("UPDATE audit_events SET created_at = @old WHERE sequence <= 3").run({ old });
     db.close();
@@ -244,7 +244,7 @@ describe("AuditStore.prune", () => {
     store.insertCheckpoint("cp-2", 4, 5, "root-def", 2, null);
 
     // Backdate events 1-3 so they get pruned
-    const db = new Database(dbPath);
+    const db = new DatabaseSync(dbPath);
     const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare("UPDATE audit_events SET created_at = @old WHERE sequence <= 3").run({ old });
     db.close();
@@ -257,7 +257,7 @@ describe("AuditStore.prune", () => {
     assert.equal(remaining[0].id, "cp-2");
 
     // cp-1 should be in the archive table
-    const db2 = new Database(dbPath);
+    const db2 = new DatabaseSync(dbPath);
     const archived = db2.prepare("SELECT id FROM checkpoint_archive").all() as { id: string }[];
     assert.equal(archived.length, 1);
     assert.equal(archived[0].id, "cp-1");
@@ -280,7 +280,7 @@ describe("AuditStore.prune", () => {
     for (let i = 0; i < 4; i++) insert(store, { metadata: { i } });
 
     // Backdate all events and mark some as synced
-    const db = new Database(dbPath);
+    const db = new DatabaseSync(dbPath);
     const old = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare("UPDATE audit_events SET created_at = @old").run({ old });
     db.prepare("UPDATE audit_events SET synced_at = @old WHERE sequence <= 2").run({ old });

@@ -1,17 +1,17 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import Database from "better-sqlite3";
-import { initializeSchema } from "../../src/store/schema.js";
+import { DatabaseSync } from "node:sqlite";
+import { initializeSchema, runInTransaction } from "../../src/store/schema.js";
 
 describe("initializeSchema", () => {
-  let db: Database.Database;
+  let db: DatabaseSync;
 
   afterEach(() => {
     db?.close();
   });
 
   it("creates the audit_events table", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const tables = db
@@ -23,7 +23,7 @@ describe("initializeSchema", () => {
   });
 
   it("creates all expected tables", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const tables = db
@@ -37,7 +37,7 @@ describe("initializeSchema", () => {
   });
 
   it("creates expected indexes", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const indexes = db
@@ -60,7 +60,7 @@ describe("initializeSchema", () => {
   });
 
   it("audit_events has received_at column", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
     const columns = db.prepare("PRAGMA table_info(audit_events)").all() as { name: string }[];
@@ -69,10 +69,10 @@ describe("initializeSchema", () => {
   });
 
   it("sets WAL journal mode", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
-    const result = db.pragma("journal_mode") as { journal_mode: string }[];
+    const result = db.prepare("PRAGMA journal_mode").all() as { journal_mode: string }[];
     // :memory: databases may report "memory" instead of "wal"
     assert.ok(
       result[0].journal_mode === "wal" || result[0].journal_mode === "memory",
@@ -80,7 +80,7 @@ describe("initializeSchema", () => {
   });
 
   it("is idempotent (can be called twice)", () => {
-    db = new Database(":memory:");
+    db = new DatabaseSync(":memory:");
     initializeSchema(db);
     initializeSchema(db);
 
@@ -90,4 +90,57 @@ describe("initializeSchema", () => {
 
     assert.ok(tables.length > 0);
   });
+});
+
+describe("runInTransaction", () => {
+  let db: DatabaseSync;
+
+  afterEach(() => {
+    db?.close();
+  });
+
+  function setupTable() {
+    db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE t (v INTEGER NOT NULL)");
+  }
+
+  function count(): number {
+    return (db.prepare("SELECT COUNT(*) AS n FROM t").get() as { n: number }).n;
+  }
+
+  it("commits on success and propagates return value", () => {
+    setupTable();
+    const result = runInTransaction(db, () => {
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(1);
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(2);
+      return "ok";
+    });
+    assert.equal(result, "ok");
+    assert.equal(count(), 2);
+  });
+
+  it("rolls back on thrown error and re-throws", () => {
+    setupTable();
+    assert.throws(() => {
+      runInTransaction(db, () => {
+        db.prepare("INSERT INTO t (v) VALUES (?)").run(1);
+        throw new Error("boom");
+      });
+    }, /boom/);
+    assert.equal(count(), 0);
+  });
+
+  it("releases the lock after rollback (next call succeeds)", () => {
+    setupTable();
+    assert.throws(() => {
+      runInTransaction(db, () => {
+        throw new Error("first");
+      });
+    }, /first/);
+    runInTransaction(db, () => {
+      db.prepare("INSERT INTO t (v) VALUES (?)").run(9);
+    });
+    assert.equal(count(), 1);
+  });
+
 });

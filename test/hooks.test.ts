@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../src/store/audit-store.js";
 import { sanitizeArgs, registerHooks } from "../src/hooks.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
@@ -21,7 +21,7 @@ function makeTempDb(): string {
 }
 
 function getEvents(dbPath: string) {
-  const db = new Database(dbPath);
+  const db = new DatabaseSync(dbPath);
   const rows = db.prepare("SELECT * FROM audit_events ORDER BY sequence").all() as Array<{
     event_type: string;
     category: string;
@@ -431,8 +431,8 @@ describe("registerHooks", () => {
         { channelId: "telegram" },
       );
 
-      const db = new Database(dbPath);
-      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Buffer | null };
+      const db = new DatabaseSync(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Uint8Array | null };
       db.close();
 
       assert.ok(row.content_gz);
@@ -466,8 +466,8 @@ describe("registerHooks", () => {
         { channelId: "telegram" },
       );
 
-      const db = new Database(dbPath);
-      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Buffer | null };
+      const db = new DatabaseSync(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Uint8Array | null };
       db.close();
 
       assert.ok(row.content_gz);
@@ -541,8 +541,8 @@ describe("registerHooks", () => {
         { sessionId: "s1" },
       );
 
-      const db = new Database(dbPath);
-      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Buffer | null };
+      const db = new DatabaseSync(dbPath);
+      const row = db.prepare("SELECT content_gz FROM audit_events ORDER BY sequence LIMIT 1").get() as { content_gz: Uint8Array | null };
       db.close();
 
       assert.ok(row.content_gz);
@@ -827,9 +827,9 @@ function sha256Hex(s: string): string {
 }
 
 function readContent(dbPath: string, sequence = 1): string | null {
-  const db = new Database(dbPath);
+  const db = new DatabaseSync(dbPath);
   const row = db.prepare("SELECT content_gz FROM audit_events WHERE sequence = ?").get(sequence) as
-    | { content_gz: Buffer | null }
+    | { content_gz: Uint8Array | null }
     | undefined;
   db.close();
   if (!row?.content_gz) return null;
