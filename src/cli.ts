@@ -118,13 +118,19 @@ export async function cliVerifyHandler(
       const recentEvents = store.query({ limit: 10, includeContent: true });
       let verified = 0;
       let failed = 0;
+      let errored = 0;
 
       for (const event of recentEvents) {
         const rawHash = smtService.computeRawHash(event);
         const proof = smtService.createProof(rawHash, tree.key);
-        if (proof && proof.membership && smtService.verifyProofWithRoots(proof, knownRoots).status === "valid") {
+        if (proof === null) {
+          errored++;
+          allValid = false;
+          continue;
+        }
+        if (proof.membership && smtService.verifyProofWithRoots(proof, knownRoots).status === "valid") {
           verified++;
-        } else if (proof && !proof.membership) {
+        } else if (!proof.membership) {
           // Event not in this tree — may be in a different tree
         } else {
           failed++;
@@ -134,6 +140,15 @@ export async function cliVerifyHandler(
 
       if (verified > 0) {
         console.log(`  Sampled ${verified} event proof(s) — all valid.`);
+      }
+      if (errored > 0) {
+        const dbPath = `${smtService.getCheckpointDir()}/${tree.key}`;
+        console.error(
+          `  WARNING: ${errored} proof(s) could not be generated — tree "${tree.key}" state is inconsistent. ` +
+            `Checkpoint at ${dbPath} is likely corrupt or was written by an incompatible plugin version.`,
+        );
+        notifier?.notifyIntegrityViolation(0, `SMT tree ${tree.key} inconsistent — ${errored} proof(s) failed to generate`).catch(() => {});
+        process.exitCode = 1;
       }
       if (failed > 0) {
         console.error(`  WARNING: ${failed} proof verification(s) failed.`);

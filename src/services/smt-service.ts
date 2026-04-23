@@ -288,7 +288,17 @@ export class SmtService {
     const key = treeKey ?? this.getTreeKey();
     const store = this.manager.get(key);
     if (!store) return null;
-    const proof = store.createProof(hash);
+    let proof: SmtProof;
+    try {
+      proof = store.createProof(hash);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[audit-plugin:smt] createProof failed for tree ${key}: ${msg}. ` +
+          `Tree state may be inconsistent (dangling node reference in restored checkpoint).`,
+      );
+      return null;
+    }
     if (store.isFrozen(hash)) {
       return { ...proof, frozen: true };
     }
@@ -320,6 +330,10 @@ export class SmtService {
       return { status: "invalid", reason: "Proof verification failed" };
     }
     return { status: "valid" };
+  }
+
+  getCheckpointDir(): string {
+    return this.config.checkpointDir;
   }
 
   getRoot(treeKey?: string): { root: string; entryCount: number } | null {

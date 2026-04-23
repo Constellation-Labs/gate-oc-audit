@@ -134,6 +134,13 @@ export class TreeManager {
         }
 
         store.restore({ root, nodes, frozenKeys });
+        const inconsistency = store.shallowConsistencyCheck();
+        if (inconsistency) {
+          console.error(
+            `[smt-tree-manager] Tree "${treeKey}" restored but looks inconsistent: ${inconsistency}. ` +
+              `Proof generation will fail until the tree is rebuilt.`,
+          );
+        }
         this.trees.set(treeKey, store);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";

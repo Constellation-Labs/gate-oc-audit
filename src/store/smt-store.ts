@@ -142,6 +142,23 @@ export class SmtStore {
     this.frozenKeys = new Set(snapshot.frozenKeys ?? []);
   }
 
+  /**
+   * Shallow consistency check: the root must be the zero node or present in
+   * the nodes map. Does not walk the full tree — a passing result doesn't
+   * guarantee every descendant is reachable, only that traversal can begin.
+   * Returns null if consistent, or a human-readable reason if not.
+   */
+  shallowConsistencyCheck(): string | null {
+    const root = String(this.smt.root);
+    if (root === "0") return null;
+    // @ts-ignore — accessing internal nodes map
+    const nodes: Map<string, string[]> = this.smt.nodes;
+    if (!nodes.has(root)) {
+      return `root ${root} is not present in the nodes map (${nodes.size} nodes loaded)`;
+    }
+    return null;
+  }
+
   getNodes(): Map<string, string[]> {
     // @ts-ignore — accessing internal nodes map
     return new Map(this.smt.nodes);
