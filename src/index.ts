@@ -6,6 +6,8 @@ import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
+import {createGatewayPublisher} from "./services/gateway-publisher.js";
+import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
 import {ToolScanner} from "./scanner.js";
@@ -387,6 +389,9 @@ export default (() => {
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
 
+            const gatewayPublisher: GatewayPublisher = createGatewayPublisher(config);
+            limiter.setGatewayPublisher(gatewayPublisher);
+
             api.registerService({
                 id: "constellation-audit-plugin:smt",
                 async start() {
@@ -443,6 +448,32 @@ export default (() => {
                 },
                 stop() {
                     deAnchor.stop();
+                },
+            });
+
+            api.registerService({
+                id: "constellation-audit-plugin:gateway-publisher",
+                async start() {
+                    await gatewayPublisher.start();
+                },
+                async stop() {
+                    gatewayPublisher.stop();
+                    // Drain remaining batches synchronously. Each flushNow handles
+                    // one batch; loop until the buffer is empty or the circuit
+                    // breaker trips (don't block shutdown forever on a dead gateway).
+                    let safetyCounter = 0;
+                    while (
+                        gatewayPublisher.bufferedCount() > 0
+                        && !gatewayPublisher.isCircuitOpen()
+                        && safetyCounter < 1000
+                    ) {
+                        try {
+                            await gatewayPublisher.flushNow();
+                        } catch {
+                            break;
+                        }
+                        safetyCounter++;
+                    }
                 },
             });
 
