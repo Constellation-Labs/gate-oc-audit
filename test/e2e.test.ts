@@ -1021,6 +1021,247 @@ describe("e2e: Digital Evidence anchoring handles failure without crashing the p
   });
 });
 
+describe("e2e: cron-triggered run captures jobId on cron.executed and cron.failed", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  it("records cron.executed with jobId and cron.failed with the same jobId on agent failure", () => {
+    const sessionId = "sess-cron-1";
+    const ctx = {
+      sessionId,
+      sessionKey: "sk-cron-1",
+      trigger: "cron",
+      agentId: "agent-cron",
+      runId: "r-cron-1",
+      jobId: "job-nightly-summary",
+    };
+
+    fire(rig.api, "before_model_resolve", { prompt: "Run nightly summary" }, ctx);
+    fire(rig.api, "agent_end",
+      { messages: [], success: false, error: "timeout", durationMs: 9000 },
+      ctx,
+    );
+
+    const events = rig.store.query({ sessionId, limit: 10 });
+    const executed = events.find((e) => e.eventType === "cron.executed");
+    const failed = events.find((e) => e.eventType === "cron.failed");
+    assert.ok(executed, "expected cron.executed event");
+    assert.ok(failed, "expected cron.failed event");
+    assert.equal((executed!.metadata as Record<string, unknown>).jobId, "job-nightly-summary");
+    assert.equal((failed!.metadata as Record<string, unknown>).jobId, "job-nightly-summary");
+    assert.equal((failed!.metadata as Record<string, unknown>).error, "timeout");
+  });
+});
+
+describe("e2e: openclaw 2026.4.x correlation fields survive the full pipeline", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  it("captures runId/jobId/modelProviderId/modelId on agent.end and message correlation fields end-to-end", () => {
+    const sessionId = "sess-correlation-1";
+    const conversationId = sessionId;
+    const ctx = {
+      sessionId,
+      sessionKey: "sk-corr-1",
+      conversationId,
+      channelId: "telegram",
+      trigger: "user",
+      runId: "r-corr-1",
+      agentId: "agent-corr",
+      modelProviderId: "anthropic",
+      modelId: "claude-opus-4-7",
+    };
+
+    fire(rig.api, "message_received",
+      {
+        from: "gabriel", content: "hi",
+        threadId: 12345, messageId: "in-1", senderId: "tg-gabriel", timestamp: Date.now(),
+      },
+      ctx,
+    );
+    fire(rig.api, "message_sending",
+      { to: "gabriel", content: "ok", replyToId: "in-1", threadId: 12345 },
+      ctx,
+    );
+    fire(rig.api, "message_sent",
+      { to: "gabriel", content: "ok", success: true, messageId: "out-1" },
+      ctx,
+    );
+    fire(rig.api, "agent_end",
+      { messages: [], success: true, durationMs: 800 },
+      ctx,
+    );
+
+    const inbound = rig.store
+      .query({ sessionId: conversationId, eventType: "message.received", limit: 1 })[0];
+    const inboundMeta = inbound.metadata as Record<string, unknown>;
+    assert.equal(inboundMeta.threadId, 12345);
+    assert.equal(inboundMeta.messageId, "in-1");
+    assert.equal(inboundMeta.senderId, "tg-gabriel");
+    assert.equal(inboundMeta.sessionKey, "sk-corr-1");
+    assert.equal(inboundMeta.runId, "r-corr-1");
+
+    const outboundDraft = rig.store
+      .query({ sessionId: conversationId, eventType: "message.sending", limit: 1 })[0];
+    const outboundDraftMeta = outboundDraft.metadata as Record<string, unknown>;
+    assert.equal(outboundDraftMeta.replyToId, "in-1");
+    assert.equal(outboundDraftMeta.threadId, 12345);
+    assert.equal(outboundDraftMeta.sessionKey, "sk-corr-1");
+    assert.equal(outboundDraftMeta.runId, "r-corr-1");
+
+    const outbound = rig.store
+      .query({ sessionId: conversationId, eventType: "message.sent", limit: 1 })[0];
+    const outboundMeta = outbound.metadata as Record<string, unknown>;
+    assert.equal(outboundMeta.messageId, "out-1");
+    assert.equal(outboundMeta.sessionKey, "sk-corr-1");
+    assert.equal(outboundMeta.runId, "r-corr-1");
+
+    const agentEnd = rig.store
+      .query({ sessionId, eventType: "agent.end", limit: 1 })[0];
+    const agentMeta = agentEnd.metadata as Record<string, unknown>;
+    assert.equal(agentMeta.runId, "r-corr-1");
+    assert.equal(agentMeta.modelProviderId, "anthropic");
+    assert.equal(agentMeta.modelId, "claude-opus-4-7");
+  });
+
+  it("captures sessionFile on compaction/reset and reason+sessionFile on session.end", () => {
+    const sessionId = "sess-files-1";
+    const ctx = { sessionId };
+    const sessionFile = "/var/openclaw/sess-files-1.jsonl";
+
+    fire(rig.api, "before_compaction",
+      { messageCount: 10, compactingCount: 8, tokenCount: 4000, sessionFile },
+      ctx,
+    );
+    fire(rig.api, "after_compaction",
+      { messageCount: 2, compactedCount: 8, tokenCount: 800, sessionFile },
+      ctx,
+    );
+    fire(rig.api, "before_reset",
+      { reason: "idle-timeout", sessionFile },
+      ctx,
+    );
+    fire(rig.api, "session_end",
+      {
+        sessionId, sessionKey: "sk-files-1", messageCount: 8, durationMs: 12000,
+        reason: "reset", sessionFile, transcriptArchived: true,
+        nextSessionId: "sess-files-2", nextSessionKey: "sk-files-2",
+      },
+      ctx,
+    );
+
+    const compactStart = rig.store.query({ sessionId, eventType: "agent.compaction_start", limit: 1 })[0];
+    assert.equal((compactStart.metadata as Record<string, unknown>).sessionFile, sessionFile);
+
+    const compactEnd = rig.store.query({ sessionId, eventType: "agent.compaction_end", limit: 1 })[0];
+    assert.equal((compactEnd.metadata as Record<string, unknown>).sessionFile, sessionFile);
+
+    const reset = rig.store.query({ sessionId, eventType: "agent.reset", limit: 1 })[0];
+    const resetMeta = reset.metadata as Record<string, unknown>;
+    assert.equal(resetMeta.reason, "idle-timeout");
+    assert.equal(resetMeta.sessionFile, sessionFile);
+
+    const sessionEnd = rig.store.query({ sessionId, eventType: "session.end", limit: 1 })[0];
+    const endMeta = sessionEnd.metadata as Record<string, unknown>;
+    assert.equal(endMeta.reason, "reset");
+    assert.equal(endMeta.sessionFile, sessionFile);
+    assert.equal(endMeta.transcriptArchived, true);
+    assert.equal(endMeta.nextSessionId, "sess-files-2");
+    assert.equal(endMeta.nextSessionKey, "sk-files-2");
+    assert.ok(sessionEnd.description.includes("reset"),
+      "description should reflect the reason when openclaw provides one");
+  });
+
+  it("captures threadId/messageId/runId on inbound_claim", () => {
+    const conversationId = "conv-claim-1";
+
+    fire(rig.api, "inbound_claim",
+      {
+        content: "hi bot", channel: "discord",
+        senderId: "u-1", senderName: "Alice", isGroup: false,
+        threadId: "thread-77", messageId: "claim-1",
+      },
+      { channelId: "discord", conversationId, sessionKey: "sk-claim-1", runId: "r-claim-1" },
+    );
+
+    const claim = rig.store
+      .query({ sessionId: conversationId, eventType: "message.claimed", limit: 1 })[0];
+    const meta = claim.metadata as Record<string, unknown>;
+    assert.equal(meta.threadId, "thread-77");
+    assert.equal(meta.messageId, "claim-1");
+    assert.equal(meta.sessionKey, "sk-claim-1");
+    assert.equal(meta.runId, "r-claim-1");
+  });
+});
+
+describe("e2e: before_install records system.install events end-to-end", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  it("records a plugin install with scan summary and SMT-proves the resulting event", () => {
+    fire(rig.api, "before_install",
+      {
+        targetType: "plugin",
+        targetName: "@example/cool-plugin",
+        sourcePath: "/tmp/cool-plugin",
+        sourcePathKind: "directory",
+        origin: "npm",
+        request: { kind: "plugin-npm", mode: "install", requestedSpecifier: "@example/cool-plugin@1.2.3" },
+        builtinScan: { status: "ok", scannedFiles: 12, critical: 0, warn: 1, info: 3, findings: [] },
+        plugin: { pluginId: "cool", contentType: "package", packageName: "@example/cool-plugin", version: "1.2.3" },
+      },
+      { targetType: "plugin", requestKind: "plugin-npm", origin: "npm" },
+    );
+    fire(rig.api, "before_install",
+      {
+        targetType: "skill",
+        targetName: "code-search",
+        sourcePath: "/tmp/code-search",
+        sourcePathKind: "directory",
+        request: { kind: "skill-install", mode: "install" },
+        builtinScan: { status: "ok", scannedFiles: 4, critical: 0, warn: 0, info: 0, findings: [] },
+        skill: { installId: "install-abc" },
+      },
+      {},
+    );
+
+    const events = rig.store.query({ category: "system", eventType: "system.install", limit: 10 });
+    assert.equal(events.length, 2);
+    const targets = events.map((e) => (e.metadata as Record<string, unknown>).targetType).sort();
+    assert.deepEqual(targets, ["plugin", "skill"]);
+
+    const pluginInstall = events.find((e) => (e.metadata as Record<string, unknown>).targetType === "plugin")!;
+    const pmeta = pluginInstall.metadata as Record<string, unknown>;
+    assert.equal(pmeta.targetName, "@example/cool-plugin");
+    assert.equal(pmeta.requestKind, "plugin-npm");
+    assert.equal(pmeta.requestMode, "install");
+    assert.equal(pmeta.requestedSpecifier, "@example/cool-plugin@1.2.3");
+    assert.equal(pmeta.pluginId, "cool");
+    assert.equal(pmeta.version, "1.2.3");
+    assert.equal(pmeta.scanStatus, "ok");
+    assert.equal(pmeta.scannedFiles, 12);
+    assert.equal(pmeta.scanWarn, 1);
+
+    const skillInstall = events.find((e) => (e.metadata as Record<string, unknown>).targetType === "skill")!;
+    assert.equal((skillInstall.metadata as Record<string, unknown>).installId, "install-abc");
+
+    // SMT proof must remain valid for the new event type — confirms the censored
+    // hash includes system.install in its category set without breaking the tree.
+    const root = rig.smt.getRoot()!;
+    const knownRoots = rig.smt.getKnownRoots(rig.store.getCheckpointedRoots());
+    for (const evt of events) {
+      const censored = rig.smt.computeCensoredHash(evt);
+      const proof = rig.smt.createProof(censored);
+      assert.ok(proof?.membership, `expected membership proof for ${evt.eventType}`);
+      assert.equal(rig.smt.verifyProofWithRoots(proof!, knownRoots).status, "valid");
+    }
+    assert.ok(root.entryCount > 0);
+  });
+});
+
 describe("e2e: every PluginHookName is registered and exercised", () => {
   // Guard test: if openclaw adds a new hook or we forget to cover one in e2e,
   // this test fails loudly. The e2e file must exercise each hook at least once.
@@ -1035,6 +1276,7 @@ describe("e2e: every PluginHookName is registered and exercised", () => {
     "session_start", "session_end",
     "subagent_spawning", "subagent_spawned", "subagent_delivery_target", "subagent_ended",
     "gateway_start", "gateway_stop",
+    "before_install",
   ];
 
   it("the e2e file fires each hook at least once", async () => {
