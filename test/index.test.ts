@@ -64,9 +64,10 @@ describe("plugin entry point", () => {
     const api = createMockApi(testDbPath);
     plugin.register(api as any);
 
-    assert.equal(api.registeredHooks.length, 25);
+    assert.equal(api.registeredHooks.length, 26);
     assert.ok(api.registeredHooks.includes("before_model_resolve"));
     assert.ok(api.registeredHooks.includes("llm_output"));
+    assert.ok(api.registeredHooks.includes("before_install"));
 
     assert.equal(api.registeredCli.length, 1);
     assert.equal(api.registeredServices.length, 5); // smt, retention, config-watcher, de-anchor, file-watcher

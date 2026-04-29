@@ -65,14 +65,35 @@ function resolveRecipient(evt: { to?: string }): string {
   return evt.to || "unknown";
 }
 
+/**
+ * Tracks which hooks have actually fired since registration, so callers can
+ * detect when openclaw silently drops conversation hooks for lack of the
+ * `plugins.entries.<id>.hooks.allowConversationAccess=true` operator opt-in
+ * (introduced in openclaw 2026.4.24).
+ */
+export interface HookActivity {
+  llmInputObserved: boolean;
+  toolCallObserved: boolean;
+}
+
+const CONVERSATION_ACCESS_WARNING = [
+  "[audit-plugin] tool.invoked observed without any preceding llm_input.",
+  "  This usually means openclaw silently dropped the llm_input/llm_output/agent_end",
+  "  hook registrations because the operator opt-in is missing. Add to openclaw config:",
+  '    plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess: true',
+  "  See README.md for details.",
+].join("\n");
+
 export function registerHooks(
   api: OpenClawPluginApi,
   store: AuditStore,
   limiter?: RateLimiter,
   config: Record<string, unknown> = {},
-): void {
+): HookActivity {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
+  const activity: HookActivity = { llmInputObserved: false, toolCallObserved: false };
+  let conversationAccessWarned = false;
 
   const safeAppend = (insert: AuditEventInsert): void => {
     if (
@@ -112,7 +133,12 @@ export function registerHooks(
           eventType: "cron.executed",
           category: "cron",
           description: "Cron-triggered agent run started",
-          metadata: { agentId: ctx.agentId, runId: ctx.runId, promptLength: evt.prompt?.length },
+          metadata: {
+            agentId: ctx.agentId,
+            runId: ctx.runId,
+            jobId: (ctx as { jobId?: string }).jobId,
+            promptLength: evt.prompt?.length,
+          },
         });
       }
     },
@@ -135,12 +161,20 @@ export function registerHooks(
   api.on(
     "agent_end",
     (evt, ctx) => {
+      const c = ctx as typeof ctx & { jobId?: string; modelProviderId?: string; modelId?: string };
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.end",
         category: "agent",
         description: "Agent run ended",
-        metadata: { durationMs: evt.durationMs, success: evt.success },
+        metadata: {
+          durationMs: evt.durationMs,
+          success: evt.success,
+          runId: ctx.runId,
+          jobId: c.jobId,
+          modelProviderId: c.modelProviderId,
+          modelId: c.modelId,
+        },
       });
       if (ctx.trigger === "cron" && evt.success === false) {
         safeAppend({
@@ -151,6 +185,7 @@ export function registerHooks(
           metadata: {
             agentId: ctx.agentId,
             runId: ctx.runId,
+            jobId: (ctx as { jobId?: string }).jobId,
             durationMs: evt.durationMs,
             error: evt.error,
           },
@@ -163,6 +198,11 @@ export function registerHooks(
   api.on(
     "before_tool_call",
     (evt, ctx) => {
+      activity.toolCallObserved = true;
+      if (!activity.llmInputObserved && !conversationAccessWarned) {
+        conversationAccessWarned = true;
+        console.warn(CONVERSATION_ACCESS_WARNING);
+      }
       const sanitized = sanitizeArgs(evt.params);
       const args = redactToolArgs
         ? { hash: "sha256:" + sdk.hashDocument(sdk.canonicalize(sanitized)) }
@@ -232,7 +272,8 @@ export function registerHooks(
 
   api.on(
     "llm_input",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      activity.llmInputObserved = true;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.input",
@@ -246,7 +287,8 @@ export function registerHooks(
           imagesCount: evt.imagesCount,
         },
         content: evt.prompt,
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -256,6 +298,8 @@ export function registerHooks(
     "message_received",
     (evt, ctx) => {
       const sender = resolveSender(evt);
+      const e = evt as typeof evt & { threadId?: string | number; messageId?: string; senderId?: string; sessionKey?: string; runId?: string };
+      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.received",
@@ -264,8 +308,13 @@ export function registerHooks(
         metadata: {
           direction: "in",
           sender,
+          senderId: e.senderId,
           channel: ctx.channelId,
           accountId: ctx.accountId,
+          sessionKey: c.sessionKey,
+          threadId: e.threadId,
+          messageId: e.messageId,
+          runId: c.runId ?? e.runId,
           surface: evt.metadata?.surface as string | undefined,
           contentLength: evt.content?.length,
           timestamp: evt.timestamp ?? Date.now(),
@@ -280,6 +329,8 @@ export function registerHooks(
     "message_sent",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
+      const e = evt as typeof evt & { messageId?: string; sessionKey?: string; runId?: string };
+      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sent",
@@ -290,6 +341,9 @@ export function registerHooks(
           recipient,
           channel: ctx.channelId,
           accountId: ctx.accountId,
+          sessionKey: c.sessionKey,
+          runId: c.runId ?? e.runId,
+          messageId: e.messageId,
           contentLength: evt.content?.length,
           success: evt.success,
           error: evt.error,
@@ -305,6 +359,8 @@ export function registerHooks(
     "message_sending",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
+      const e = evt as typeof evt & { replyToId?: string | number; threadId?: string | number };
+      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sending",
@@ -314,6 +370,10 @@ export function registerHooks(
           direction: "out",
           recipient,
           channel: ctx.channelId,
+          sessionKey: c.sessionKey,
+          runId: c.runId,
+          replyToId: e.replyToId,
+          threadId: e.threadId,
           contentLength: evt.content?.length,
         },
         content: evt.content,
@@ -324,7 +384,9 @@ export function registerHooks(
 
   api.on(
     "inbound_claim",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const e = evt as typeof evt & { threadId?: string | number; messageId?: string; runId?: string; sessionKey?: string };
+      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.claimed",
@@ -335,9 +397,14 @@ export function registerHooks(
           senderId: evt.senderId,
           senderName: evt.senderName,
           isGroup: evt.isGroup,
+          sessionKey: c.sessionKey ?? e.sessionKey,
+          runId: c.runId ?? e.runId,
+          threadId: e.threadId,
+          messageId: e.messageId,
           contentLength: evt.content?.length,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -409,6 +476,7 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactingCount: evt.compactingCount,
           tokenCount: evt.tokenCount,
+          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -426,6 +494,7 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactedCount: evt.compactedCount,
           tokenCount: evt.tokenCount,
+          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -441,6 +510,7 @@ export function registerHooks(
         description: `Session reset: ${evt.reason ?? "unknown"}`,
         metadata: {
           reason: evt.reason,
+          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
         },
       }),
     { priority: AUDIT_PRIORITY },
@@ -466,18 +536,33 @@ export function registerHooks(
 
   api.on(
     "session_end",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const e = evt as typeof evt & {
+        reason?: string;
+        sessionFile?: string;
+        transcriptArchived?: boolean;
+        nextSessionId?: string;
+        nextSessionKey?: string;
+      };
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
-        description: `Session ended: ${evt.sessionId}`,
+        description: e.reason
+          ? `Session ended (${e.reason}): ${evt.sessionId}`
+          : `Session ended: ${evt.sessionId}`,
         metadata: {
           sessionKey: evt.sessionKey,
           messageCount: evt.messageCount,
           durationMs: evt.durationMs,
+          reason: e.reason,
+          sessionFile: e.sessionFile,
+          transcriptArchived: e.transcriptArchived,
+          nextSessionId: e.nextSessionId,
+          nextSessionKey: e.nextSessionKey,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -585,4 +670,61 @@ export function registerHooks(
       }),
     { priority: AUDIT_PRIORITY },
   );
+
+  // --- Install pipeline (openclaw >= 2026.4 only) ---
+  // before_install does not exist on older openclaw runtimes; the loader
+  // logs an "unknown typed hook" warning and ignores the registration. The
+  // try/catch swallows that path so the rest of the listener still loads.
+  try {
+    (api.on as unknown as (
+      name: string,
+      handler: (evt: Record<string, unknown>, ctx: Record<string, unknown>) => void,
+      opts?: { priority?: number },
+    ) => void)(
+      "before_install",
+      (evt) => {
+        const target = (evt.targetType as string | undefined) ?? "unknown";
+        const name = (evt.targetName as string | undefined) ?? "unknown";
+        const scan = evt.builtinScan as
+          | { scannedFiles?: number; critical?: number; warn?: number; info?: number; status?: string }
+          | undefined;
+        const plugin = evt.plugin as
+          | { pluginId?: string; packageName?: string; version?: string; contentType?: string }
+          | undefined;
+        const skill = evt.skill as { installId?: string } | undefined;
+        const request = evt.request as { kind?: string; mode?: string; requestedSpecifier?: string } | undefined;
+        safeAppend({
+          eventType: "system.install",
+          category: "system",
+          description: `Install ${request?.mode ?? "request"}: ${target} ${name}`,
+          metadata: {
+            targetType: target,
+            targetName: name,
+            sourcePath: evt.sourcePath,
+            sourcePathKind: evt.sourcePathKind,
+            origin: evt.origin,
+            requestKind: request?.kind,
+            requestMode: request?.mode,
+            requestedSpecifier: request?.requestedSpecifier,
+            pluginId: plugin?.pluginId,
+            packageName: plugin?.packageName,
+            version: plugin?.version,
+            contentType: plugin?.contentType,
+            installId: skill?.installId,
+            scanStatus: scan?.status,
+            scannedFiles: scan?.scannedFiles,
+            scanCritical: scan?.critical,
+            scanWarn: scan?.warn,
+            scanInfo: scan?.info,
+          },
+        });
+      },
+      { priority: AUDIT_PRIORITY },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.warn("[audit-plugin] before_install hook unavailable:", message);
+  }
+
+  return activity;
 }
