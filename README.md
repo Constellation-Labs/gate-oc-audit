@@ -44,7 +44,7 @@ Set values via the CLI:
 
 ```bash
 openclaw config set plugins.entries.constellation-audit-plugin.enabled true
-openclaw config set plugins.entries.constellation-audit-plugin.config.dbPath "~/.openclaw/audit.db"
+openclaw config set plugins.entries.constellation-audit-plugin.config.dbPath "$HOME/.openclaw/audit.db"
 openclaw config set plugins.entries.constellation-audit-plugin.config.localRetentionDays 365
 openclaw config set plugins.entries.constellation-audit-plugin.config.localMaxSizeMb 500
 ```
@@ -219,7 +219,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 
 ## What gets recorded
 
-The plugin hooks into 26 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
+The plugin subscribes to every public OpenClaw lifecycle hook and records each event into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
 
 Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) in tool arguments are automatically redacted before storage.
 
@@ -295,8 +295,11 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 | Event type | Hook | Metadata captured |
 |---|---|---|
 | `system.install` | `before_install` | target type (skill/plugin), target name, source path, request kind, plugin/skill identifiers, scan summary (files, critical/warn/info counts) |
+| `system.install_hook_unavailable` | (registration failure) | error message |
 
 `system.install` records every plugin or skill install/update intercepted by openclaw's install pipeline, including the built-in security scan summary. Captures who installed what so unexpected supply-chain events leave an audit-trail signal. Hook is non-decisive — the plugin observes only and never blocks.
+
+`system.install_hook_unavailable` is appended once if the `before_install` registration throws. This makes "we silently couldn't audit installs" a recorded event rather than a console warning that scrolls away.
 
 ## CLI commands
 

@@ -47,7 +47,8 @@ export type EventType =
   | "config.cron_changed"
   | "security.scan_result"
   | "system.file_changed"
-  | "system.install";
+  | "system.install"
+  | "system.install_hook_unavailable";
 
 export type ConfigChangeType = "added" | "modified" | "removed";
 

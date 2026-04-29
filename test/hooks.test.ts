@@ -618,6 +618,15 @@ describe("registerHooks", () => {
       assert.equal(meta.sessionKey, "sk-3");
       assert.equal(meta.runId, "r-3");
     });
+
+    it("captures accountId from ctx for parity with message_received and message_sent", () => {
+      fireHook(api, "message_sending",
+        { to: "u1", content: "reply" },
+        { channelId: "slack", accountId: "acct-99" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.accountId, "acct-99");
+    });
   });
 
   describe("inbound_claim", () => {
@@ -647,6 +656,15 @@ describe("registerHooks", () => {
       assert.equal(meta.messageId, "m-1");
       assert.equal(meta.sessionKey, "sk-4");
       assert.equal(meta.runId, "r-4");
+    });
+
+    it("captures parentConversationId for thread-bound conversations", () => {
+      fireHook(api, "inbound_claim",
+        { content: "hi", channel: "telegram", senderId: "u1", isGroup: false },
+        { channelId: "telegram", conversationId: "c1", parentConversationId: "p1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.parentConversationId, "p1");
     });
   });
 
@@ -872,6 +890,30 @@ describe("registerHooks", () => {
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.targetType, "skill");
       assert.equal(meta.installId, "install-abc");
+    });
+
+    it("strips control chars from description so attacker-controlled fields cannot forge log lines", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          targetName: "evil\n[audit-plugin] FAKE: legitimate-pkg installed",
+          sourcePath: "/tmp/evil",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install\rinjected" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "system.install");
+      assert.equal(events[0].description.includes("\n"), false,
+        "description must not contain LF (would split log lines)");
+      assert.equal(events[0].description.includes("\r"), false,
+        "description must not contain CR (would split log lines)");
+      // Metadata, by contrast, preserves the raw values for forensic analysis.
+      const meta = JSON.parse(events[0].metadata);
+      assert.ok((meta.targetName as string).includes("\n"),
+        "metadata preserves the unsanitized payload for forensics");
     });
   });
 

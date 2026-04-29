@@ -253,15 +253,28 @@ export class AuditStore {
       try {
         metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
-        console.error("[audit-plugin] Metadata is not serializable, skipping event");
-        return undefined;
+        // Truncate-and-record: a non-serializable metadata payload would be a
+        // forensic signal we don't want to lose. Keep the row with a marker.
+        console.error("[audit-plugin] Metadata is not serializable, recording marker");
+        metadataCanonical = sdk.canonicalize({
+          metadataDropped: true,
+          reason: "non-serializable",
+        });
       }
 
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
+        // Sender-controlled fields (messageId, sourcePath, requestedSpecifier,
+        // etc.) could otherwise erase the very event that records the abuse.
+        // Drop the metadata payload but preserve the event so the audit trail
+        // still records that something happened.
         console.error(
-          `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, skipping event`,
+          `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
         );
-        return undefined;
+        metadataCanonical = sdk.canonicalize({
+          metadataDropped: true,
+          reason: "size-cap",
+          originalSize: metadataCanonical.length,
+        });
       }
 
       const nextSequence = this.sequence + 1;

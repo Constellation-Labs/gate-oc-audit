@@ -93,21 +93,32 @@ describe("AuditStore", () => {
       assert.equal(event.userId, undefined);
     });
 
-    it("skips events with metadata exceeding 1MB", () => {
+    it("records oversized metadata events with a truncation marker rather than dropping them", () => {
       const bigValue = "x".repeat(1024 * 1024 + 1);
       const result = store.append(sampleInsert({ metadata: { big: bigValue } }));
 
-      assert.equal(result, undefined);
-      assert.equal(store.isDegraded(), false); // size guard is not a degradation
+      assert.ok(result, "expected event to be recorded with truncated metadata");
+      assert.equal(store.isDegraded(), false);
+      // Metadata is canonicalized JSON in the column; verify the marker landed.
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const md = persisted.metadata as Record<string, unknown>;
+      assert.equal(md.metadataDropped, true);
+      assert.equal(md.reason, "size-cap");
+      assert.ok(typeof md.originalSize === "number" && md.originalSize > 1024 * 1024);
+      assert.equal("big" in md, false, "oversized field must not survive truncation");
     });
 
-    it("skips events with non-serializable metadata without degrading", () => {
+    it("records non-serializable metadata events with a truncation marker", () => {
       const result = store.append(
         sampleInsert({ metadata: { value: BigInt(42) } as unknown as Record<string, unknown> }),
       );
 
-      assert.equal(result, undefined);
+      assert.ok(result, "expected event to be recorded with marker");
       assert.equal(store.isDegraded(), false);
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const md = persisted.metadata as Record<string, unknown>;
+      assert.equal(md.metadataDropped, true);
+      assert.equal(md.reason, "non-serializable");
     });
   });
 
