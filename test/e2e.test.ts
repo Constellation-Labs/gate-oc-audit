@@ -1262,6 +1262,102 @@ describe("e2e: before_install records system.install events end-to-end", () => {
   });
 });
 
+describe("e2e: registration failure on before_install records system.install_hook_unavailable", () => {
+  // Simulates an older or future openclaw runtime that throws on unknown hook
+  // names. The plugin's outer try/catch must convert the registration miss
+  // into an audit row, not a console-only warning.
+  it("appends a system.install_hook_unavailable event when api.on throws for before_install", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "audit-e2e-fail-"));
+    const dbPath = join(dir, "audit.db");
+    const config = {
+      dbPath,
+      smt: { checkpointDir: join(dir, "smt-checkpoints"), checkpointIntervalMs: 0 },
+    };
+    const store = new AuditStore(dbPath);
+    const smt = new SmtService(config);
+    const limiter = new RateLimiter(store, config);
+    limiter.setSmtService(smt);
+    await smt.start();
+
+    const hooks = new Map<string, HookEntry>();
+    const flakyApi = {
+      hooks,
+      on(name: string, handler: HookEntry["handler"], opts?: HookEntry["options"]) {
+        if (name === "before_install") {
+          throw new Error("unknown typed hook: before_install");
+        }
+        hooks.set(name, { handler, options: opts });
+      },
+      registerHook() {},
+      registerService() {},
+      registerCli() {},
+      registerTool() {},
+      registerCommand() {},
+      registerHttpRoute() {},
+      pluginConfig: config,
+      config: {},
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      runtime: {},
+      registrationMode: "full" as const,
+      id: "e2e-flaky",
+      name: "e2e-flaky",
+      source: "test",
+      resolvePath: (p: string) => p,
+    } as unknown as MockApi;
+
+    registerHooks(flakyApi, store, limiter, config);
+
+    const events = store.query({ category: "system", limit: 10 });
+    const miss = events.find((e) => e.eventType === "system.install_hook_unavailable");
+    assert.ok(miss, "expected a system.install_hook_unavailable audit row");
+    assert.ok(
+      ((miss!.metadata as Record<string, unknown>).error as string).includes("before_install"),
+      "metadata should record the underlying error",
+    );
+
+    limiter.flush();
+    await smt.stop();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("e2e: oversized metadata is recorded with a truncation marker rather than dropped", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  it("preserves the audit signal when sender-controlled fields blow past the 1MB metadata cap", () => {
+    // A hostile install request stuffs >1MB into a sender-controlled scalar.
+    const hostileSpecifier = "x".repeat(1024 * 1024 + 100);
+    fire(rig.api, "before_install",
+      {
+        targetType: "plugin",
+        targetName: "@example/large",
+        sourcePath: "/tmp/large",
+        sourcePathKind: "directory",
+        request: {
+          kind: "plugin-npm",
+          mode: "install",
+          requestedSpecifier: hostileSpecifier,
+        },
+        builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+      },
+      {},
+    );
+
+    const events = rig.store.query({ category: "system", eventType: "system.install", limit: 10 });
+    assert.equal(events.length, 1,
+      "event must still be recorded — silent skipping would erase forensic signal");
+    const meta = events[0].metadata as Record<string, unknown>;
+    assert.equal(meta.metadataDropped, true);
+    assert.equal(meta.reason, "size-cap");
+    assert.ok(typeof meta.originalSize === "number");
+    assert.equal("requestedSpecifier" in meta, false,
+      "oversized field must not survive truncation");
+  });
+});
+
 describe("e2e: every PluginHookName is registered and exercised", () => {
   // Guard test: if openclaw adds a new hook or we forget to cover one in e2e,
   // this test fails loudly. The e2e file must exercise each hook at least once.
