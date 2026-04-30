@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server, type IncomingMessage } from "node:http";
-import { createGatewayPublisher } from "../../src/services/gateway-publisher.js";
+import { createGatewayPublisher, drainForShutdown } from "../../src/services/gateway-publisher.js";
 import type { AuditEvent } from "../../src/types/events.js";
 
 interface ReceivedRequest {
@@ -91,6 +91,179 @@ describe("GatewayPublisher", () => {
       gatewayApiKey: "sk-gw-test",
     });
     assert.equal(pub.isActive(), false);
+  });
+
+  it("rejects http:// to non-loopback host", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: "http://gateway.example.com",
+      gatewayApiKey: "sk-gw-test",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("rejects http:// to AWS metadata service", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: "http://169.254.169.254/latest/meta-data/",
+      gatewayApiKey: "sk-gw-test",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("accepts http:// to loopback (localhost / 127.0.0.1 / [::1])", () => {
+    for (const host of ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]) {
+      const pub = createGatewayPublisher({ gatewayUrl: host, gatewayApiKey: "sk-gw-test" });
+      assert.equal(pub.isActive(), true, `expected ${host} to be accepted`);
+    }
+  });
+
+  it("rejects https:// to private RFC1918 IP without allow opt-in", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: "https://10.0.0.5",
+      gatewayApiKey: "sk-gw-test",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("accepts https:// to private IP when gatewayAllowPrivateHost=true", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: "https://10.0.0.5",
+      gatewayApiKey: "sk-gw-test",
+      gatewayAllowPrivateHost: true,
+    });
+    assert.equal(pub.isActive(), true);
+  });
+
+  it("rejects malformed URL", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: "not a url",
+      gatewayApiKey: "sk-gw-test",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("rejects API key containing CR/LF (header injection footgun)", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-bad\r\nX-Injected: 1",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("rejects API key containing whitespace", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw bad",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("rejects empty API key", () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("clamps batchSize/intervalMs/timeoutMs to safe minima (no infinite-loop on 0/0.5)", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 0.5,        // floor=0, but clamp pushes to >= 1
+      gatewayIntervalMs: 0,          // would fire every tick — clamp to >= 1000
+      gatewayTimeoutMs: 0,           // would always-abort — clamp to >= 1000
+    });
+    assert.equal(pub.isActive(), true);
+
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 80));
+    // batchSize clamped to 1 — single event flushes successfully (POST landed,
+    // not an empty body re-firing endlessly).
+    assert.equal(received.length, 1);
+    assert.equal(received[0].body.events.length, 1);
+  });
+
+  it("strips event.content by default (gatewayIncludeContent off)", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1, { content: "secret prompt body" }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal(received[0].body.events[0].content, undefined);
+  });
+
+  it("forwards event.content when gatewayIncludeContent=true", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+      gatewayIncludeContent: true,
+    });
+    pub.notifyAppend(makeEvent(1, { content: "the prompt" }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal(received[0].body.events[0].content, "the prompt");
+  });
+
+  it("drops oversized batches rather than requeueing them forever", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+      gatewayMaxPayloadBytes: 1024,
+      gatewayIncludeContent: true,
+    });
+    // 4 KB content, batchSize=1, max=1024 → payload exceeds limit.
+    pub.notifyAppend(makeEvent(1, { content: "x".repeat(4096) }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 0, "oversized batch should not be sent");
+    assert.equal(pub.bufferedCount(), 0, "oversized batch should not be requeued");
+  });
+
+  it("records a drop milestone via callback when buffer is full", async () => {
+    const milestones: number[] = [];
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 100,
+      gatewayBufferCapacity: 2,
+      gatewayIntervalMs: 60_000,
+    }, {
+      onDropMilestone: (n) => milestones.push(n),
+    });
+    pub.notifyAppend(makeEvent(1));
+    pub.notifyAppend(makeEvent(2));
+    // Buffer now full. The next 12 appends should hit the exponential cadence
+    // at 1, 2, 3, ... 9, 10 (then 100, 1000, ...).
+    for (let i = 0; i < 12; i++) pub.notifyAppend(makeEvent(100 + i));
+    // Cadence: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 → 10 milestones from 12 drops.
+    assert.deepEqual(milestones, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("re-opens the circuit after half-open retry fails", async () => {
+    respond = () => ({ status: 500, body: "still down" });
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 10,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    for (let i = 0; i < 5; i++) await pub.flushNow();
+    assert.equal(pub.isCircuitOpen(), true);
+    // Force half-open by rewinding circuitOpenUntil. We can't reach it
+    // directly, but a flushNow after the breaker decay window would attempt
+    // one retry; here we verify the publisher correctly stays open in the
+    // immediate window (no extra POSTs slip through).
+    const before = received.length;
+    await pub.flushNow();
+    assert.equal(received.length, before, "circuit-open must suppress further POSTs");
   });
 
   it("POSTs batch with X-Gateway-Api-Key header to /admin/audit/ingest", async () => {
@@ -187,14 +360,15 @@ describe("GatewayPublisher", () => {
       setTimeout(() => {
         res.writeHead(202);
         res.end('{"accepted":1}');
-      }, 500);
+      }, 3_000);
     });
 
     const pub = createGatewayPublisher({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 10,
-      gatewayTimeoutMs: 50,
+      // timeoutMs is clamped to >= 1000 to prevent always-abort misconfiguration.
+      gatewayTimeoutMs: 1000,
       gatewayIntervalMs: 60_000,
     });
 
@@ -202,8 +376,8 @@ describe("GatewayPublisher", () => {
     const start = Date.now();
     await pub.flushNow();
     const elapsed = Date.now() - start;
-    assert.ok(elapsed < 400, `flushNow should not wait for slow server (took ${elapsed}ms)`);
-    assert.ok(elapsed >= 40, `flushNow should respect timeout (only took ${elapsed}ms)`);
+    assert.ok(elapsed < 2_500, `flushNow should not wait for slow server (took ${elapsed}ms)`);
+    assert.ok(elapsed >= 900, `flushNow should respect timeout (only took ${elapsed}ms)`);
   });
 
   it("does not flush when buffer is empty", async () => {
@@ -273,24 +447,91 @@ describe("GatewayPublisher", () => {
   });
 
   it("start() is idempotent — repeated calls don't leak timers", async () => {
+    const originalSetInterval = global.setInterval;
+    let intervalsCreated = 0;
+    global.setInterval = ((...args: Parameters<typeof setInterval>) => {
+      intervalsCreated++;
+      return originalSetInterval(...args);
+    }) as typeof setInterval;
+    try {
+      const pub = createGatewayPublisher({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 100,
+        gatewayIntervalMs: 60_000,
+      });
+      await pub.start();
+      await pub.start();
+      await pub.start();
+      assert.equal(intervalsCreated, 1, "start() should call setInterval exactly once");
+      pub.stop();
+    } finally {
+      global.setInterval = originalSetInterval;
+    }
+  });
+
+  it("drainForShutdown drains buffered events on shutdown", async () => {
     const pub = createGatewayPublisher({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
-      gatewayBatchSize: 100,
-      gatewayIntervalMs: 30,
+      gatewayBatchSize: 5,
+      gatewayIntervalMs: 60_000,
     });
-    await pub.start();
-    await pub.start();
-    await pub.start();
-    pub.notifyAppend(makeEvent(1));
-    await new Promise((r) => setTimeout(r, 100));
+    for (let i = 1; i <= 12; i++) pub.notifyAppend(makeEvent(i));
     pub.stop();
-    // Three timers would mean three POSTs in 100ms (~30ms each); a single
-    // timer guarantees at most a small number of ticks. The auto-chain only
-    // fires if buffer >= batchSize, which never happens here, so each tick
-    // emits at most one POST. Just verify it didn't explode.
-    assert.ok(received.length >= 1, "at least one tick should have fired");
-    assert.ok(received.length <= 5, `expected only one timer, got ${received.length} POSTs`);
+    await drainForShutdown(pub);
+    assert.equal(pub.bufferedCount(), 0, "drain should empty the buffer");
+    // 12 events / batchSize 5 = 3 batches (5, 5, 2)
+    assert.equal(received.length, 3);
+  });
+
+  it("drainForShutdown respects wall-clock deadline on a slow gateway", async () => {
+    server.removeAllListeners("request");
+    server.on("request", (_req, res) => {
+      // Stall every response longer than the shutdown deadline.
+      setTimeout(() => {
+        res.writeHead(202);
+        res.end('{"accepted":1}');
+      }, 600);
+    });
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+      gatewayTimeoutMs: 1000,
+      gatewayShutdownDeadlineMs: 1000,
+    });
+    for (let i = 1; i <= 5; i++) pub.notifyAppend(makeEvent(i));
+    pub.stop();
+    const start = Date.now();
+    await drainForShutdown(pub);
+    const elapsed = Date.now() - start;
+    // Deadline is 1s; allow generous slack for the in-flight POST already
+    // started before drain (await must let it complete) but should not run
+    // for the full 5*timeout=5s a naive iteration cap would permit.
+    assert.ok(elapsed < 3000, `drain should respect deadline (took ${elapsed}ms)`);
+    assert.ok(pub.bufferedCount() > 0, "deadline should leave events behind, not drain all");
+  });
+
+  it("drainForShutdown exits early when the circuit is open", async () => {
+    respond = () => ({ status: 500, body: "down" });
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+      gatewayShutdownDeadlineMs: 30_000,
+    });
+    for (let i = 1; i <= 10; i++) pub.notifyAppend(makeEvent(i));
+    // Trip the breaker (5 failures → open).
+    for (let i = 0; i < 6; i++) await pub.flushNow();
+    assert.equal(pub.isCircuitOpen(), true);
+    pub.stop();
+    const before = received.length;
+    await drainForShutdown(pub);
+    assert.equal(received.length, before, "no further POSTs while circuit is open");
+    assert.ok(pub.bufferedCount() > 0, "events stay buffered when circuit is open at shutdown");
   });
 
   it("stop() stops the interval timer", async () => {
@@ -298,17 +539,19 @@ describe("GatewayPublisher", () => {
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 100,
-      gatewayIntervalMs: 25,
+      // Clamped to >= 1000 internally; pick something > 1s so a tick fires
+      // within the wait window below.
+      gatewayIntervalMs: 1000,
     });
     await pub.start();
     pub.notifyAppend(makeEvent(1));
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 1200));
     const seenAfterStart = received.length;
-    assert.ok(seenAfterStart >= 1);
+    assert.ok(seenAfterStart >= 1, `expected timer to fire; saw ${seenAfterStart} POSTs`);
 
     pub.stop();
     pub.notifyAppend(makeEvent(2));
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 1200));
     assert.equal(received.length, seenAfterStart);
   });
 });

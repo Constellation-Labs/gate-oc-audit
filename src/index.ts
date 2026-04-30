@@ -6,7 +6,7 @@ import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
-import {createGatewayPublisher} from "./services/gateway-publisher.js";
+import {createGatewayPublisher, drainForShutdown} from "./services/gateway-publisher.js";
 import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
@@ -389,7 +389,22 @@ export default (() => {
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
 
-            const gatewayPublisher: GatewayPublisher = createGatewayPublisher(config);
+            const gatewayPublisher: GatewayPublisher = createGatewayPublisher(config, {
+                onDropMilestone: (cumulativeDropped: number) => {
+                    // Record a synthetic local audit event so a downstream
+                    // verifier can detect the gap between locally-stored
+                    // events and what the gateway received. Bypass the
+                    // rate-limiter (and therefore the publisher's notifyAppend)
+                    // to avoid recursion when buffer is full.
+                    const result = activeStore.append({
+                        eventType: "gateway.dropped",
+                        category: "gateway",
+                        description: `Gateway buffer full — ${cumulativeDropped} event(s) dropped cumulatively`,
+                        metadata: {cumulativeDropped},
+                    });
+                    if (result) activeSmt.onEventAppended(result);
+                },
+            });
             limiter.setGatewayPublisher(gatewayPublisher);
 
             api.registerService({
@@ -458,22 +473,7 @@ export default (() => {
                 },
                 async stop() {
                     gatewayPublisher.stop();
-                    // Drain remaining batches synchronously. Each flushNow handles
-                    // one batch; loop until the buffer is empty or the circuit
-                    // breaker trips (don't block shutdown forever on a dead gateway).
-                    let safetyCounter = 0;
-                    while (
-                        gatewayPublisher.bufferedCount() > 0
-                        && !gatewayPublisher.isCircuitOpen()
-                        && safetyCounter < 1000
-                    ) {
-                        try {
-                            await gatewayPublisher.flushNow();
-                        } catch {
-                            break;
-                        }
-                        safetyCounter++;
-                    }
+                    await drainForShutdown(gatewayPublisher);
                 },
             });
 
