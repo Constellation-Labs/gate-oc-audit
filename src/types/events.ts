@@ -40,6 +40,7 @@ export type EventType =
   | "session.end"
   | "gateway.start"
   | "gateway.stop"
+  | "gateway.dropped"
 
   | "config.tool_changed"
   | "config.skill_changed"

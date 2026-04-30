@@ -6,6 +6,8 @@ import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
+import {createGatewayPublisher, drainForShutdown} from "./services/gateway-publisher.js";
+import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
 import {ToolScanner} from "./scanner.js";
@@ -387,6 +389,24 @@ export default (() => {
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
 
+            const gatewayPublisher: GatewayPublisher = createGatewayPublisher(config, {
+                onDropMilestone: (cumulativeDropped: number) => {
+                    // Record a synthetic local audit event so a downstream
+                    // verifier can detect the gap between locally-stored
+                    // events and what the gateway received. Bypass the
+                    // rate-limiter (and therefore the publisher's notifyAppend)
+                    // to avoid recursion when buffer is full.
+                    const result = activeStore.append({
+                        eventType: "gateway.dropped",
+                        category: "gateway",
+                        description: `Gateway buffer full — ${cumulativeDropped} event(s) dropped cumulatively`,
+                        metadata: {cumulativeDropped},
+                    });
+                    if (result) activeSmt.onEventAppended(result);
+                },
+            });
+            limiter.setGatewayPublisher(gatewayPublisher);
+
             api.registerService({
                 id: "constellation-audit-plugin:smt",
                 async start() {
@@ -443,6 +463,17 @@ export default (() => {
                 },
                 stop() {
                     deAnchor.stop();
+                },
+            });
+
+            api.registerService({
+                id: "constellation-audit-plugin:gateway-publisher",
+                async start() {
+                    await gatewayPublisher.start();
+                },
+                async stop() {
+                    gatewayPublisher.stop();
+                    await drainForShutdown(gatewayPublisher);
                 },
             });
 

@@ -1,6 +1,7 @@
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEvent, AuditEventInsert } from "./types/events.js";
 import type { AnchorService } from "./services/de-anchor.js";
+import type { GatewayPublisher } from "./services/gateway-publisher.js";
 import type { SmtService } from "./services/smt-service.js";
 
 const DEFAULT_MAX_EVENTS_PER_SEC = 100;
@@ -22,6 +23,7 @@ interface CoalescedGroup {
 export class RateLimiter {
   private store: AuditStore;
   private deAnchor: AnchorService | undefined;
+  private gatewayPublisher: GatewayPublisher | undefined;
   private smtService: SmtService | undefined;
   private maxPerSec: number;
   private bufferCapacity: number;
@@ -45,6 +47,10 @@ export class RateLimiter {
     this.deAnchor = deAnchor;
   }
 
+  setGatewayPublisher(publisher: GatewayPublisher): void {
+    this.gatewayPublisher = publisher;
+  }
+
   setSmtService(smt: SmtService): void {
     this.smtService = smt;
   }
@@ -65,6 +71,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
+        this.gatewayPublisher?.notifyAppend(result);
       }
       return result;
     }
@@ -107,6 +114,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
+        this.gatewayPublisher?.notifyAppend(result);
       }
       this.windowEvents++;
       drained++;
@@ -182,7 +190,15 @@ export class RateLimiter {
     // Single event — no coalescing needed
     if (inserts.length === 1) return inserts[0];
 
-    // Multiple events — create summary
+    // Multiple events — create summary.
+    //
+    // Coalescing contract (consumed by the gateway and any downstream verifier):
+    //   - The summary occupies one sequence number; raw events do not get their
+    //     own sequences (we never call store.append for them). Sequence streams
+    //     remain dense — there are NO seq gaps to detect.
+    //   - `metadata.coalesced=true` flags the row; `metadata.eventCount` carries
+    //     the raw count. A downstream consumer expecting 1:1 coverage MUST
+    //     account for `eventCount` to interpret event totals correctly.
     const durationStr = group.totalDurationMs > 0
       ? `, ${(group.totalDurationMs / 1000).toFixed(1)}s total duration`
       : "";
@@ -216,6 +232,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
+        this.gatewayPublisher?.notifyAppend(result);
       }
     }
     this.buffer = [];
