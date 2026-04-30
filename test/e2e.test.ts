@@ -1350,9 +1350,10 @@ describe("e2e: oversized metadata is recorded with a truncation marker rather th
     assert.equal(events.length, 1,
       "event must still be recorded — silent skipping would erase forensic signal");
     const meta = events[0].metadata as Record<string, unknown>;
-    assert.equal(meta.metadataDropped, true);
-    assert.equal(meta.reason, "size-cap");
-    assert.ok(typeof meta.originalSize === "number");
+    const marker = meta.$auditTruncation as Record<string, unknown>;
+    assert.ok(marker, "marker must live under reserved $auditTruncation key");
+    assert.equal(marker.reason, "size-cap");
+    assert.ok(typeof marker.originalSize === "number");
     assert.equal("requestedSpecifier" in meta, false,
       "oversized field must not survive truncation");
 
