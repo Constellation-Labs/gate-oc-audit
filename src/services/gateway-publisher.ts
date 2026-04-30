@@ -55,37 +55,16 @@ class NoOpGatewayPublisher implements GatewayPublisher {
 
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
 
-function isLoopbackHost(host: string): boolean {
-  if (host === "localhost" || host === "::1" || host === "[::1]") return true;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-}
-
-function isPrivateOrLinkLocalIp(host: string): boolean {
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    return false;
-  }
-  const lower = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (lower.startsWith("fe80:") || lower.startsWith("fe80::")) return true;
-  if (/^f[cd][0-9a-f]{2}(:|::)/.test(lower)) return true;
-  return false;
-}
-
 /**
  * Validate a configured gateway URL.
  * - Reject malformed URLs and non-http(s) protocols.
  * - Reject plain http:// to anything but loopback (cleartext API key risk).
- * - Reject https:// to private/link-local IPs unless `allowPrivateHost` is set
- *   (mitigates SSRF coercion via misconfigured config).
+ *
+ * Mirrors the loopback-only check used by `validateTestUrl` in de-anchor.ts —
+ * same host equality list, same intent (cleartext is acceptable only on the
+ * developer's own machine).
  */
-export function validateGatewayUrl(raw: string, opts: { allowPrivateHost?: boolean } = {}): ValidationResult {
+export function validateGatewayUrl(raw: string): ValidationResult {
   let url: URL;
   try {
     url = new URL(raw);
@@ -95,13 +74,12 @@ export function validateGatewayUrl(raw: string, opts: { allowPrivateHost?: boole
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     return { ok: false, reason: `disallowed protocol ${url.protocol}` };
   }
-  const host = url.hostname;
-  const loopback = isLoopbackHost(host);
-  if (url.protocol === "http:" && !loopback) {
-    return { ok: false, reason: "http:// requires loopback host (localhost, 127.0.0.1, [::1])" };
-  }
-  if (!loopback && !opts.allowPrivateHost && isPrivateOrLinkLocalIp(host)) {
-    return { ok: false, reason: `private/link-local host ${host} (set gatewayAllowPrivateHost: true to allow)` };
+  if (url.protocol === "http:") {
+    const host = url.hostname;
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+    if (!loopback) {
+      return { ok: false, reason: "http:// requires loopback host (localhost, 127.0.0.1, ::1)" };
+    }
   }
   return { ok: true };
 }
@@ -347,8 +325,7 @@ export function createGatewayPublisher(
     return new NoOpGatewayPublisher("gatewayUrl or gatewayApiKey not configured");
   }
 
-  const allowPrivateHost = config.gatewayAllowPrivateHost === true;
-  const urlValidation = validateGatewayUrl(url, { allowPrivateHost });
+  const urlValidation = validateGatewayUrl(url);
   if (!urlValidation.ok) {
     return new NoOpGatewayPublisher(`gatewayUrl rejected (${urlValidation.reason})`);
   }

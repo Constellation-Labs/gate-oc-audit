@@ -90,7 +90,7 @@
       },
       "gatewayUrl": {
         "type": "string",
-        "description": "swarm-deck gateway base URL to publish audit events to (e.g. https://gateway.example.com). Events are POSTed to <gatewayUrl>/admin/audit/ingest. Plain http:// is rejected unless the host is loopback (localhost, 127.0.0.1, [::1]); private/link-local IPs are rejected unless gatewayAllowPrivateHost is true. Leave unset to disable gateway publishing."
+        "description": "swarm-deck gateway base URL to publish audit events to (e.g. https://gateway.example.com). Events are POSTed to <gatewayUrl>/admin/audit/ingest. Plain http:// is rejected unless the host is loopback (localhost, 127.0.0.1, ::1) — same policy as DE_TEST_URL. Leave unset to disable gateway publishing."
       },
       "gatewayApiKey": {
         "type": "string",
@@ -123,10 +123,6 @@
       "gatewayIncludeContent": {
         "type": "boolean",
         "description": "When true, full event content (prompts, tool args) is forwarded to the gateway. Default false: event.content is stripped from the payload regardless of redactPromptText / redactToolArgs settings, since those govern only local storage. Enable only when the gateway is the trusted source of truth for full content."
-      },
-      "gatewayAllowPrivateHost": {
-        "type": "boolean",
-        "description": "When true, allows the gateway URL to point at a private/link-local IP (10.x, 172.16-31.x, 192.168.x, 169.254.x, 100.64.0/10, fc00::/7, fe80::/10) over https. Default false (rejected) to mitigate SSRF risk from misconfiguration."
       },
       "gatewayEnabled": {
         "type": "boolean",

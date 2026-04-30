@@ -116,21 +116,11 @@ describe("GatewayPublisher", () => {
     }
   });
 
-  it("rejects https:// to private RFC1918 IP without allow opt-in", () => {
-    const pub = createGatewayPublisher({
-      gatewayUrl: "https://10.0.0.5",
-      gatewayApiKey: "sk-gw-test",
-    });
-    assert.equal(pub.isActive(), false);
-  });
-
-  it("accepts https:// to private IP when gatewayAllowPrivateHost=true", () => {
-    const pub = createGatewayPublisher({
-      gatewayUrl: "https://10.0.0.5",
-      gatewayApiKey: "sk-gw-test",
-      gatewayAllowPrivateHost: true,
-    });
-    assert.equal(pub.isActive(), true);
+  it("accepts https:// to any host (no private-IP filter — matches DE policy)", () => {
+    for (const host of ["https://gateway.example.com", "https://10.0.0.5", "https://192.168.1.10"]) {
+      const pub = createGatewayPublisher({ gatewayUrl: host, gatewayApiKey: "sk-gw-test" });
+      assert.equal(pub.isActive(), true, `expected ${host} to be accepted`);
+    }
   });
 
   it("rejects malformed URL", () => {
