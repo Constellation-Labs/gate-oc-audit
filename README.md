@@ -8,13 +8,48 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 openclaw plugins install @constellation-network/openclaw-audit-plugin
 ```
 
-Requires `openclaw >= 2026.1.0` as a peer dependency and Node.js ≥ 22.13 (uses the built-in `node:sqlite` module).
+Requires `openclaw >= 2026.4.15` as a peer dependency and Node.js ≥ 22.13 (uses the built-in `node:sqlite` module).
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 
+### Required openclaw config (openclaw ≥ 2026.4.24)
+
+Starting in openclaw `2026.4.24`, non-bundled plugins must explicitly opt in to receive raw conversation content from the `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end` hooks. Without this opt-in, openclaw silently drops those hook registrations and three of the audit plugin's most important event types (`prompt.input`, `prompt.response`, `agent.end`) will be missing from the audit trail.
+
+Add the following to your openclaw configuration:
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess true
+```
+
+Or directly in the config JSON:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+The plugin logs a warning at startup if a tool call is observed without any preceding `llm_input` event, which usually indicates this opt-in is missing. The plugin cannot self-grant this — `allowConversationAccess` is an operator policy decision per openclaw's design.
+
 ### Configuration (optional)
 
-Add config under `plugins.entries` in your OpenClaw configuration:
+Set values via the CLI:
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.enabled true
+openclaw config set plugins.entries.constellation-audit-plugin.config.dbPath "~/.openclaw/audit.db"
+openclaw config set plugins.entries.constellation-audit-plugin.config.localRetentionDays 365
+openclaw config set plugins.entries.constellation-audit-plugin.config.localMaxSizeMb 500
+```
+
+Or directly in the config JSON:
 
 ```json
 {
@@ -65,7 +100,14 @@ Hashes allow independent verification — anyone with the original plaintext can
 
 #### Sparse Merkle Tree
 
-Nested under the `smt` key:
+Nested under the `smt` key. Set values via the CLI:
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.smt.treeKey "auto"
+openclaw config set plugins.entries.constellation-audit-plugin.config.smt.maxTreeSize 500000
+```
+
+Or directly in the config JSON:
 
 ```json
 {
@@ -177,7 +219,7 @@ The file should contain a SECP256K1 private key (64-char hex). Organization and 
 
 ## What gets recorded
 
-The plugin hooks into 25 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
+The plugin hooks into 26 OpenClaw lifecycle hooks and records them into the audit trail. Full message/prompt content is stored gzipped; metadata contains a 50-char preview.
 
 Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) in tool arguments are automatically redacted before storage.
 
@@ -194,10 +236,10 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `agent.end` | `agent_end` | duration (ms), success |
-| `agent.compaction_start` | `before_compaction` | message count, compacting count, token count |
-| `agent.compaction_end` | `after_compaction` | message count, compacted count, token count |
-| `agent.reset` | `before_reset` | reason |
+| `agent.end` | `agent_end` | duration (ms), success, run ID, job ID, model provider/id |
+| `agent.compaction_start` | `before_compaction` | message count, compacting count, token count, session file |
+| `agent.compaction_end` | `after_compaction` | message count, compacted count, token count, session file |
+| `agent.reset` | `before_reset` | reason, session file |
 | `agent.subagent_spawning` | `subagent_spawning` | agent ID, child session key, label, mode |
 | `agent.subagent_spawned` | `subagent_spawned` | agent ID, child session key, run ID, label, mode |
 | `agent.subagent_delivery` | `subagent_delivery_target` | child/requester session keys, spawn mode, delivery channel/target |
@@ -218,8 +260,8 @@ Sensitive values (`secret`, `password`, `token`, `apiKey`, `auth`, `credential`,
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `cron.executed` | `before_model_resolve` | agent ID, run ID, prompt length |
-| `cron.failed` | `agent_end` | agent ID, run ID, duration (ms), error |
+| `cron.executed` | `before_model_resolve` | agent ID, run ID, job ID, prompt length |
+| `cron.failed` | `agent_end` | agent ID, run ID, job ID, duration (ms), error |
 
 Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` marks the start of a cron-triggered run; it is not guaranteed to be paired with a `cron.failed` or `agent.end` if the process exits abnormally before the run completes.
 
@@ -227,10 +269,10 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 
 | Event type | Hook | Metadata captured |
 |---|---|---|
-| `message.received` | `message_received` | direction, sender (with fallback chain), channel, account, surface, content length, timestamp, content (gzipped) |
-| `message.sending` | `message_sending` | direction, recipient, channel, content length, content (gzipped) |
-| `message.sent` | `message_sent` | direction, recipient, channel, account, content length, success, error, timestamp, content (gzipped) |
-| `message.claimed` | `inbound_claim` | channel, sender ID/name, is group, content length |
+| `message.received` | `message_received` | direction, sender (with fallback chain), sender ID, channel, account, session key, run ID, thread ID, message ID, surface, content length, timestamp, content (gzipped) |
+| `message.sending` | `message_sending` | direction, recipient, channel, session key, run ID, reply-to ID, thread ID, content length, content (gzipped) |
+| `message.sent` | `message_sent` | direction, recipient, channel, account, session key, run ID, message ID, content length, success, error, timestamp, content (gzipped) |
+| `message.claimed` | `inbound_claim` | channel, sender ID/name, is group, session key, run ID, thread ID, message ID, content length |
 | `message.dispatched` | `before_dispatch` | channel, sender ID, is group, content length |
 | `message.write` | `before_message_write` | agent ID |
 
@@ -239,7 +281,7 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 | Event type | Hook | Metadata captured |
 |---|---|---|
 | `session.start` | `session_start` | session key, resumed from |
-| `session.end` | `session_end` | session key, message count, duration (ms) |
+| `session.end` | `session_end` | session key, message count, duration (ms), reason, session file, transcript archived, next session id/key |
 
 ### Gateway events
 
@@ -247,6 +289,14 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 |---|---|---|
 | `gateway.start` | `gateway_start` | port |
 | `gateway.stop` | `gateway_stop` | reason |
+
+### System events
+
+| Event type | Hook | Metadata captured |
+|---|---|---|
+| `system.install` | `before_install` | target type (skill/plugin), target name, source path, request kind, plugin/skill identifiers, scan summary (files, critical/warn/info counts) |
+
+`system.install` records every plugin or skill install/update intercepted by openclaw's install pipeline, including the built-in security scan summary. Captures who installed what so unexpected supply-chain events leave an audit-trail signal. Hook is non-decisive — the plugin observes only and never blocks.
 
 ## CLI commands
 

@@ -47,7 +47,8 @@ export type EventType =
   | "config.soul_changed"
   | "config.cron_changed"
   | "security.scan_result"
-  | "system.file_changed";
+  | "system.file_changed"
+  | "system.install";
 
 export type ConfigChangeType = "added" | "modified" | "removed";
 

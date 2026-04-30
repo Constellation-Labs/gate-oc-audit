@@ -37,7 +37,7 @@
   },
   "peerDependencies": {
     "ethers": "^6.0.0",
-    "openclaw": ">=2026.1.0"
+    "openclaw": ">=2026.4.15"
   },
   "peerDependenciesMeta": {
     "ethers": {
@@ -49,8 +49,8 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.1.0",
-      "minGatewayVersion": "2026.1.0"
+      "pluginApi": ">=2026.4.15",
+      "minGatewayVersion": "2026.4.15"
     },
     "build": {
       "openclawVersion": "2026.4.1",

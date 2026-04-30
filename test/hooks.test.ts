@@ -156,8 +156,8 @@ describe("registerHooks", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("registers 25 lifecycle hooks", () => {
-    assert.equal(api.hooks.size, 25);
+  it("registers 26 lifecycle hooks", () => {
+    assert.equal(api.hooks.size, 26);
     for (const name of [
       "before_model_resolve", "before_prompt_build",
       "agent_end",
@@ -169,6 +169,7 @@ describe("registerHooks", () => {
       "session_start", "session_end",
       "subagent_spawning", "subagent_spawned", "subagent_delivery_target", "subagent_ended",
       "gateway_start", "gateway_stop",
+      "before_install",
     ]) {
       assert.ok(api.hooks.has(name), `Missing hook: ${name}`);
     }
@@ -217,7 +218,7 @@ describe("registerHooks", () => {
     it("emits cron.executed alongside prompt.model_resolve when trigger is cron", () => {
       fireHook(api, "before_model_resolve",
         { prompt: "scheduled work" },
-        { sessionId: "s1", agentId: "a1", runId: "r1", trigger: "cron" },
+        { sessionId: "s1", agentId: "a1", runId: "r1", jobId: "job-42", trigger: "cron" },
       );
       const events = getEvents(dbPath);
       const cronEvent = events.find((e) => e.event_type === "cron.executed");
@@ -227,6 +228,7 @@ describe("registerHooks", () => {
       const meta = JSON.parse(cronEvent.metadata);
       assert.equal(meta.agentId, "a1");
       assert.equal(meta.runId, "r1");
+      assert.equal(meta.jobId, "job-42");
       assert.equal(meta.promptLength, 14);
     });
   });
@@ -244,6 +246,19 @@ describe("registerHooks", () => {
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.durationMs, 5000);
       assert.equal(meta.success, true);
+    });
+
+    it("captures runId, jobId and model identity from agent context", () => {
+      fireHook(api, "agent_end",
+        { durationMs: 1000, success: true, messages: [] },
+        { sessionId: "s1", runId: "r-9", jobId: "j-3", modelProviderId: "anthropic", modelId: "claude-opus-4-7" },
+      );
+      const events = getEvents(dbPath);
+      const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.runId, "r-9");
+      assert.equal(meta.jobId, "j-3");
+      assert.equal(meta.modelProviderId, "anthropic");
+      assert.equal(meta.modelId, "claude-opus-4-7");
     });
 
     it("does not emit cron.failed when trigger is cron but success is true", () => {
@@ -267,7 +282,7 @@ describe("registerHooks", () => {
     it("emits cron.failed alongside agent.end when cron run fails", () => {
       fireHook(api, "agent_end",
         { durationMs: 250, success: false, error: "timeout", messages: [] },
-        { sessionId: "s1", agentId: "a1", runId: "r1", trigger: "cron" },
+        { sessionId: "s1", agentId: "a1", runId: "r1", jobId: "job-7", trigger: "cron" },
       );
       const events = getEvents(dbPath);
       const cronEvent = events.find((e) => e.event_type === "cron.failed");
@@ -277,6 +292,7 @@ describe("registerHooks", () => {
       const meta = JSON.parse(cronEvent.metadata);
       assert.equal(meta.agentId, "a1");
       assert.equal(meta.runId, "r1");
+      assert.equal(meta.jobId, "job-7");
       assert.equal(meta.durationMs, 250);
       assert.equal(meta.error, "timeout");
     });
@@ -439,6 +455,19 @@ describe("registerHooks", () => {
 
       assert.equal(gunzipSync(row.content_gz).toString(), content);
     });
+
+    it("captures threadId, messageId, senderId, sessionKey, runId correlation fields", () => {
+      fireHook(api, "message_received",
+        { from: "u1", content: "hi", threadId: 12345, messageId: "m-9", senderId: "u1" },
+        { channelId: "telegram", conversationId: "c-1", sessionKey: "sk-1", runId: "r-1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.threadId, 12345);
+      assert.equal(meta.messageId, "m-9");
+      assert.equal(meta.senderId, "u1");
+      assert.equal(meta.sessionKey, "sk-1");
+      assert.equal(meta.runId, "r-1");
+    });
   });
 
   describe("message_sent", () => {
@@ -473,6 +502,17 @@ describe("registerHooks", () => {
       assert.ok(row.content_gz);
 
       assert.equal(gunzipSync(row.content_gz).toString(), content);
+    });
+
+    it("captures messageId, sessionKey, runId correlation fields", () => {
+      fireHook(api, "message_sent",
+        { to: "u1", content: "hi", success: true, messageId: "out-7" },
+        { channelId: "discord", sessionKey: "sk-2", runId: "r-2" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.messageId, "out-7");
+      assert.equal(meta.sessionKey, "sk-2");
+      assert.equal(meta.runId, "r-2");
     });
   });
 
@@ -566,6 +606,18 @@ describe("registerHooks", () => {
       assert.equal(meta.channel, "discord");
       assert.equal(meta.contentLength, 11);
     });
+
+    it("captures replyToId, threadId, sessionKey, runId correlation fields", () => {
+      fireHook(api, "message_sending",
+        { to: "u1", content: "reply", replyToId: "msg-99", threadId: 42 },
+        { channelId: "slack", sessionKey: "sk-3", runId: "r-3" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.replyToId, "msg-99");
+      assert.equal(meta.threadId, 42);
+      assert.equal(meta.sessionKey, "sk-3");
+      assert.equal(meta.runId, "r-3");
+    });
   });
 
   describe("inbound_claim", () => {
@@ -583,6 +635,18 @@ describe("registerHooks", () => {
       assert.equal(meta.senderName, "Alice");
       assert.equal(meta.isGroup, false);
       assert.equal(meta.contentLength, 2);
+    });
+
+    it("captures threadId, messageId, sessionKey, runId correlation fields", () => {
+      fireHook(api, "inbound_claim",
+        { content: "hi", channel: "telegram", senderId: "u1", isGroup: false, threadId: 7, messageId: "m-1" },
+        { channelId: "telegram", conversationId: "c1", sessionKey: "sk-4", runId: "r-4" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.threadId, 7);
+      assert.equal(meta.messageId, "m-1");
+      assert.equal(meta.sessionKey, "sk-4");
+      assert.equal(meta.runId, "r-4");
     });
   });
 
@@ -631,6 +695,15 @@ describe("registerHooks", () => {
       assert.equal(meta.compactingCount, 80);
       assert.equal(meta.tokenCount, 50000);
     });
+
+    it("captures sessionFile when openclaw provides it", () => {
+      fireHook(api, "before_compaction",
+        { messageCount: 1, sessionFile: "/var/openclaw/session-1.jsonl" },
+        { sessionId: "s1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sessionFile, "/var/openclaw/session-1.jsonl");
+    });
   });
 
   describe("after_compaction", () => {
@@ -646,6 +719,15 @@ describe("registerHooks", () => {
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.compactedCount, 80);
     });
+
+    it("captures sessionFile when openclaw provides it", () => {
+      fireHook(api, "after_compaction",
+        { messageCount: 1, compactedCount: 1, sessionFile: "/var/openclaw/session-1.jsonl" },
+        { sessionId: "s1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sessionFile, "/var/openclaw/session-1.jsonl");
+    });
   });
 
   describe("before_reset", () => {
@@ -659,6 +741,15 @@ describe("registerHooks", () => {
       assert.equal(events[0].event_type, "agent.reset");
       assert.ok(events[0].description.includes("user-requested"));
       assert.equal(JSON.parse(events[0].metadata).reason, "user-requested");
+    });
+
+    it("captures sessionFile when openclaw provides it", () => {
+      fireHook(api, "before_reset",
+        { reason: "idle-timeout", sessionFile: "/var/openclaw/session-1.jsonl" },
+        { sessionId: "s1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.sessionFile, "/var/openclaw/session-1.jsonl");
     });
 
     it("handles missing reason", () => {
@@ -695,6 +786,92 @@ describe("registerHooks", () => {
       const meta = JSON.parse(events[0].metadata);
       assert.equal(meta.messageCount, 42);
       assert.equal(meta.durationMs, 30000);
+    });
+
+    it("captures reason and successor session info when openclaw provides them", () => {
+      fireHook(api, "session_end",
+        {
+          sessionId: "sess-1",
+          sessionKey: "sk-1",
+          messageCount: 7,
+          durationMs: 4000,
+          reason: "reset",
+          sessionFile: "/var/openclaw/sess-1.jsonl",
+          transcriptArchived: true,
+          nextSessionId: "sess-2",
+          nextSessionKey: "sk-2",
+        },
+        { sessionId: "sess-1" },
+      );
+
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "session.end");
+      assert.ok(events[0].description.includes("reset"));
+      const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.reason, "reset");
+      assert.equal(meta.sessionFile, "/var/openclaw/sess-1.jsonl");
+      assert.equal(meta.transcriptArchived, true);
+      assert.equal(meta.nextSessionId, "sess-2");
+      assert.equal(meta.nextSessionKey, "sk-2");
+    });
+  });
+
+  describe("before_install", () => {
+    it("records system.install with target, request, plugin, and scan summary", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          targetName: "@example/cool-plugin",
+          sourcePath: "/tmp/cool-plugin",
+          sourcePathKind: "directory",
+          origin: "npm",
+          request: { kind: "plugin-npm", mode: "install", requestedSpecifier: "@example/cool-plugin@1.2.3" },
+          builtinScan: { status: "ok", scannedFiles: 12, critical: 0, warn: 1, info: 3, findings: [] },
+          plugin: { pluginId: "cool", contentType: "package", packageName: "@example/cool-plugin", version: "1.2.3" },
+        },
+        { targetType: "plugin", requestKind: "plugin-npm", origin: "npm" },
+      );
+
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "system.install");
+      assert.equal(events[0].category, "system");
+      assert.ok(events[0].description.includes("install"));
+      assert.ok(events[0].description.includes("@example/cool-plugin"));
+      const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.targetType, "plugin");
+      assert.equal(meta.targetName, "@example/cool-plugin");
+      assert.equal(meta.requestKind, "plugin-npm");
+      assert.equal(meta.requestMode, "install");
+      assert.equal(meta.requestedSpecifier, "@example/cool-plugin@1.2.3");
+      assert.equal(meta.pluginId, "cool");
+      assert.equal(meta.packageName, "@example/cool-plugin");
+      assert.equal(meta.version, "1.2.3");
+      assert.equal(meta.scanStatus, "ok");
+      assert.equal(meta.scannedFiles, 12);
+      assert.equal(meta.scanCritical, 0);
+      assert.equal(meta.scanWarn, 1);
+      assert.equal(meta.scanInfo, 3);
+    });
+
+    it("records skill installs with installId", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "skill",
+          targetName: "code-search",
+          sourcePath: "/tmp/code-search",
+          sourcePathKind: "directory",
+          request: { kind: "skill-install", mode: "install" },
+          builtinScan: { status: "ok", scannedFiles: 4, critical: 0, warn: 0, info: 0, findings: [] },
+          skill: { installId: "install-abc" },
+        },
+        {},
+      );
+
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "system.install");
+      const meta = JSON.parse(events[0].metadata);
+      assert.equal(meta.targetType, "skill");
+      assert.equal(meta.installId, "install-abc");
     });
   });
 
