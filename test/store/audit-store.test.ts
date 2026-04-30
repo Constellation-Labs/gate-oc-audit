@@ -108,10 +108,11 @@ describe("AuditStore", () => {
       const returnedMd = result.metadata as Record<string, unknown>;
       assert.deepEqual(returnedMd, persistedMd,
         "returned and persisted metadata must be identical (regression guard)");
-      assert.equal(persistedMd.metadataDropped, true);
-      assert.equal(persistedMd.reason, "size-cap");
-      assert.ok(typeof persistedMd.originalSize === "number"
-        && persistedMd.originalSize > 1024 * 1024);
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker, "marker must live under reserved $auditTruncation key");
+      assert.equal(marker.reason, "size-cap");
+      assert.ok(typeof marker.originalSize === "number"
+        && marker.originalSize > 1024 * 1024);
       assert.equal("big" in persistedMd, false, "oversized field must not survive truncation");
     });
 
@@ -127,8 +128,9 @@ describe("AuditStore", () => {
       const returnedMd = result.metadata as Record<string, unknown>;
       assert.deepEqual(returnedMd, persistedMd,
         "returned and persisted metadata must be identical (regression guard)");
-      assert.equal(persistedMd.metadataDropped, true);
-      assert.equal(persistedMd.reason, "non-serializable");
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker, "marker must live under reserved $auditTruncation key");
+      assert.equal(marker.reason, "non-serializable");
     });
   });
 

@@ -72,14 +72,24 @@ function resolveRecipient(evt: { to?: string }): string {
  * and spuriously warn after `llm_input` was already observed on a prior
  * instance. The warning fires at most once per process.
  */
-const llmInputObserved = { value: false };
+let llmInputObserved = false;
 let conversationAccessWarned = false;
+
+// Test-only hook: clear module-scope warning state so unit tests can pin
+// fire-once behavior without leaking across test files. Not exported as a
+// public API; reset() is intentionally narrow.
+export function _resetConversationAccessWarningStateForTests(): void {
+  llmInputObserved = false;
+  conversationAccessWarned = false;
+}
 
 const CONVERSATION_ACCESS_WARNING =
   "[audit-plugin] tool.invoked observed without any preceding llm_input — " +
-  "openclaw may have dropped llm_input/llm_output/agent_end registrations. " +
-  "Set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true " +
-  "(see README.md). Fires once per process.";
+  "either (a) openclaw 2026.4.24+ dropped the conversation hook registrations " +
+  "because the operator opt-in is missing (set " +
+  "plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true), " +
+  "or (b) the tool was invoked outside a normal LLM turn. See README.md. " +
+  "Fires once per process.";
 
 /**
  * Module-scope cast aliases for fields openclaw 2026.4.x added to existing
@@ -125,7 +135,7 @@ type SessionEndEvtExtra = SessionFileEvt & {
 const DESCRIPTION_MAX = 256;
 // Strip CR/LF/TAB and other C0/DEL control chars so attacker-controlled fields
 // cannot forge or split log lines; preserves printable Unicode.
-const CONTROL_CHARS = /[\x00-\x1F\x7F]/g;
+const CONTROL_CHARS = /[\x00-\x1F\x7F\u2028\u2029]/g;
 function safeDesc(value: unknown): string {
   if (value === undefined || value === null) return "";
   const str = String(value).replace(CONTROL_CHARS, " ");
@@ -247,7 +257,7 @@ export function registerHooks(
   api.on(
     "before_tool_call",
     (evt, ctx) => {
-      if (!llmInputObserved.value && !conversationAccessWarned) {
+      if (!llmInputObserved && !conversationAccessWarned) {
         conversationAccessWarned = true;
         console.warn(CONVERSATION_ACCESS_WARNING);
       }
@@ -321,7 +331,7 @@ export function registerHooks(
   api.on(
     "llm_input",
     (evt, ctx) => {
-      llmInputObserved.value = true;
+      llmInputObserved = true;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.input",
@@ -519,7 +529,8 @@ export function registerHooks(
 
   api.on(
     "before_compaction",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_start",
@@ -529,15 +540,17 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactingCount: evt.compactingCount,
           tokenCount: evt.tokenCount,
-          sessionFile: (evt as typeof evt & SessionFileEvt).sessionFile,
+          sessionFile: e.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "after_compaction",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_end",
@@ -547,15 +560,17 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactedCount: evt.compactedCount,
           tokenCount: evt.tokenCount,
-          sessionFile: (evt as typeof evt & SessionFileEvt).sessionFile,
+          sessionFile: e.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "before_reset",
-    (evt, ctx) =>
+    (evt, ctx) => {
+      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.reset",
@@ -563,9 +578,10 @@ export function registerHooks(
         description: `Session reset: ${safeDesc(evt.reason ?? "unknown")}`,
         metadata: {
           reason: evt.reason,
-          sessionFile: (evt as typeof evt & SessionFileEvt).sessionFile,
+          sessionFile: e.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 

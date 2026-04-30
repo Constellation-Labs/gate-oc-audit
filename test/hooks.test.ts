@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../src/store/audit-store.js";
-import { sanitizeArgs, registerHooks } from "../src/hooks.js";
+import { sanitizeArgs, registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 const require2 = createRequire(import.meta.url);
@@ -148,6 +148,12 @@ describe("registerHooks", () => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
+    // The conversation-access warning state lives in module scope so that
+    // openclaw's legitimate re-registration on a fresh api instance doesn't
+    // reset the fire-once guard. Tests must reset it themselves to avoid
+    // bleed-over from earlier cases that fired before_tool_call without
+    // a prior llm_input.
+    _resetConversationAccessWarningStateForTests();
     registerHooks(api, store);
   });
 
@@ -179,6 +185,76 @@ describe("registerHooks", () => {
     for (const [name, { options }] of api.hooks) {
       assert.equal(options?.priority, 200, `${name} should have priority 200`);
     }
+  });
+
+  describe("conversation-access warning", () => {
+    function captureWarn<T>(fn: () => T): { result: T; warnings: string[] } {
+      const warnings: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(" "));
+      };
+      try {
+        return { result: fn(), warnings };
+      } finally {
+        console.warn = original;
+      }
+    }
+
+    it("fires once when before_tool_call happens with no prior llm_input", () => {
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 1, "expected exactly one warning");
+      assert.ok(
+        warnings[0].includes("allowConversationAccess"),
+        "warning should reference the operator opt-in key",
+      );
+    });
+
+    it("does not fire again on subsequent tool calls in the same process", () => {
+      // Trigger the first warning.
+      captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      // Subsequent tool calls must NOT log again.
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Bash", params: {} },
+          { sessionId: "s1" },
+        );
+        fireHook(api, "before_tool_call",
+          { toolName: "Grep", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 0, "warning must fire at most once per process");
+    });
+
+    it("does not fire when llm_input is observed before any tool call", () => {
+      // Observe llm_input first — the normal happy path on a correctly
+      // configured openclaw instance.
+      fireHook(api, "llm_input",
+        {
+          provider: "anthropic", model: "claude",
+          prompt: "hello", historyMessages: [], imagesCount: 0,
+        },
+        { sessionId: "s1" },
+      );
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 0, "no warning when llm_input was already seen");
+    });
   });
 
   describe("before_model_resolve", () => {
