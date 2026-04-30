@@ -1327,7 +1327,7 @@ describe("e2e: oversized metadata is recorded with a truncation marker rather th
   before(async () => { rig = await createRig(); });
   after(async () => { await destroyRig(rig); });
 
-  it("preserves the audit signal when sender-controlled fields blow past the 1MB metadata cap", () => {
+  it("preserves the audit signal AND keeps the SMT proof valid when sender-controlled fields blow past the 1MB metadata cap", () => {
     // A hostile install request stuffs >1MB into a sender-controlled scalar.
     const hostileSpecifier = "x".repeat(1024 * 1024 + 100);
     fire(rig.api, "before_install",
@@ -1355,7 +1355,20 @@ describe("e2e: oversized metadata is recorded with a truncation marker rather th
     assert.ok(typeof meta.originalSize === "number");
     assert.equal("requestedSpecifier" in meta, false,
       "oversized field must not survive truncation");
+
+    // Tamper-evidence regression guard: SMT membership proof must still
+    // verify against the persisted row. Earlier versions of this code
+    // returned the original metadata to the SMT pipeline while persisting
+    // the marker, producing a hash mismatch that broke proofs for every
+    // truncated row.
+    const knownRoots = rig.smt.getKnownRoots(rig.store.getCheckpointedRoots());
+    const rawHash = rig.smt.computeRawHash(events[0]);
+    const proof = rig.smt.createProof(rawHash);
+    assert.ok(proof?.membership,
+      "expected membership proof for the truncated row — store and SMT diverged");
+    assert.equal(rig.smt.verifyProofWithRoots(proof!, knownRoots).status, "valid");
   });
+
 });
 
 describe("e2e: every PluginHookName is registered and exercised", () => {

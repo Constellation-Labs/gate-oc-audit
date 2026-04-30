@@ -249,32 +249,36 @@ export class AuditStore {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
 
+      // The "effective" metadata is what we both persist AND return on the
+      // AuditEvent — they MUST be the same object so downstream consumers
+      // (SMT hashing, future verifiers reading rows back from SQLite) all
+      // compute the same hash. Earlier versions persisted a marker but
+      // returned the original, which made SMT proofs fail for truncated rows.
+      let effectiveMetadata: Record<string, unknown> = insert.metadata;
       let metadataCanonical: string;
       try {
         metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
-        // Truncate-and-record: a non-serializable metadata payload would be a
-        // forensic signal we don't want to lose. Keep the row with a marker.
+        // A non-serializable metadata payload would be a forensic signal we
+        // don't want to lose. Replace with a marker so the row survives.
         console.error("[audit-plugin] Metadata is not serializable, recording marker");
-        metadataCanonical = sdk.canonicalize({
-          metadataDropped: true,
-          reason: "non-serializable",
-        });
+        effectiveMetadata = { metadataDropped: true, reason: "non-serializable" };
+        metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
 
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
         // Sender-controlled fields (messageId, sourcePath, requestedSpecifier,
         // etc.) could otherwise erase the very event that records the abuse.
-        // Drop the metadata payload but preserve the event so the audit trail
-        // still records that something happened.
+        // Drop the metadata payload but preserve the event.
         console.error(
           `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
         );
-        metadataCanonical = sdk.canonicalize({
+        effectiveMetadata = {
           metadataDropped: true,
           reason: "size-cap",
           originalSize: metadataCanonical.length,
-        });
+        };
+        metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
 
       const nextSequence = this.sequence + 1;
@@ -318,7 +322,7 @@ export class AuditStore {
         eventType: insert.eventType,
         category: insert.category,
         description: insert.description,
-        metadata: insert.metadata,
+        metadata: effectiveMetadata,
         content: rawContent,
         createdAt,
       };
