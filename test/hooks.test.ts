@@ -991,6 +991,80 @@ describe("registerHooks", () => {
       assert.ok((meta.targetName as string).includes("\n"),
         "metadata preserves the unsanitized payload for forensics");
     });
+
+    it("strips C1 control bytes and U+2028/U+2029 line terminators", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          // \x9B is single-byte CSI; 8-bit-CSI-aware terminals would interpret it.
+          // \u2028 is JS LINE SEPARATOR.
+          targetName: "evil\x9B2J\u2028[audit-plugin] FAKE",
+          sourcePath: "/tmp/evil",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events[0].description.includes("\x9B"), false,
+        "description must not contain C1 CSI (would drive 8-bit-aware terminals)");
+      assert.equal(events[0].description.includes("\u2028"), false,
+        "description must not contain U+2028 (JS line terminator)");
+    });
+
+    it("does not leave a lone high surrogate when a non-BMP char straddles the 256-char clamp", () => {
+      // 254 chars of "a", then U+1F600 (😀, 2 UTF-16 code units, lands at indexes 254-255),
+      // then padding so the input length triggers the clamp.
+      // Without surrogate-aware trim, slice(0, 255) keeps the high surrogate
+      // (U+D83D) alone — SQLite stores invalid UTF-8 and round-trips U+FFFD.
+      const targetName = "a".repeat(254) + "\u{1F600}" + "b".repeat(20);
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          targetName,
+          sourcePath: "/tmp/x",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      const description: string = events[0].description;
+      // No lone high surrogates anywhere in the persisted description.
+      for (let i = 0; i < description.length; i++) {
+        const code = description.charCodeAt(i);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const next = description.charCodeAt(i + 1);
+          assert.ok(next >= 0xdc00 && next <= 0xdfff,
+            `lone high surrogate at index ${i} (would round-trip to U+FFFD)`);
+        }
+      }
+      // And the read-back string does NOT contain U+FFFD (replacement char),
+      // which is what an unpaired surrogate would round-trip as.
+      assert.equal(description.includes("�"), false,
+        "round-tripped description must not contain U+FFFD");
+    });
+
+    it("clamps the total composed description, not just each interpolated slot", () => {
+      // safeDesc clamps each slot to 256, but `Install ${mode}: ${target} ${name}`
+      // composes three near-256-char slots into ~770 chars without a composite cap.
+      fireHook(api, "before_install",
+        {
+          targetType: "x".repeat(300),
+          targetName: "y".repeat(300),
+          sourcePath: "/tmp/x",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "z".repeat(300) },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.ok(events[0].description.length <= 256,
+        `composite description length ${events[0].description.length} exceeds 256`);
+    });
   });
 
   describe("subagent_spawning", () => {

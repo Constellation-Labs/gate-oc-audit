@@ -96,7 +96,7 @@ const CONVERSATION_ACCESS_WARNING =
  * event/context shapes but hasn't yet typed in the SDK we build against.
  * Centralized so that, when the SDK catches up, deletion is a single place.
  * Do NOT add fields here without verifying they exist in the openclaw types
- * the plugin expects to load against (peer floor: `>=2026.4.15`).
+ * the plugin expects to load against (peer floor: `>=2026.4.24`).
  */
 type AgentCtxExtra = {
   jobId?: string;
@@ -115,10 +115,11 @@ type MessageEvtExtra = {
   sessionKey?: string;
   runId?: string;
 };
-type SessionFileEvt = {
+// PluginHookSessionEndEvent is the only session event whose `sessionFile`,
+// `reason`, etc. the SDK does not yet type. The compaction/reset events do
+// declare `sessionFile`, so we read those directly without a cast.
+type SessionEndEvtExtra = {
   sessionFile?: string;
-};
-type SessionEndEvtExtra = SessionFileEvt & {
   reason?: string;
   transcriptArchived?: boolean;
   nextSessionId?: string;
@@ -127,19 +128,44 @@ type SessionEndEvtExtra = SessionFileEvt & {
 
 /**
  * Sanitize a string before interpolating into an event description. Strips
- * CR/LF and ASCII control chars (which would otherwise let attacker-controlled
- * fields like `targetName` forge log lines or split rows when piped to a
- * terminal/log aggregator) and clamps length so a hostile input can't bloat
- * the description column.
+ * control bytes (which would otherwise let attacker-controlled fields like
+ * `targetName` forge log lines, drive 8-bit-CSI-aware terminals, or split
+ * rows when piped to a log aggregator) and clamps length so a hostile input
+ * can't bloat the description column.
+ *
+ * Complementary to `sanitize()`, which redacts by key in metadata; this
+ * scrubs by value in descriptions.
  */
 const DESCRIPTION_MAX = 256;
-// Strip CR/LF/TAB and other C0/DEL control chars so attacker-controlled fields
-// cannot forge or split log lines; preserves printable Unicode.
-const CONTROL_CHARS = /[\x00-\x1F\x7F\u2028\u2029]/g;
+// Strip C0 (\x00-\x1F), DEL (\x7F), C1 (\x80-\x9F — \x9B is single-byte CSI),
+// and the JS line-terminator code points U+2028/U+2029 so attacker-controlled
+// fields cannot forge or split log lines or drive a terminal escape.
+const CONTROL_CHARS = /[\x00-\x1F\x7F-\x9F\u2028\u2029]/g;
 function safeDesc(value: unknown): string {
   if (value === undefined || value === null) return "";
   const str = String(value).replace(CONTROL_CHARS, " ");
-  return str.length > DESCRIPTION_MAX ? str.slice(0, DESCRIPTION_MAX - 1) + "…" : str;
+  if (str.length <= DESCRIPTION_MAX) return str;
+  // slice() operates on UTF-16 code units. If the cut lands between a
+  // surrogate pair, drop the orphan high surrogate so SQLite (UTF-8) doesn't
+  // round-trip it as U+FFFD on read-back, which would diverge the in-memory
+  // and persisted hashes — the same SMT-vs-DB invariant AuditStore.append
+  // protects on the metadata column.
+  let end = DESCRIPTION_MAX - 1;
+  const code = str.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return str.slice(0, end) + "…";
+}
+
+// Clamp a fully composed description string. `safeDesc` clamps each
+// interpolated slot to 256 chars; `safeComposite` clamps the *total* so a
+// pathological multi-slot template (e.g. install: mode + target + name) can't
+// exceed the column's intended budget.
+function safeComposite(value: string): string {
+  if (value.length <= DESCRIPTION_MAX) return value;
+  let end = DESCRIPTION_MAX - 1;
+  const code = value.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return value.slice(0, end) + "…";
 }
 
 export function registerHooks(
@@ -362,7 +388,7 @@ export function registerHooks(
         sessionId: ctx.conversationId,
         eventType: "message.received",
         category: "message",
-        description: `Inbound from ${safeDesc(sender)} on ${safeDesc(ctx.channelId)}`,
+        description: safeComposite(`Inbound from ${safeDesc(sender)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "in",
           sender,
@@ -393,7 +419,7 @@ export function registerHooks(
         sessionId: ctx.conversationId,
         eventType: "message.sent",
         category: "message",
-        description: `Outbound to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`,
+        description: safeComposite(`Outbound to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "out",
           recipient,
@@ -423,7 +449,7 @@ export function registerHooks(
         sessionId: ctx.conversationId,
         eventType: "message.sending",
         category: "message",
-        description: `Sending to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`,
+        description: safeComposite(`Sending to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "out",
           recipient,
@@ -459,7 +485,7 @@ export function registerHooks(
           senderId: evt.senderId,
           senderName: evt.senderName,
           isGroup: evt.isGroup,
-          parentConversationId: ctx.parentConversationId,
+          parentConversationId: ctx.parentConversationId ?? evt.parentConversationId,
           sessionKey: c.sessionKey ?? e.sessionKey,
           runId: c.runId ?? e.runId,
           threadId: e.threadId,
@@ -530,7 +556,6 @@ export function registerHooks(
   api.on(
     "before_compaction",
     (evt, ctx) => {
-      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_start",
@@ -540,7 +565,7 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactingCount: evt.compactingCount,
           tokenCount: evt.tokenCount,
-          sessionFile: e.sessionFile,
+          sessionFile: evt.sessionFile,
         },
       });
     },
@@ -550,7 +575,6 @@ export function registerHooks(
   api.on(
     "after_compaction",
     (evt, ctx) => {
-      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_end",
@@ -560,7 +584,7 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactedCount: evt.compactedCount,
           tokenCount: evt.tokenCount,
-          sessionFile: e.sessionFile,
+          sessionFile: evt.sessionFile,
         },
       });
     },
@@ -570,7 +594,6 @@ export function registerHooks(
   api.on(
     "before_reset",
     (evt, ctx) => {
-      const e = evt as typeof evt & SessionFileEvt;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.reset",
@@ -578,7 +601,7 @@ export function registerHooks(
         description: `Session reset: ${safeDesc(evt.reason ?? "unknown")}`,
         metadata: {
           reason: evt.reason,
-          sessionFile: e.sessionFile,
+          sessionFile: evt.sessionFile,
         },
       });
     },
@@ -607,13 +630,13 @@ export function registerHooks(
     "session_end",
     (evt, ctx) => {
       const e = evt as typeof evt & SessionEndEvtExtra;
-      const hasReason = e.reason != null && e.reason !== "";
+      const hasReason = e.reason != null && e.reason !== "unknown";
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
         description: hasReason
-          ? `Session ended (${safeDesc(e.reason)}): ${safeDesc(evt.sessionId)}`
+          ? safeComposite(`Session ended (${safeDesc(e.reason)}): ${safeDesc(evt.sessionId)}`)
           : `Session ended: ${safeDesc(evt.sessionId)}`,
         metadata: {
           sessionKey: evt.sessionKey,
@@ -736,13 +759,15 @@ export function registerHooks(
   );
 
   // --- Install pipeline ---
-  // before_install lands in openclaw >=2026.4.15 (matching this plugin's peer
-  // floor). On older runtimes that we may still encounter via mixed-version
-  // operator setups, openclaw warns "unknown typed hook" and silently skips
-  // the registration without throwing. The try/catch is a defense-in-depth
-  // guard against future runtimes that throw on unknown hooks; on the warn-
-  // and-skip path it never fires. Either way, an audit row is emitted so the
-  // operator's log shows that install auditing did or did not start.
+  // before_install lands in openclaw >=2026.4.15; this plugin's peer floor is
+  // >=2026.4.24 (gated by allowConversationAccess), so the runtime should
+  // always recognize this hook. On older runtimes that we may still encounter
+  // via mixed-version operator setups, openclaw warns "unknown typed hook"
+  // and silently skips the registration without throwing. The try/catch is a
+  // defense-in-depth guard against future runtimes that throw on unknown
+  // hooks; on the warn-and-skip path it never fires. Either way, an audit
+  // row is emitted so the operator's log shows that install auditing did or
+  // did not start.
   try {
     (api.on as unknown as (
       name: string,
@@ -764,7 +789,9 @@ export function registerHooks(
         safeAppend({
           eventType: "system.install",
           category: "system",
-          description: `Install ${safeDesc(request?.mode ?? "request")}: ${safeDesc(target)} ${safeDesc(name)}`,
+          description: safeComposite(
+            `Install ${safeDesc(request?.mode ?? "request")}: ${safeDesc(target)} ${safeDesc(name)}`,
+          ),
           metadata: {
             targetType: target,
             targetName: name,

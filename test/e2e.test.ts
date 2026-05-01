@@ -22,7 +22,7 @@ import { createServer, type Server } from "node:http";
 import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";
-import { registerHooks } from "../src/hooks.js";
+import { registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
 import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
 import {
   cliAuditHandler,
@@ -108,6 +108,11 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
   limiter.setSmtService(smt);
 
   await smt.start();
+
+  // Each rig is its own "process" semantically: clear the module-scope
+  // conversation-access warning flags so tests don't depend on which file
+  // ran first under node:test's lexicographic ordering.
+  _resetConversationAccessWarningStateForTests();
 
   const api = createMockApi(config);
   registerHooks(api, store, limiter, config);
@@ -402,6 +407,7 @@ describe("e2e: rate limiter coalesces high-volume events but preserves system on
     const limiter = new RateLimiter(store, config);
     limiter.setSmtService(smt);
     await smt.start();
+    _resetConversationAccessWarningStateForTests();
     const api = createMockApi(config);
     registerHooks(api, store, limiter);
     rig = { dir, dbPath, store, smt, limiter, api };
@@ -1278,6 +1284,7 @@ describe("e2e: registration failure on before_install records system.install_hoo
     const limiter = new RateLimiter(store, config);
     limiter.setSmtService(smt);
     await smt.start();
+    _resetConversationAccessWarningStateForTests();
 
     const hooks = new Map<string, HookEntry>();
     const flakyApi = {
@@ -1310,6 +1317,11 @@ describe("e2e: registration failure on before_install records system.install_hoo
     const events = store.query({ category: "system", limit: 10 });
     const miss = events.find((e) => e.eventType === "system.install_hook_unavailable");
     assert.ok(miss, "expected a system.install_hook_unavailable audit row");
+    // Category MUST stay "system" so the row bypasses rate-limit coalescing
+    // (see FULL_FIDELITY_CATEGORIES in src/rate-limiter.ts). If a future change
+    // moves it to e.g. "agent", a burst of registration failures would coalesce
+    // into a summary row and the operator's forensic signal would be lost.
+    assert.equal(miss!.category, "system");
     assert.ok(
       ((miss!.metadata as Record<string, unknown>).error as string).includes("before_install"),
       "metadata should record the underlying error",

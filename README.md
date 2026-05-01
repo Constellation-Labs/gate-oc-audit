@@ -8,7 +8,7 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 openclaw plugins install @constellation-network/openclaw-audit-plugin
 ```
 
-Requires `openclaw >= 2026.4.15` as a peer dependency and Node.js ≥ 22.13 (uses the built-in `node:sqlite` module).
+Requires `openclaw >= 2026.4.24` as a peer dependency and Node.js ≥ 22.13 (uses the built-in `node:sqlite` module).
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 
@@ -299,7 +299,7 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 
 `system.install` records every plugin or skill install/update intercepted by openclaw's install pipeline, including the built-in security scan summary. Captures who installed what so unexpected supply-chain events leave an audit-trail signal. Hook is non-decisive — the plugin observes only and never blocks.
 
-`system.install_hook_unavailable` is appended once if the `before_install` registration throws. This makes "we silently couldn't audit installs" a recorded event rather than a console warning that scrolls away.
+`system.install_hook_unavailable` is appended each time `registerHooks` runs and `before_install` registration throws (typically once per process, but openclaw may re-register on config reload). This makes "we silently couldn't audit installs" a recorded event rather than a console warning that scrolls away.
 
 ## CLI commands
 
