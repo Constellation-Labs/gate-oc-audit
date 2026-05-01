@@ -1,0 +1,157 @@
+name: Integration
+
+on:
+  pull_request:
+
+env:
+  OPENCLAW_BASE_IMAGE: ghcr.io/openclaw/openclaw:2026.4.29
+  OPENCLAW_IMAGE: openclaw-test:local
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build and pack plugin
+        id: pack
+        run: |
+          npm ci
+          npm run build
+          TGZ=$(npm pack --silent | tail -n1)
+          echo "tgz=$PWD/$TGZ" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare openclaw config volume
+        id: cfg
+        run: |
+          CONFIG_DIR="$RUNNER_TEMP/openclaw-config"
+          mkdir -p "$CONFIG_DIR"
+          sudo chown -R 1000:1000 "$CONFIG_DIR"
+          echo "dir=$CONFIG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Build openclaw test image with python3
+        run: |
+          docker build -t "$OPENCLAW_IMAGE" --build-arg BASE="$OPENCLAW_BASE_IMAGE" - <<'EOF'
+          ARG BASE
+          FROM ${BASE}
+          USER root
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends python3 \
+            && rm -rf /var/lib/apt/lists/*
+          USER node
+          EOF
+
+      - name: Onboard openclaw (non-interactive)
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js onboard --mode local --no-install-daemon
+
+      - name: Configure gateway runtime
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js config set --batch-json '[
+              {"path":"gateway.mode","value":"local"},
+              {"path":"gateway.bind","value":"lan"},
+              {"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}
+            ]'
+
+      - name: Install plugin into openclaw
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            -v "${{ steps.pack.outputs.tgz }}:/tmp/plugin.tgz:ro" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js plugins install /tmp/plugin.tgz
+
+      - name: Start openclaw gateway
+        run: |
+          docker run -d --name openclaw \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            -p 18789:18789 \
+            -e OPENCLAW_DISABLE_BONJOUR=1 \
+            -e OPENCLAW_GATEWAY_BIND=lan \
+            "$OPENCLAW_IMAGE"
+
+      - name: Wait for gateway readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18789/healthz >/dev/null 2>&1; then
+              echo "gateway ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not become healthy"
+          docker logs openclaw || true
+          exit 1
+
+      - name: Stop openclaw gateway
+        run: docker stop -t 30 openclaw
+
+      - name: Export captured audit events
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js audit export json --limit 100 \
+            > export.jsonl
+          echo "--- export.jsonl ---"
+          cat export.jsonl
+
+      - name: Assert gateway lifecycle events captured
+        run: |
+          if ! grep -q '"eventType":"gateway.start"' export.jsonl; then
+            echo "missing gateway.start event"
+            exit 1
+          fi
+          if ! grep -q '"eventType":"gateway.stop"' export.jsonl; then
+            echo "missing gateway.stop event"
+            exit 1
+          fi
+          echo "OK — both gateway.start and gateway.stop captured"
+
+      - name: Verify SMT integrity
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js audit verify \
+            | tee verify.out
+          if ! grep -qE '^OK — [0-9]+ tree\(s\), all sampled proofs valid\.' verify.out; then
+            echo "audit verify did not report a successful SMT validation"
+            exit 1
+          fi
+
+      - name: Capture gateway logs on failure
+        if: failure()
+        run: docker logs openclaw > openclaw.log 2>&1 || true
+
+      - name: Make config dir readable for artifact upload
+        if: failure()
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ steps.cfg.outputs.dir }}"
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-config
+          path: |
+            ${{ steps.cfg.outputs.dir }}
+            export.jsonl
+            verify.out
+            openclaw.log
