@@ -4,7 +4,8 @@ on:
   pull_request:
 
 env:
-  OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.4.29
+  OPENCLAW_BASE_IMAGE: ghcr.io/openclaw/openclaw:2026.4.29
+  OPENCLAW_IMAGE: openclaw-test:local
 
 jobs:
   integration:
@@ -34,8 +35,17 @@ jobs:
           sudo chown -R 1000:1000 "$CONFIG_DIR"
           echo "dir=$CONFIG_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Pull openclaw image
-        run: docker pull "$OPENCLAW_IMAGE"
+      - name: Build openclaw test image with python3
+        run: |
+          docker build -t "$OPENCLAW_IMAGE" --build-arg BASE="$OPENCLAW_BASE_IMAGE" - <<'EOF'
+          ARG BASE
+          FROM ${BASE}
+          USER root
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends python3 \
+            && rm -rf /var/lib/apt/lists/*
+          USER node
+          EOF
 
       - name: Onboard openclaw (non-interactive)
         run: |
@@ -130,6 +140,10 @@ jobs:
       - name: Capture gateway logs on failure
         if: failure()
         run: docker logs openclaw > openclaw.log 2>&1 || true
+
+      - name: Make config dir readable for artifact upload
+        if: failure()
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ steps.cfg.outputs.dir }}"
 
       - name: Upload diagnostics on failure
         if: failure()
