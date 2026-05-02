@@ -3,6 +3,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 import type { RateLimiter } from "./rate-limiter.js";
+import type { GatewayStopCapture } from "./gateway-stop-capture.js";
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -82,6 +83,7 @@ export function _resetConversationAccessWarningStateForTests(): void {
   llmInputObserved = false;
   conversationAccessWarned = false;
 }
+
 
 const CONVERSATION_ACCESS_WARNING =
   "[audit-plugin] tool.invoked observed without any preceding llm_input — " +
@@ -171,8 +173,9 @@ function safeComposite(value: string): string {
 export function registerHooks(
   api: OpenClawPluginApi,
   store: AuditStore,
-  limiter?: RateLimiter,
+  limiter: RateLimiter | undefined,
   config: Record<string, unknown> = {},
+  gatewayStopCapture?: GatewayStopCapture,
 ): void {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
@@ -748,13 +751,15 @@ export function registerHooks(
 
   api.on(
     "gateway_stop",
-    (evt) =>
+    (evt) => {
+      if (gatewayStopCapture && !gatewayStopCapture.tryClaim()) return;
       safeAppend({
         eventType: "gateway.stop",
         category: "gateway",
         description: `Gateway stopped: ${safeDesc(evt.reason ?? "shutdown")}`,
         metadata: { reason: evt.reason },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 

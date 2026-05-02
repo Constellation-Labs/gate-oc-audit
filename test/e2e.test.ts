@@ -23,6 +23,7 @@ import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import { registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
+import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
 import {
   cliAuditHandler,
@@ -88,6 +89,7 @@ interface Rig {
   smt: SmtService;
   limiter: RateLimiter;
   api: MockApi;
+  gatewayStopCapture: GatewayStopCapture;
 }
 
 async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
@@ -115,9 +117,10 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
   _resetConversationAccessWarningStateForTests();
 
   const api = createMockApi(config);
-  registerHooks(api, store, limiter, config);
+  const gatewayStopCapture = new GatewayStopCapture(store);
+  registerHooks(api, store, limiter, config, gatewayStopCapture);
 
-  return { dir, dbPath, store, smt, limiter, api };
+  return { dir, dbPath, store, smt, limiter, api, gatewayStopCapture };
 }
 
 async function destroyRig(rig: Rig) {
@@ -409,8 +412,9 @@ describe("e2e: rate limiter coalesces high-volume events but preserves system on
     await smt.start();
     _resetConversationAccessWarningStateForTests();
     const api = createMockApi(config);
-    registerHooks(api, store, limiter);
-    rig = { dir, dbPath, store, smt, limiter, api };
+    const gatewayStopCapture = new GatewayStopCapture(store);
+    registerHooks(api, store, limiter, {}, gatewayStopCapture);
+    rig = { dir, dbPath, store, smt, limiter, api, gatewayStopCapture };
   });
   after(async () => { await destroyRig(rig); });
 
@@ -1312,7 +1316,7 @@ describe("e2e: registration failure on before_install records system.install_hoo
       resolvePath: (p: string) => p,
     } as unknown as MockApi;
 
-    registerHooks(flakyApi, store, limiter, config);
+    registerHooks(flakyApi, store, limiter, config, new GatewayStopCapture(store));
 
     const events = store.query({ category: "system", limit: 10 });
     const miss = events.find((e) => e.eventType === "system.install_hook_unavailable");

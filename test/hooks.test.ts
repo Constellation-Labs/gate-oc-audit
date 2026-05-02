@@ -8,7 +8,12 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../src/store/audit-store.js";
-import { sanitizeArgs, registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
+import {
+  sanitizeArgs,
+  registerHooks,
+  _resetConversationAccessWarningStateForTests,
+} from "../src/hooks.js";
+import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 const require2 = createRequire(import.meta.url);
@@ -143,6 +148,7 @@ describe("registerHooks", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
@@ -154,10 +160,13 @@ describe("registerHooks", () => {
     // bleed-over from earlier cases that fired before_tool_call without
     // a prior llm_input.
     _resetConversationAccessWarningStateForTests();
-    registerHooks(api, store);
+    gatewayStopCapture = new GatewayStopCapture(store);
+    gatewayStopCapture.installSignalFallback();
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
   });
 
   afterEach(() => {
+    gatewayStopCapture.detachSignalListeners();
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
