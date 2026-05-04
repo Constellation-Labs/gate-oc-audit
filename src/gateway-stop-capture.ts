@@ -16,7 +16,10 @@ import type { AuditStore } from "./store/audit-store.js";
  *     the row lands in the WAL even when openclaw's async shutdown is
  *     preempted (observed in CI: container can exit ~250ms after SIGTERM
  *     with no further log lines past "received SIGTERM; shutting down").
- *     Bypasses the limiter to write straight to the store.
+ *     Bypasses the limiter to write straight to the store. The bypass means
+ *     the row enters the SMT only via the next startup's replay path (see
+ *     SmtService.start in src/index.ts) — intentional, since the limiter's
+ *     side-effects can't run inside a synchronous signal callback.
  *
  * `tryClaim()` deduplicates: whichever path runs first writes the row, the
  * other returns without writing.
@@ -41,14 +44,19 @@ export class GatewayStopCapture {
   /**
    * Attach SIGTERM/SIGINT listeners. Idempotent — safe to call repeatedly,
    * including across openclaw plugin re-registrations against fresh api
-   * instances; only the first call attaches listeners.
+   * instances. Each signal is gated independently so a re-call after one
+   * signal has already fired (and Node auto-removed its `once` listener)
+   * re-attaches that signal without duplicating the other.
    */
   installSignalFallback(): void {
-    if (this.sigtermHandler) return;
-    this.sigtermHandler = () => this.captureSignal("SIGTERM");
-    this.sigintHandler = () => this.captureSignal("SIGINT");
-    process.once("SIGTERM", this.sigtermHandler);
-    process.once("SIGINT", this.sigintHandler);
+    if (!this.sigtermHandler) {
+      this.sigtermHandler = () => this.captureSignal("SIGTERM");
+      process.once("SIGTERM", this.sigtermHandler);
+    }
+    if (!this.sigintHandler) {
+      this.sigintHandler = () => this.captureSignal("SIGINT");
+      process.once("SIGINT", this.sigintHandler);
+    }
   }
 
   /**
@@ -64,6 +72,11 @@ export class GatewayStopCapture {
   }
 
   private captureSignal(signal: "SIGTERM" | "SIGINT"): void {
+    // Mirror Node's auto-removal of `once` listeners in our own bookkeeping
+    // so installSignalFallback() can re-attach this specific signal if it's
+    // ever called again on the same instance.
+    if (signal === "SIGTERM") this.sigtermHandler = undefined;
+    else this.sigintHandler = undefined;
     if (!this.tryClaim()) return;
     try {
       this.store.append({

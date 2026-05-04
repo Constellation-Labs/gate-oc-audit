@@ -174,8 +174,8 @@ export function registerHooks(
   api: OpenClawPluginApi,
   store: AuditStore,
   limiter: RateLimiter | undefined,
-  config: Record<string, unknown> = {},
-  gatewayStopCapture?: GatewayStopCapture,
+  config: Record<string, unknown>,
+  gatewayStopCapture: GatewayStopCapture,
 ): void {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
@@ -752,7 +752,7 @@ export function registerHooks(
   api.on(
     "gateway_stop",
     (evt) => {
-      if (gatewayStopCapture && !gatewayStopCapture.tryClaim()) return;
+      if (!gatewayStopCapture.tryClaim()) return;
       safeAppend({
         eventType: "gateway.stop",
         category: "gateway",

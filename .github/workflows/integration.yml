@@ -101,9 +101,6 @@ jobs:
       - name: Stop openclaw gateway
         run: docker stop -t 30 openclaw
 
-      - name: Dump openclaw logs (post-stop)
-        run: docker logs openclaw 2>&1 | tail -200 || true
-
       - name: Export captured audit events
         run: |
           docker run --rm \

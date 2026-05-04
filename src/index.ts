@@ -148,7 +148,7 @@ export default (() => {
             // Hooks must be re-registered on every api instance because events may be dispatched
             // through any of them.
             if (_registered) {
-                if (_store && _limiter) {
+                if (_store && _limiter && _gatewayStopCapture) {
                     registerHooks(api, _store, _limiter, config, _gatewayStopCapture);
                 }
                 console.warn("[audit-plugin] Re-registered hooks on new api instance");

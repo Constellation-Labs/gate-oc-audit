@@ -124,6 +124,9 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
 }
 
 async function destroyRig(rig: Rig) {
+  // No-op when no listeners are attached; safe to call unconditionally.
+  // Belt-and-suspenders against a future test that opts into installSignalFallback().
+  rig.gatewayStopCapture.detachSignalListeners();
   rig.limiter.flush();
   await rig.smt.stop();
   rig.store.close();

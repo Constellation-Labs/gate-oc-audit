@@ -1218,11 +1218,14 @@ describe("redactToolArgs", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
+    // No signal fallback installed; these tests don't exercise gateway_stop.
+    gatewayStopCapture = new GatewayStopCapture(store);
   });
 
   afterEach(() => {
@@ -1231,7 +1234,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag off: tool.invoked metadata.args is sanitized object", () => {
-    registerHooks(api, store, undefined, {});
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
     fireHook(api, "before_tool_call",
       { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
       { sessionId: "s1" },
@@ -1243,7 +1246,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: metadata.args is { hash: 'sha256:<hex>' } only", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     fireHook(api, "before_tool_call",
       { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
       { sessionId: "s1" },
@@ -1254,7 +1257,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: hash is computed over canonicalized post-sanitize args", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     const params = { path: "/tmp/x", password: "hunter2" };
     fireHook(api, "before_tool_call",
       { toolName: "t", params },
@@ -1266,7 +1269,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: hash is stable across identical inputs", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
     fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
     const events = getEvents(dbPath);
@@ -1280,11 +1283,14 @@ describe("redactPromptText", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
+    // No signal fallback installed; these tests don't exercise gateway_stop.
+    gatewayStopCapture = new GatewayStopCapture(store);
   });
 
   afterEach(() => {
@@ -1332,21 +1338,21 @@ describe("redactPromptText", () => {
 
   for (const { hook, event, ctx, eventType } of contentCases) {
     it(`flag off: ${eventType} stores plaintext content`, () => {
-      registerHooks(api, store, undefined, {});
+      registerHooks(api, store, undefined, {}, gatewayStopCapture);
       const content = `plaintext for ${eventType}`;
       fireHook(api, hook, event(content), ctx);
       assert.equal(readContent(dbPath), content);
     });
 
     it(`flag on: ${eventType} stores sha256 hash of original content`, () => {
-      registerHooks(api, store, undefined, { redactPromptText: true });
+      registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
       const content = `sensitive prompt for ${eventType}`;
       fireHook(api, hook, event(content), ctx);
       assert.equal(readContent(dbPath), "sha256:" + sha256Hex(content));
     });
 
     it(`flag on: ${eventType} preserves metadata length fields`, () => {
-      registerHooks(api, store, undefined, { redactPromptText: true });
+      registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
       const content = "a".repeat(100);
       fireHook(api, hook, event(content), ctx);
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
@@ -1357,7 +1363,7 @@ describe("redactPromptText", () => {
   }
 
   it("flag on: tool.result content is NOT hashed (category is tool)", () => {
-    registerHooks(api, store, undefined, { redactPromptText: true });
+    registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
     fireHook(api, "after_tool_call",
       { toolName: "bash", durationMs: 10, result: "script output here", params: {} },
       { sessionId: "s1" },
@@ -1366,7 +1372,7 @@ describe("redactPromptText", () => {
   });
 
   it("flag on: prompt event without content is a no-op (prompt.build has no content field)", () => {
-    registerHooks(api, store, undefined, { redactPromptText: true });
+    registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
     fireHook(api, "before_prompt_build",
       { prompt: "short", messages: [] },
       { sessionId: "s1" },

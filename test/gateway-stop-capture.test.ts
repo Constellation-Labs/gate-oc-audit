@@ -83,6 +83,26 @@ describe("GatewayStopCapture", () => {
       // Signal listener saw the slot taken and did not write a second row.
       assert.equal(getEvents(dbPath).length, 0);
     });
+
+    it("after a signal fires, re-install re-attaches only that signal (no duplicate listeners)", () => {
+      // Measure deltas against any pre-existing listeners (node:test, etc).
+      const baseTerm = process.listenerCount("SIGTERM");
+      const baseInt = process.listenerCount("SIGINT");
+
+      capture.installSignalFallback();
+      assert.equal(process.listenerCount("SIGTERM") - baseTerm, 1);
+      assert.equal(process.listenerCount("SIGINT") - baseInt, 1);
+
+      // SIGTERM fires; Node auto-removes that `once` listener. SIGINT stays.
+      process.emit("SIGTERM");
+      assert.equal(process.listenerCount("SIGTERM") - baseTerm, 0);
+      assert.equal(process.listenerCount("SIGINT") - baseInt, 1);
+
+      // Re-install: SIGTERM re-attached, SIGINT not duplicated.
+      capture.installSignalFallback();
+      assert.equal(process.listenerCount("SIGTERM") - baseTerm, 1);
+      assert.equal(process.listenerCount("SIGINT") - baseInt, 1);
+    });
   });
 
   describe("detachSignalListeners", () => {
