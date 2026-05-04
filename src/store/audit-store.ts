@@ -249,19 +249,47 @@ export class AuditStore {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
 
+      // The "effective" metadata is what we both persist AND return on the
+      // AuditEvent — they MUST be the same object so downstream consumers
+      // (SMT hashing, future verifiers reading rows back from SQLite) all
+      // compute the same hash. Earlier versions persisted a marker but
+      // returned the original, which made SMT proofs fail for truncated rows.
+      //
+      // Truncation marker shape: a single reserved key `$auditTruncation`
+      // namespaces the metadata-replacement payload so a real event whose
+      // plugin happens to pick a name like `metadataDropped` cannot be
+      // confused with the marker. Consumers detect truncation via
+      // `"$auditTruncation" in metadata`.
+      let effectiveMetadata: Record<string, unknown> = insert.metadata;
       let metadataCanonical: string;
       try {
         metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
-        console.error("[audit-plugin] Metadata is not serializable, skipping event");
-        return undefined;
+        console.error("[audit-plugin] Metadata is not serializable, recording marker");
+        effectiveMetadata = { $auditTruncation: { reason: "non-serializable" } };
+        metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
 
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
+        // Sender-controlled fields (messageId, sourcePath, requestedSpecifier,
+        // etc.) could otherwise erase the very event that records the abuse.
         console.error(
-          `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, skipping event`,
+          `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
         );
-        return undefined;
+        effectiveMetadata = {
+          $auditTruncation: { reason: "size-cap", originalSize: metadataCanonical.length },
+        };
+        metadataCanonical = sdk.canonicalize(effectiveMetadata);
+      }
+
+      // Defensive: the marker payload is built from primitives only and
+      // cannot in practice exceed the cap, but if a future change adds a
+      // sender-controlled field to it, fail loud rather than silently
+      // re-opening the size-evasion vector this branch was supposed to close.
+      if (metadataCanonical.length > MAX_METADATA_SIZE) {
+        throw new Error(
+          `[audit-plugin] BUG: truncation marker itself exceeds ${MAX_METADATA_SIZE} bytes`,
+        );
       }
 
       const nextSequence = this.sequence + 1;
@@ -305,7 +333,7 @@ export class AuditStore {
         eventType: insert.eventType,
         category: insert.category,
         description: insert.description,
-        metadata: insert.metadata,
+        metadata: effectiveMetadata,
         content: rawContent,
         createdAt,
       };

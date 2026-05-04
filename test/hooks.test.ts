@@ -8,7 +8,12 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../src/store/audit-store.js";
-import { sanitizeArgs, registerHooks } from "../src/hooks.js";
+import {
+  sanitizeArgs,
+  registerHooks,
+  _resetConversationAccessWarningStateForTests,
+} from "../src/hooks.js";
+import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 const require2 = createRequire(import.meta.url);
@@ -143,15 +148,25 @@ describe("registerHooks", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
-    registerHooks(api, store);
+    // The conversation-access warning state lives in module scope so that
+    // openclaw's legitimate re-registration on a fresh api instance doesn't
+    // reset the fire-once guard. Tests must reset it themselves to avoid
+    // bleed-over from earlier cases that fired before_tool_call without
+    // a prior llm_input.
+    _resetConversationAccessWarningStateForTests();
+    gatewayStopCapture = new GatewayStopCapture(store);
+    gatewayStopCapture.installSignalFallback();
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
   });
 
   afterEach(() => {
+    gatewayStopCapture.detachSignalListeners();
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
@@ -179,6 +194,76 @@ describe("registerHooks", () => {
     for (const [name, { options }] of api.hooks) {
       assert.equal(options?.priority, 200, `${name} should have priority 200`);
     }
+  });
+
+  describe("conversation-access warning", () => {
+    function captureWarn<T>(fn: () => T): { result: T; warnings: string[] } {
+      const warnings: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(" "));
+      };
+      try {
+        return { result: fn(), warnings };
+      } finally {
+        console.warn = original;
+      }
+    }
+
+    it("fires once when before_tool_call happens with no prior llm_input", () => {
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 1, "expected exactly one warning");
+      assert.ok(
+        warnings[0].includes("allowConversationAccess"),
+        "warning should reference the operator opt-in key",
+      );
+    });
+
+    it("does not fire again on subsequent tool calls in the same process", () => {
+      // Trigger the first warning.
+      captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      // Subsequent tool calls must NOT log again.
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Bash", params: {} },
+          { sessionId: "s1" },
+        );
+        fireHook(api, "before_tool_call",
+          { toolName: "Grep", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 0, "warning must fire at most once per process");
+    });
+
+    it("does not fire when llm_input is observed before any tool call", () => {
+      // Observe llm_input first — the normal happy path on a correctly
+      // configured openclaw instance.
+      fireHook(api, "llm_input",
+        {
+          provider: "anthropic", model: "claude",
+          prompt: "hello", historyMessages: [], imagesCount: 0,
+        },
+        { sessionId: "s1" },
+      );
+      const { warnings } = captureWarn(() => {
+        fireHook(api, "before_tool_call",
+          { toolName: "Read", params: {} },
+          { sessionId: "s1" },
+        );
+      });
+      assert.equal(warnings.length, 0, "no warning when llm_input was already seen");
+    });
   });
 
   describe("before_model_resolve", () => {
@@ -618,6 +703,15 @@ describe("registerHooks", () => {
       assert.equal(meta.sessionKey, "sk-3");
       assert.equal(meta.runId, "r-3");
     });
+
+    it("captures accountId from ctx for parity with message_received and message_sent", () => {
+      fireHook(api, "message_sending",
+        { to: "u1", content: "reply" },
+        { channelId: "slack", accountId: "acct-99" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.accountId, "acct-99");
+    });
   });
 
   describe("inbound_claim", () => {
@@ -647,6 +741,15 @@ describe("registerHooks", () => {
       assert.equal(meta.messageId, "m-1");
       assert.equal(meta.sessionKey, "sk-4");
       assert.equal(meta.runId, "r-4");
+    });
+
+    it("captures parentConversationId for thread-bound conversations", () => {
+      fireHook(api, "inbound_claim",
+        { content: "hi", channel: "telegram", senderId: "u1", isGroup: false },
+        { channelId: "telegram", conversationId: "c1", parentConversationId: "p1" },
+      );
+      const meta = JSON.parse(getEvents(dbPath)[0].metadata);
+      assert.equal(meta.parentConversationId, "p1");
     });
   });
 
@@ -873,6 +976,104 @@ describe("registerHooks", () => {
       assert.equal(meta.targetType, "skill");
       assert.equal(meta.installId, "install-abc");
     });
+
+    it("strips control chars from description so attacker-controlled fields cannot forge log lines", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          targetName: "evil\n[audit-plugin] FAKE: legitimate-pkg installed",
+          sourcePath: "/tmp/evil",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install\rinjected" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events[0].event_type, "system.install");
+      assert.equal(events[0].description.includes("\n"), false,
+        "description must not contain LF (would split log lines)");
+      assert.equal(events[0].description.includes("\r"), false,
+        "description must not contain CR (would split log lines)");
+      // Metadata, by contrast, preserves the raw values for forensic analysis.
+      const meta = JSON.parse(events[0].metadata);
+      assert.ok((meta.targetName as string).includes("\n"),
+        "metadata preserves the unsanitized payload for forensics");
+    });
+
+    it("strips C1 control bytes and U+2028/U+2029 line terminators", () => {
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          // \x9B is single-byte CSI; 8-bit-CSI-aware terminals would interpret it.
+          // \u2028 is JS LINE SEPARATOR.
+          targetName: "evil\x9B2J\u2028[audit-plugin] FAKE",
+          sourcePath: "/tmp/evil",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.equal(events[0].description.includes("\x9B"), false,
+        "description must not contain C1 CSI (would drive 8-bit-aware terminals)");
+      assert.equal(events[0].description.includes("\u2028"), false,
+        "description must not contain U+2028 (JS line terminator)");
+    });
+
+    it("does not leave a lone high surrogate when a non-BMP char straddles the 256-char clamp", () => {
+      // 254 chars of "a", then U+1F600 (😀, 2 UTF-16 code units, lands at indexes 254-255),
+      // then padding so the input length triggers the clamp.
+      // Without surrogate-aware trim, slice(0, 255) keeps the high surrogate
+      // (U+D83D) alone — SQLite stores invalid UTF-8 and round-trips U+FFFD.
+      const targetName = "a".repeat(254) + "\u{1F600}" + "b".repeat(20);
+      fireHook(api, "before_install",
+        {
+          targetType: "plugin",
+          targetName,
+          sourcePath: "/tmp/x",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "install" },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      const description: string = events[0].description;
+      // No lone high surrogates anywhere in the persisted description.
+      for (let i = 0; i < description.length; i++) {
+        const code = description.charCodeAt(i);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const next = description.charCodeAt(i + 1);
+          assert.ok(next >= 0xdc00 && next <= 0xdfff,
+            `lone high surrogate at index ${i} (would round-trip to U+FFFD)`);
+        }
+      }
+      // And the read-back string does NOT contain U+FFFD (replacement char),
+      // which is what an unpaired surrogate would round-trip as.
+      assert.equal(description.includes("�"), false,
+        "round-tripped description must not contain U+FFFD");
+    });
+
+    it("clamps the total composed description, not just each interpolated slot", () => {
+      // safeDesc clamps each slot to 256, but `Install ${mode}: ${target} ${name}`
+      // composes three near-256-char slots into ~770 chars without a composite cap.
+      fireHook(api, "before_install",
+        {
+          targetType: "x".repeat(300),
+          targetName: "y".repeat(300),
+          sourcePath: "/tmp/x",
+          sourcePathKind: "directory",
+          request: { kind: "plugin-npm", mode: "z".repeat(300) },
+          builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+        },
+        {},
+      );
+      const events = getEvents(dbPath);
+      assert.ok(events[0].description.length <= 256,
+        `composite description length ${events[0].description.length} exceeds 256`);
+    });
   });
 
   describe("subagent_spawning", () => {
@@ -1017,11 +1218,14 @@ describe("redactToolArgs", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
+    // No signal fallback installed; these tests don't exercise gateway_stop.
+    gatewayStopCapture = new GatewayStopCapture(store);
   });
 
   afterEach(() => {
@@ -1030,7 +1234,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag off: tool.invoked metadata.args is sanitized object", () => {
-    registerHooks(api, store, undefined, {});
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
     fireHook(api, "before_tool_call",
       { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
       { sessionId: "s1" },
@@ -1042,7 +1246,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: metadata.args is { hash: 'sha256:<hex>' } only", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     fireHook(api, "before_tool_call",
       { toolName: "read_file", params: { path: "/tmp/x", apiKey: "secret" } },
       { sessionId: "s1" },
@@ -1053,7 +1257,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: hash is computed over canonicalized post-sanitize args", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     const params = { path: "/tmp/x", password: "hunter2" };
     fireHook(api, "before_tool_call",
       { toolName: "t", params },
@@ -1065,7 +1269,7 @@ describe("redactToolArgs", () => {
   });
 
   it("flag on: hash is stable across identical inputs", () => {
-    registerHooks(api, store, undefined, { redactToolArgs: true });
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
     fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
     fireHook(api, "before_tool_call", { toolName: "t", params: { a: 1 } }, { sessionId: "s1" });
     const events = getEvents(dbPath);
@@ -1079,11 +1283,14 @@ describe("redactPromptText", () => {
   let dbPath: string;
   let store: AuditStore;
   let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     api = createMockApi();
+    // No signal fallback installed; these tests don't exercise gateway_stop.
+    gatewayStopCapture = new GatewayStopCapture(store);
   });
 
   afterEach(() => {
@@ -1131,21 +1338,21 @@ describe("redactPromptText", () => {
 
   for (const { hook, event, ctx, eventType } of contentCases) {
     it(`flag off: ${eventType} stores plaintext content`, () => {
-      registerHooks(api, store, undefined, {});
+      registerHooks(api, store, undefined, {}, gatewayStopCapture);
       const content = `plaintext for ${eventType}`;
       fireHook(api, hook, event(content), ctx);
       assert.equal(readContent(dbPath), content);
     });
 
     it(`flag on: ${eventType} stores sha256 hash of original content`, () => {
-      registerHooks(api, store, undefined, { redactPromptText: true });
+      registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
       const content = `sensitive prompt for ${eventType}`;
       fireHook(api, hook, event(content), ctx);
       assert.equal(readContent(dbPath), "sha256:" + sha256Hex(content));
     });
 
     it(`flag on: ${eventType} preserves metadata length fields`, () => {
-      registerHooks(api, store, undefined, { redactPromptText: true });
+      registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
       const content = "a".repeat(100);
       fireHook(api, hook, event(content), ctx);
       const meta = JSON.parse(getEvents(dbPath)[0].metadata);
@@ -1156,7 +1363,7 @@ describe("redactPromptText", () => {
   }
 
   it("flag on: tool.result content is NOT hashed (category is tool)", () => {
-    registerHooks(api, store, undefined, { redactPromptText: true });
+    registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
     fireHook(api, "after_tool_call",
       { toolName: "bash", durationMs: 10, result: "script output here", params: {} },
       { sessionId: "s1" },
@@ -1165,7 +1372,7 @@ describe("redactPromptText", () => {
   });
 
   it("flag on: prompt event without content is a no-op (prompt.build has no content field)", () => {
-    registerHooks(api, store, undefined, { redactPromptText: true });
+    registerHooks(api, store, undefined, { redactPromptText: true }, gatewayStopCapture);
     fireHook(api, "before_prompt_build",
       { prompt: "short", messages: [] },
       { sessionId: "s1" },

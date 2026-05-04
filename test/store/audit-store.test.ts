@@ -93,21 +93,44 @@ describe("AuditStore", () => {
       assert.equal(event.userId, undefined);
     });
 
-    it("skips events with metadata exceeding 1MB", () => {
+    it("records oversized metadata events with a truncation marker rather than dropping them", () => {
       const bigValue = "x".repeat(1024 * 1024 + 1);
-      const result = store.append(sampleInsert({ metadata: { big: bigValue } }));
+      const result = store.append(sampleInsert({ metadata: { big: bigValue } }))!;
 
-      assert.equal(result, undefined);
-      assert.equal(store.isDegraded(), false); // size guard is not a degradation
+      assert.ok(result, "expected event to be recorded with truncated metadata");
+      assert.equal(store.isDegraded(), false);
+      // The returned AuditEvent.metadata MUST match what's persisted, so
+      // downstream consumers (SMT hashing, future verifiers reading the row
+      // back) compute the same hash. Earlier versions persisted a marker
+      // but returned the original metadata, breaking SMT proofs.
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const persistedMd = persisted.metadata as Record<string, unknown>;
+      const returnedMd = result.metadata as Record<string, unknown>;
+      assert.deepEqual(returnedMd, persistedMd,
+        "returned and persisted metadata must be identical (regression guard)");
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker, "marker must live under reserved $auditTruncation key");
+      assert.equal(marker.reason, "size-cap");
+      assert.ok(typeof marker.originalSize === "number"
+        && marker.originalSize > 1024 * 1024);
+      assert.equal("big" in persistedMd, false, "oversized field must not survive truncation");
     });
 
-    it("skips events with non-serializable metadata without degrading", () => {
+    it("records non-serializable metadata events with a truncation marker", () => {
       const result = store.append(
         sampleInsert({ metadata: { value: BigInt(42) } as unknown as Record<string, unknown> }),
-      );
+      )!;
 
-      assert.equal(result, undefined);
+      assert.ok(result, "expected event to be recorded with marker");
       assert.equal(store.isDegraded(), false);
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const persistedMd = persisted.metadata as Record<string, unknown>;
+      const returnedMd = result.metadata as Record<string, unknown>;
+      assert.deepEqual(returnedMd, persistedMd,
+        "returned and persisted metadata must be identical (regression guard)");
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker, "marker must live under reserved $auditTruncation key");
+      assert.equal(marker.reason, "non-serializable");
     });
   });
 

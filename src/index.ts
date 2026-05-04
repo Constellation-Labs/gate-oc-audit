@@ -13,6 +13,7 @@ import {SmtService} from "./services/smt-service.js";
 import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
+import {GatewayStopCapture} from "./gateway-stop-capture.js";
 
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
@@ -30,6 +31,7 @@ export default (() => {
     let _registered = false;
     let _store: AuditStore | undefined;
     let _limiter: RateLimiter | undefined;
+    let _gatewayStopCapture: GatewayStopCapture | undefined;
 
     return definePluginEntry({
         id: "constellation-audit-plugin",
@@ -146,8 +148,8 @@ export default (() => {
             // Hooks must be re-registered on every api instance because events may be dispatched
             // through any of them.
             if (_registered) {
-                if (_store && _limiter) {
-                    registerHooks(api, _store, _limiter, config);
+                if (_store && _limiter && _gatewayStopCapture) {
+                    registerHooks(api, _store, _limiter, config, _gatewayStopCapture);
                 }
                 console.warn("[audit-plugin] Re-registered hooks on new api instance");
                 return;
@@ -164,9 +166,14 @@ export default (() => {
             limiter.setSmtService(smtService);
             _store = store;
             _limiter = limiter;
+            // Captures gateway.stop via either the openclaw hook or a signal
+            // fallback — see GatewayStopCapture for why both paths exist.
+            const gatewayStopCapture = new GatewayStopCapture(store);
+            gatewayStopCapture.installSignalFallback();
+            _gatewayStopCapture = gatewayStopCapture;
             // Hooks are re-registered on every API instance (see guard above);
             // tools below are only registered here, on the first call.
-            registerHooks(api, store, limiter, config);
+            registerHooks(api, store, limiter, config, gatewayStopCapture);
 
             // LLM cost tracking via diagnostic events (separate subscription path)
             import("openclaw/plugin-sdk").then(({onDiagnosticEvent}) => {

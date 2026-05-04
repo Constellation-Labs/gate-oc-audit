@@ -22,7 +22,8 @@ import { createServer, type Server } from "node:http";
 import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";
-import { registerHooks } from "../src/hooks.js";
+import { registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
+import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
 import {
   cliAuditHandler,
@@ -88,6 +89,7 @@ interface Rig {
   smt: SmtService;
   limiter: RateLimiter;
   api: MockApi;
+  gatewayStopCapture: GatewayStopCapture;
 }
 
 async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
@@ -109,13 +111,22 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
 
   await smt.start();
 
-  const api = createMockApi(config);
-  registerHooks(api, store, limiter, config);
+  // Each rig is its own "process" semantically: clear the module-scope
+  // conversation-access warning flags so tests don't depend on which file
+  // ran first under node:test's lexicographic ordering.
+  _resetConversationAccessWarningStateForTests();
 
-  return { dir, dbPath, store, smt, limiter, api };
+  const api = createMockApi(config);
+  const gatewayStopCapture = new GatewayStopCapture(store);
+  registerHooks(api, store, limiter, config, gatewayStopCapture);
+
+  return { dir, dbPath, store, smt, limiter, api, gatewayStopCapture };
 }
 
 async function destroyRig(rig: Rig) {
+  // No-op when no listeners are attached; safe to call unconditionally.
+  // Belt-and-suspenders against a future test that opts into installSignalFallback().
+  rig.gatewayStopCapture.detachSignalListeners();
   rig.limiter.flush();
   await rig.smt.stop();
   rig.store.close();
@@ -402,9 +413,11 @@ describe("e2e: rate limiter coalesces high-volume events but preserves system on
     const limiter = new RateLimiter(store, config);
     limiter.setSmtService(smt);
     await smt.start();
+    _resetConversationAccessWarningStateForTests();
     const api = createMockApi(config);
-    registerHooks(api, store, limiter);
-    rig = { dir, dbPath, store, smt, limiter, api };
+    const gatewayStopCapture = new GatewayStopCapture(store);
+    registerHooks(api, store, limiter, {}, gatewayStopCapture);
+    rig = { dir, dbPath, store, smt, limiter, api, gatewayStopCapture };
   });
   after(async () => { await destroyRig(rig); });
 
@@ -1260,6 +1273,122 @@ describe("e2e: before_install records system.install events end-to-end", () => {
     }
     assert.ok(root.entryCount > 0);
   });
+});
+
+describe("e2e: registration failure on before_install records system.install_hook_unavailable", () => {
+  // Simulates an older or future openclaw runtime that throws on unknown hook
+  // names. The plugin's outer try/catch must convert the registration miss
+  // into an audit row, not a console-only warning.
+  it("appends a system.install_hook_unavailable event when api.on throws for before_install", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "audit-e2e-fail-"));
+    const dbPath = join(dir, "audit.db");
+    const config = {
+      dbPath,
+      smt: { checkpointDir: join(dir, "smt-checkpoints"), checkpointIntervalMs: 0 },
+    };
+    const store = new AuditStore(dbPath);
+    const smt = new SmtService(config);
+    const limiter = new RateLimiter(store, config);
+    limiter.setSmtService(smt);
+    await smt.start();
+    _resetConversationAccessWarningStateForTests();
+
+    const hooks = new Map<string, HookEntry>();
+    const flakyApi = {
+      hooks,
+      on(name: string, handler: HookEntry["handler"], opts?: HookEntry["options"]) {
+        if (name === "before_install") {
+          throw new Error("unknown typed hook: before_install");
+        }
+        hooks.set(name, { handler, options: opts });
+      },
+      registerHook() {},
+      registerService() {},
+      registerCli() {},
+      registerTool() {},
+      registerCommand() {},
+      registerHttpRoute() {},
+      pluginConfig: config,
+      config: {},
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      runtime: {},
+      registrationMode: "full" as const,
+      id: "e2e-flaky",
+      name: "e2e-flaky",
+      source: "test",
+      resolvePath: (p: string) => p,
+    } as unknown as MockApi;
+
+    registerHooks(flakyApi, store, limiter, config, new GatewayStopCapture(store));
+
+    const events = store.query({ category: "system", limit: 10 });
+    const miss = events.find((e) => e.eventType === "system.install_hook_unavailable");
+    assert.ok(miss, "expected a system.install_hook_unavailable audit row");
+    // Category MUST stay "system" so the row bypasses rate-limit coalescing
+    // (see FULL_FIDELITY_CATEGORIES in src/rate-limiter.ts). If a future change
+    // moves it to e.g. "agent", a burst of registration failures would coalesce
+    // into a summary row and the operator's forensic signal would be lost.
+    assert.equal(miss!.category, "system");
+    assert.ok(
+      ((miss!.metadata as Record<string, unknown>).error as string).includes("before_install"),
+      "metadata should record the underlying error",
+    );
+
+    limiter.flush();
+    await smt.stop();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("e2e: oversized metadata is recorded with a truncation marker rather than dropped", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  it("preserves the audit signal AND keeps the SMT proof valid when sender-controlled fields blow past the 1MB metadata cap", () => {
+    // A hostile install request stuffs >1MB into a sender-controlled scalar.
+    const hostileSpecifier = "x".repeat(1024 * 1024 + 100);
+    fire(rig.api, "before_install",
+      {
+        targetType: "plugin",
+        targetName: "@example/large",
+        sourcePath: "/tmp/large",
+        sourcePathKind: "directory",
+        request: {
+          kind: "plugin-npm",
+          mode: "install",
+          requestedSpecifier: hostileSpecifier,
+        },
+        builtinScan: { status: "ok", scannedFiles: 1, critical: 0, warn: 0, info: 0, findings: [] },
+      },
+      {},
+    );
+
+    const events = rig.store.query({ category: "system", eventType: "system.install", limit: 10 });
+    assert.equal(events.length, 1,
+      "event must still be recorded — silent skipping would erase forensic signal");
+    const meta = events[0].metadata as Record<string, unknown>;
+    const marker = meta.$auditTruncation as Record<string, unknown>;
+    assert.ok(marker, "marker must live under reserved $auditTruncation key");
+    assert.equal(marker.reason, "size-cap");
+    assert.ok(typeof marker.originalSize === "number");
+    assert.equal("requestedSpecifier" in meta, false,
+      "oversized field must not survive truncation");
+
+    // Tamper-evidence regression guard: SMT membership proof must still
+    // verify against the persisted row. Earlier versions of this code
+    // returned the original metadata to the SMT pipeline while persisting
+    // the marker, producing a hash mismatch that broke proofs for every
+    // truncated row.
+    const knownRoots = rig.smt.getKnownRoots(rig.store.getCheckpointedRoots());
+    const rawHash = rig.smt.computeRawHash(events[0]);
+    const proof = rig.smt.createProof(rawHash);
+    assert.ok(proof?.membership,
+      "expected membership proof for the truncated row — store and SMT diverged");
+    assert.equal(rig.smt.verifyProofWithRoots(proof!, knownRoots).status, "valid");
+  });
+
 });
 
 describe("e2e: every PluginHookName is registered and exercised", () => {

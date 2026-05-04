@@ -3,6 +3,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 import type { RateLimiter } from "./rate-limiter.js";
+import type { GatewayStopCapture } from "./gateway-stop-capture.js";
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -66,34 +67,118 @@ function resolveRecipient(evt: { to?: string }): string {
 }
 
 /**
- * Tracks which hooks have actually fired since registration, so callers can
- * detect when openclaw silently drops conversation hooks for lack of the
- * `plugins.entries.<id>.hooks.allowConversationAccess=true` operator opt-in
- * (introduced in openclaw 2026.4.24).
+ * Process-wide one-shot tracker for the conversation-access operator opt-in
+ * diagnostic. Module-scoped (not per-`registerHooks` call) so that openclaw's
+ * legitimate re-registration on a fresh api instance doesn't reset the flag
+ * and spuriously warn after `llm_input` was already observed on a prior
+ * instance. The warning fires at most once per process.
  */
-export interface HookActivity {
-  llmInputObserved: boolean;
-  toolCallObserved: boolean;
+let llmInputObserved = false;
+let conversationAccessWarned = false;
+
+// Test-only hook: clear module-scope warning state so unit tests can pin
+// fire-once behavior without leaking across test files. Not exported as a
+// public API; reset() is intentionally narrow.
+export function _resetConversationAccessWarningStateForTests(): void {
+  llmInputObserved = false;
+  conversationAccessWarned = false;
 }
 
-const CONVERSATION_ACCESS_WARNING = [
-  "[audit-plugin] tool.invoked observed without any preceding llm_input.",
-  "  This usually means openclaw silently dropped the llm_input/llm_output/agent_end",
-  "  hook registrations because the operator opt-in is missing. Add to openclaw config:",
-  '    plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess: true',
-  "  See README.md for details.",
-].join("\n");
+
+const CONVERSATION_ACCESS_WARNING =
+  "[audit-plugin] tool.invoked observed without any preceding llm_input — " +
+  "either (a) openclaw 2026.4.24+ dropped the conversation hook registrations " +
+  "because the operator opt-in is missing (set " +
+  "plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true), " +
+  "or (b) the tool was invoked outside a normal LLM turn. See README.md. " +
+  "Fires once per process.";
+
+/**
+ * Module-scope cast aliases for fields openclaw 2026.4.x added to existing
+ * event/context shapes but hasn't yet typed in the SDK we build against.
+ * Centralized so that, when the SDK catches up, deletion is a single place.
+ * Do NOT add fields here without verifying they exist in the openclaw types
+ * the plugin expects to load against (peer floor: `>=2026.4.24`).
+ */
+type AgentCtxExtra = {
+  jobId?: string;
+  modelProviderId?: string;
+  modelId?: string;
+};
+type MessageCtxExtra = {
+  sessionKey?: string;
+  runId?: string;
+};
+type MessageEvtExtra = {
+  threadId?: string | number;
+  messageId?: string;
+  senderId?: string;
+  replyToId?: string | number;
+  sessionKey?: string;
+  runId?: string;
+};
+// PluginHookSessionEndEvent is the only session event whose `sessionFile`,
+// `reason`, etc. the SDK does not yet type. The compaction/reset events do
+// declare `sessionFile`, so we read those directly without a cast.
+type SessionEndEvtExtra = {
+  sessionFile?: string;
+  reason?: string;
+  transcriptArchived?: boolean;
+  nextSessionId?: string;
+  nextSessionKey?: string;
+};
+
+/**
+ * Sanitize a string before interpolating into an event description. Strips
+ * control bytes (which would otherwise let attacker-controlled fields like
+ * `targetName` forge log lines, drive 8-bit-CSI-aware terminals, or split
+ * rows when piped to a log aggregator) and clamps length so a hostile input
+ * can't bloat the description column.
+ *
+ * Complementary to `sanitize()`, which redacts by key in metadata; this
+ * scrubs by value in descriptions.
+ */
+const DESCRIPTION_MAX = 256;
+// Strip C0 (\x00-\x1F), DEL (\x7F), C1 (\x80-\x9F — \x9B is single-byte CSI),
+// and the JS line-terminator code points U+2028/U+2029 so attacker-controlled
+// fields cannot forge or split log lines or drive a terminal escape.
+const CONTROL_CHARS = /[\x00-\x1F\x7F-\x9F\u2028\u2029]/g;
+function safeDesc(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  const str = String(value).replace(CONTROL_CHARS, " ");
+  if (str.length <= DESCRIPTION_MAX) return str;
+  // slice() operates on UTF-16 code units. If the cut lands between a
+  // surrogate pair, drop the orphan high surrogate so SQLite (UTF-8) doesn't
+  // round-trip it as U+FFFD on read-back, which would diverge the in-memory
+  // and persisted hashes — the same SMT-vs-DB invariant AuditStore.append
+  // protects on the metadata column.
+  let end = DESCRIPTION_MAX - 1;
+  const code = str.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return str.slice(0, end) + "…";
+}
+
+// Clamp a fully composed description string. `safeDesc` clamps each
+// interpolated slot to 256 chars; `safeComposite` clamps the *total* so a
+// pathological multi-slot template (e.g. install: mode + target + name) can't
+// exceed the column's intended budget.
+function safeComposite(value: string): string {
+  if (value.length <= DESCRIPTION_MAX) return value;
+  let end = DESCRIPTION_MAX - 1;
+  const code = value.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return value.slice(0, end) + "…";
+}
 
 export function registerHooks(
   api: OpenClawPluginApi,
   store: AuditStore,
-  limiter?: RateLimiter,
-  config: Record<string, unknown> = {},
-): HookActivity {
+  limiter: RateLimiter | undefined,
+  config: Record<string, unknown>,
+  gatewayStopCapture: GatewayStopCapture,
+): void {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
-  const activity: HookActivity = { llmInputObserved: false, toolCallObserved: false };
-  let conversationAccessWarned = false;
 
   const safeAppend = (insert: AuditEventInsert): void => {
     if (
@@ -128,15 +213,18 @@ export function registerHooks(
         metadata: { promptLength: evt.prompt?.length, trigger: ctx.trigger },
       });
       if (ctx.trigger === "cron") {
+        const c = ctx as typeof ctx & AgentCtxExtra;
         safeAppend({
           sessionId: ctx.sessionId,
           eventType: "cron.executed",
           category: "cron",
-          description: "Cron-triggered agent run started",
+          description: c.jobId
+            ? `Cron-triggered agent run started: ${safeDesc(c.jobId)}`
+            : "Cron-triggered agent run started",
           metadata: {
             agentId: ctx.agentId,
             runId: ctx.runId,
-            jobId: (ctx as { jobId?: string }).jobId,
+            jobId: c.jobId,
             promptLength: evt.prompt?.length,
           },
         });
@@ -161,7 +249,7 @@ export function registerHooks(
   api.on(
     "agent_end",
     (evt, ctx) => {
-      const c = ctx as typeof ctx & { jobId?: string; modelProviderId?: string; modelId?: string };
+      const c = ctx as typeof ctx & AgentCtxExtra;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.end",
@@ -181,11 +269,11 @@ export function registerHooks(
           sessionId: ctx.sessionId,
           eventType: "cron.failed",
           category: "cron",
-          description: `Cron run failed: ${evt.error || "unknown"}`,
+          description: `Cron run failed: ${safeDesc(evt.error || "unknown")}`,
           metadata: {
             agentId: ctx.agentId,
             runId: ctx.runId,
-            jobId: (ctx as { jobId?: string }).jobId,
+            jobId: c.jobId,
             durationMs: evt.durationMs,
             error: evt.error,
           },
@@ -198,8 +286,7 @@ export function registerHooks(
   api.on(
     "before_tool_call",
     (evt, ctx) => {
-      activity.toolCallObserved = true;
-      if (!activity.llmInputObserved && !conversationAccessWarned) {
+      if (!llmInputObserved && !conversationAccessWarned) {
         conversationAccessWarned = true;
         console.warn(CONVERSATION_ACCESS_WARNING);
       }
@@ -211,7 +298,7 @@ export function registerHooks(
         sessionId: ctx.sessionId,
         eventType: "tool.invoked",
         category: "tool",
-        description: `Tool invoked: ${evt.toolName}`,
+        description: `Tool invoked: ${safeDesc(evt.toolName)}`,
         metadata: { toolName: evt.toolName, args },
       });
     },
@@ -226,7 +313,7 @@ export function registerHooks(
           sessionId: ctx.sessionId,
           eventType: "tool.denied",
           category: "tool",
-          description: `Tool denied: ${evt.toolName} (${evt.error})`,
+          description: `Tool denied: ${safeDesc(evt.toolName)} (${safeDesc(evt.error)})`,
           metadata: {
             toolName: evt.toolName,
             durationMs: evt.durationMs,
@@ -239,7 +326,7 @@ export function registerHooks(
         sessionId: ctx.sessionId,
         eventType: "tool.result",
         category: "tool",
-        description: `Tool completed: ${evt.toolName}`,
+        description: `Tool completed: ${safeDesc(evt.toolName)}`,
         metadata: {
           toolName: evt.toolName,
           durationMs: evt.durationMs,
@@ -259,7 +346,7 @@ export function registerHooks(
         sessionId: ctx.sessionKey,
         eventType: "tool.persisted",
         category: "tool",
-        description: `Tool result persisted: ${evt.toolName ?? "unknown"}`,
+        description: `Tool result persisted: ${safeDesc(evt.toolName ?? "unknown")}`,
         metadata: {
           toolName: evt.toolName,
           isSynthetic: evt.isSynthetic,
@@ -273,12 +360,12 @@ export function registerHooks(
   api.on(
     "llm_input",
     (evt, ctx) => {
-      activity.llmInputObserved = true;
+      llmInputObserved = true;
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "prompt.input",
         category: "prompt",
-        description: `LLM input: ${evt.provider}/${evt.model}`,
+        description: `LLM input: ${safeDesc(evt.provider)}/${safeDesc(evt.model)}`,
         metadata: {
           provider: evt.provider,
           model: evt.model,
@@ -298,13 +385,13 @@ export function registerHooks(
     "message_received",
     (evt, ctx) => {
       const sender = resolveSender(evt);
-      const e = evt as typeof evt & { threadId?: string | number; messageId?: string; senderId?: string; sessionKey?: string; runId?: string };
-      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
+      const e = evt as typeof evt & MessageEvtExtra;
+      const c = ctx as typeof ctx & MessageCtxExtra;
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.received",
         category: "message",
-        description: `Inbound from ${sender} on ${ctx.channelId}`,
+        description: safeComposite(`Inbound from ${safeDesc(sender)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "in",
           sender,
@@ -329,13 +416,13 @@ export function registerHooks(
     "message_sent",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      const e = evt as typeof evt & { messageId?: string; sessionKey?: string; runId?: string };
-      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
+      const e = evt as typeof evt & MessageEvtExtra;
+      const c = ctx as typeof ctx & MessageCtxExtra;
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sent",
         category: "message",
-        description: `Outbound to ${recipient} on ${ctx.channelId}`,
+        description: safeComposite(`Outbound to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "out",
           recipient,
@@ -359,17 +446,18 @@ export function registerHooks(
     "message_sending",
     (evt, ctx) => {
       const recipient = resolveRecipient(evt);
-      const e = evt as typeof evt & { replyToId?: string | number; threadId?: string | number };
-      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
+      const e = evt as typeof evt & MessageEvtExtra;
+      const c = ctx as typeof ctx & MessageCtxExtra;
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.sending",
         category: "message",
-        description: `Sending to ${recipient} on ${ctx.channelId}`,
+        description: safeComposite(`Sending to ${safeDesc(recipient)} on ${safeDesc(ctx.channelId)}`),
         metadata: {
           direction: "out",
           recipient,
           channel: ctx.channelId,
+          accountId: ctx.accountId,
           sessionKey: c.sessionKey,
           runId: c.runId,
           replyToId: e.replyToId,
@@ -385,18 +473,22 @@ export function registerHooks(
   api.on(
     "inbound_claim",
     (evt, ctx) => {
-      const e = evt as typeof evt & { threadId?: string | number; messageId?: string; runId?: string; sessionKey?: string };
-      const c = ctx as typeof ctx & { sessionKey?: string; runId?: string };
+      const e = evt as typeof evt & MessageEvtExtra;
+      const c = ctx as typeof ctx & MessageCtxExtra;
+      // sessionId stays on ctx.conversationId for historical continuity —
+      // switching to ctx.sessionKey would fragment audit chains across older
+      // events that already grouped on conversationId.
       safeAppend({
         sessionId: ctx.conversationId,
         eventType: "message.claimed",
         category: "message",
-        description: `Inbound claim on ${evt.channel}`,
+        description: `Inbound claim on ${safeDesc(evt.channel)}`,
         metadata: {
           channel: evt.channel,
           senderId: evt.senderId,
           senderName: evt.senderName,
           isGroup: evt.isGroup,
+          parentConversationId: ctx.parentConversationId ?? evt.parentConversationId,
           sessionKey: c.sessionKey ?? e.sessionKey,
           runId: c.runId ?? e.runId,
           threadId: e.threadId,
@@ -415,7 +507,7 @@ export function registerHooks(
         sessionId: ctx.conversationId,
         eventType: "message.dispatched",
         category: "message",
-        description: `Dispatch on ${evt.channel ?? ctx.channelId}`,
+        description: `Dispatch on ${safeDesc(evt.channel ?? ctx.channelId)}`,
         metadata: {
           channel: evt.channel ?? ctx.channelId,
           senderId: evt.senderId ?? ctx.senderId,
@@ -448,7 +540,7 @@ export function registerHooks(
         sessionId: ctx.sessionId,
         eventType: "prompt.response",
         category: "prompt",
-        description: `LLM call: ${evt.provider}/${evt.model}`,
+        description: `LLM call: ${safeDesc(evt.provider)}/${safeDesc(evt.model)}`,
         metadata: {
           provider: evt.provider,
           model: evt.model,
@@ -466,7 +558,7 @@ export function registerHooks(
 
   api.on(
     "before_compaction",
-    (evt, ctx) =>
+    (evt, ctx) => {
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_start",
@@ -476,15 +568,16 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactingCount: evt.compactingCount,
           tokenCount: evt.tokenCount,
-          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
+          sessionFile: evt.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "after_compaction",
-    (evt, ctx) =>
+    (evt, ctx) => {
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.compaction_end",
@@ -494,25 +587,27 @@ export function registerHooks(
           messageCount: evt.messageCount,
           compactedCount: evt.compactedCount,
           tokenCount: evt.tokenCount,
-          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
+          sessionFile: evt.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
   api.on(
     "before_reset",
-    (evt, ctx) =>
+    (evt, ctx) => {
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "agent.reset",
         category: "agent",
-        description: `Session reset: ${evt.reason ?? "unknown"}`,
+        description: `Session reset: ${safeDesc(evt.reason ?? "unknown")}`,
         metadata: {
           reason: evt.reason,
-          sessionFile: (evt as typeof evt & { sessionFile?: string }).sessionFile,
+          sessionFile: evt.sessionFile,
         },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
@@ -525,7 +620,7 @@ export function registerHooks(
         sessionId: ctx.sessionId,
         eventType: "session.start",
         category: "system",
-        description: `Session started: ${evt.sessionId}`,
+        description: `Session started: ${safeDesc(evt.sessionId)}`,
         metadata: {
           sessionKey: evt.sessionKey,
           resumedFrom: evt.resumedFrom,
@@ -537,20 +632,15 @@ export function registerHooks(
   api.on(
     "session_end",
     (evt, ctx) => {
-      const e = evt as typeof evt & {
-        reason?: string;
-        sessionFile?: string;
-        transcriptArchived?: boolean;
-        nextSessionId?: string;
-        nextSessionKey?: string;
-      };
+      const e = evt as typeof evt & SessionEndEvtExtra;
+      const hasReason = e.reason != null && e.reason !== "unknown";
       safeAppend({
         sessionId: ctx.sessionId,
         eventType: "session.end",
         category: "system",
-        description: e.reason
-          ? `Session ended (${e.reason}): ${evt.sessionId}`
-          : `Session ended: ${evt.sessionId}`,
+        description: hasReason
+          ? safeComposite(`Session ended (${safeDesc(e.reason)}): ${safeDesc(evt.sessionId)}`)
+          : `Session ended: ${safeDesc(evt.sessionId)}`,
         metadata: {
           sessionKey: evt.sessionKey,
           messageCount: evt.messageCount,
@@ -575,7 +665,7 @@ export function registerHooks(
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawning",
         category: "agent",
-        description: `Subagent spawning: ${evt.agentId}`,
+        description: `Subagent spawning: ${safeDesc(evt.agentId)}`,
         metadata: {
           agentId: evt.agentId,
           childSessionKey: evt.childSessionKey,
@@ -593,7 +683,7 @@ export function registerHooks(
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_spawned",
         category: "agent",
-        description: `Subagent spawned: ${evt.agentId}`,
+        description: `Subagent spawned: ${safeDesc(evt.agentId)}`,
         metadata: {
           agentId: evt.agentId,
           childSessionKey: evt.childSessionKey,
@@ -612,7 +702,7 @@ export function registerHooks(
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_delivery",
         category: "agent",
-        description: `Subagent delivery target: ${evt.childSessionKey}`,
+        description: `Subagent delivery target: ${safeDesc(evt.childSessionKey)}`,
         metadata: {
           childSessionKey: evt.childSessionKey,
           requesterSessionKey: evt.requesterSessionKey,
@@ -632,7 +722,7 @@ export function registerHooks(
         sessionId: ctx.requesterSessionKey,
         eventType: "agent.subagent_ended",
         category: "agent",
-        description: `Subagent ended: ${evt.outcome ?? "unknown"}`,
+        description: `Subagent ended: ${safeDesc(evt.outcome ?? "unknown")}`,
         metadata: {
           targetSessionKey: evt.targetSessionKey,
           targetKind: evt.targetKind,
@@ -661,20 +751,28 @@ export function registerHooks(
 
   api.on(
     "gateway_stop",
-    (evt) =>
+    (evt) => {
+      if (!gatewayStopCapture.tryClaim()) return;
       safeAppend({
         eventType: "gateway.stop",
         category: "gateway",
-        description: `Gateway stopped: ${evt.reason ?? "shutdown"}`,
+        description: `Gateway stopped: ${safeDesc(evt.reason ?? "shutdown")}`,
         metadata: { reason: evt.reason },
-      }),
+      });
+    },
     { priority: AUDIT_PRIORITY },
   );
 
-  // --- Install pipeline (openclaw >= 2026.4 only) ---
-  // before_install does not exist on older openclaw runtimes; the loader
-  // logs an "unknown typed hook" warning and ignores the registration. The
-  // try/catch swallows that path so the rest of the listener still loads.
+  // --- Install pipeline ---
+  // before_install lands in openclaw >=2026.4.15; this plugin's peer floor is
+  // >=2026.4.24 (gated by allowConversationAccess), so the runtime should
+  // always recognize this hook. On older runtimes that we may still encounter
+  // via mixed-version operator setups, openclaw warns "unknown typed hook"
+  // and silently skips the registration without throwing. The try/catch is a
+  // defense-in-depth guard against future runtimes that throw on unknown
+  // hooks; on the warn-and-skip path it never fires. Either way, an audit
+  // row is emitted so the operator's log shows that install auditing did or
+  // did not start.
   try {
     (api.on as unknown as (
       name: string,
@@ -696,7 +794,9 @@ export function registerHooks(
         safeAppend({
           eventType: "system.install",
           category: "system",
-          description: `Install ${request?.mode ?? "request"}: ${target} ${name}`,
+          description: safeComposite(
+            `Install ${safeDesc(request?.mode ?? "request")}: ${safeDesc(target)} ${safeDesc(name)}`,
+          ),
           metadata: {
             targetType: target,
             targetName: name,
@@ -724,7 +824,14 @@ export function registerHooks(
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.warn("[audit-plugin] before_install hook unavailable:", message);
+    // Record the registration miss in the audit trail so operators reviewing
+    // the SQLite log later can distinguish "no installs happened" from "we
+    // silently couldn't register".
+    safeAppend({
+      eventType: "system.install_hook_unavailable",
+      category: "system",
+      description: `before_install hook unavailable: ${safeDesc(message)}`,
+      metadata: { error: message },
+    });
   }
-
-  return activity;
 }

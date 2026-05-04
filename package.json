@@ -31,13 +31,13 @@
     "@types/node": "^24.0.0",
     "@types/picomatch": "^4.0.3",
     "ethers": "^6.0.0",
-    "openclaw": "^2026.4.1",
+    "openclaw": "^2026.4.24",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   },
   "peerDependencies": {
     "ethers": "^6.0.0",
-    "openclaw": ">=2026.4.15"
+    "openclaw": ">=2026.4.24"
   },
   "peerDependenciesMeta": {
     "ethers": {
@@ -49,12 +49,12 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.4.15",
-      "minGatewayVersion": "2026.4.15"
+      "pluginApi": ">=2026.4.24",
+      "minGatewayVersion": "2026.4.24"
     },
     "build": {
-      "openclawVersion": "2026.4.1",
-      "pluginSdkVersion": "2026.4.1"
+      "openclawVersion": "2026.4.24",
+      "pluginSdkVersion": "2026.4.24"
     }
   }
 }
