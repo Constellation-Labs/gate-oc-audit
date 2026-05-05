@@ -633,7 +633,7 @@ export class SmtService {
   private checkpoint(): void {
     // Serialize checkpoints: wait for any in-flight checkpoint to finish before
     // starting the next one. Prevents concurrent checkpointAll calls from
-    // interleaving their clear-then-write sequences on the same LevelDB.
+    // interleaving their clear-then-write transactions on the same sqlite file.
     const prev = this.checkpointInFlight ?? Promise.resolve();
     const work = prev
       .catch(() => {})

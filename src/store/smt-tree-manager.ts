@@ -2,13 +2,15 @@
  * Multi-Tree Manager
  *
  * Manages multiple SmtStore instances keyed by string identifier.
- * Persistence via LevelDB — one sublevel per tree.
+ * Persistence via node:sqlite — one DB file per tree at `<dir>/<treeKey>.db`.
  */
 
 import { SmtStore } from "./smt-store.js";
-import { Level } from "level";
+import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+
+const DB_SUFFIX = ".db";
 
 export interface TreeInfo {
   key: string;
@@ -61,36 +63,43 @@ export class TreeManager {
 
     for (const [treeKey, store] of this.trees) {
       const snapshot = store.checkpoint();
-      const dbPath = join(dir, treeKey);
+      const dbPath = join(dir, treeKey + DB_SUFFIX);
 
-      const db = new Level<string, string>(dbPath);
+      const db = new DatabaseSync(dbPath);
       try {
-        // Clear stale node keys before writing the new snapshot.
-        // Without this, pruned nodes would persist and corrupt state on restore.
-        const batch = db.batch();
-        for await (const key of db.keys()) {
-          if (key.startsWith("n:")) {
-            batch.del(key);
+        db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+
+        const upsert = db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)");
+        const del = db.prepare("DELETE FROM kv WHERE key = ?");
+        const deleteNodes = db.prepare("DELETE FROM kv WHERE key LIKE 'n:%'");
+
+        // Single transaction so the snapshot replaces atomically — no torn
+        // state where stale n:% rows coexist with new ones.
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          deleteNodes.run();
+
+          upsert.run("meta:root", snapshot.root);
+          upsert.run("meta:entryCount", String(store.getEntryCount()));
+
+          const frozenKeys = store.getFrozenKeys();
+          if (frozenKeys.size > 0) {
+            upsert.run("meta:frozenKeys", JSON.stringify(Array.from(frozenKeys)));
+          } else {
+            del.run("meta:frozenKeys");
           }
+
+          for (const [nodeHash, children] of snapshot.nodes) {
+            upsert.run(`n:${nodeHash}`, JSON.stringify(children));
+          }
+
+          db.exec("COMMIT");
+        } catch (err) {
+          db.exec("ROLLBACK");
+          throw err;
         }
-
-        batch.put("meta:root", snapshot.root);
-        batch.put("meta:entryCount", String(store.getEntryCount()));
-
-        const frozenKeys = store.getFrozenKeys();
-        if (frozenKeys.size > 0) {
-          batch.put("meta:frozenKeys", JSON.stringify(Array.from(frozenKeys)));
-        } else {
-          batch.del("meta:frozenKeys");
-        }
-
-        for (const [nodeHash, children] of snapshot.nodes) {
-          batch.put(`n:${nodeHash}`, JSON.stringify(children));
-        }
-
-        await batch.write();
       } finally {
-        await db.close();
+        db.close();
       }
     }
   }
@@ -100,39 +109,55 @@ export class TreeManager {
 
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      // Directories are the old LevelDB layout. The on-disk format changed
+      // in v0.2.0 — operators must clear stale checkpoint dirs (or accept
+      // that the tree rebuilds from events on next checkpoint).
+      if (entry.isDirectory()) {
+        console.error(
+          `[smt-tree-manager] Skipping legacy LevelDB checkpoint at "${entry.name}"; ` +
+            `rebuild required (sqlite layout introduced in v0.2.0). ` +
+            `Delete the directory to silence this warning.`,
+        );
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(DB_SUFFIX)) continue;
 
-      const treeKey = entry.name;
-      const dbPath = join(dir, treeKey);
+      const treeKey = entry.name.slice(0, -DB_SUFFIX.length);
+      const dbPath = join(dir, entry.name);
 
-      let db: Level<string, string>;
+      let db: DatabaseSync;
       try {
-        db = new Level<string, string>(dbPath);
+        db = new DatabaseSync(dbPath);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
-        console.error(`[smt-tree-manager] Failed to open LevelDB at ${dbPath}: ${msg}`);
+        console.error(`[smt-tree-manager] Failed to open sqlite checkpoint at ${dbPath}: ${msg}`);
         continue;
       }
 
       try {
-        const store = new SmtStore();
-        const root = await db.get("meta:root");
+        const rootRow = db.prepare("SELECT value FROM kv WHERE key = ?").get("meta:root") as
+          | { value: string }
+          | undefined;
+        if (!rootRow) {
+          console.error(`[smt-tree-manager] Tree "${treeKey}" missing meta:root, skipping`);
+          continue;
+        }
+        const root = rootRow.value;
 
         const nodes = new Map<string, string[]>();
-        for await (const [key, value] of db.iterator()) {
-          if (key.startsWith("n:")) {
-            nodes.set(key.slice(2), JSON.parse(value));
-          }
+        const nodeRows = db
+          .prepare("SELECT key, value FROM kv WHERE key LIKE 'n:%' ORDER BY key")
+          .all() as Array<{ key: string; value: string }>;
+        for (const row of nodeRows) {
+          nodes.set(row.key.slice(2), JSON.parse(row.value));
         }
 
-        let frozenKeys: string[] | undefined;
-        try {
-          const frozenRaw = await db.get("meta:frozenKeys");
-          frozenKeys = JSON.parse(frozenRaw) as string[];
-        } catch {
-          // No frozen keys — backward compatible
-        }
+        const frozenRow = db.prepare("SELECT value FROM kv WHERE key = ?").get("meta:frozenKeys") as
+          | { value: string }
+          | undefined;
+        const frozenKeys = frozenRow ? (JSON.parse(frozenRow.value) as string[]) : undefined;
 
+        const store = new SmtStore();
         store.restore({ root, nodes, frozenKeys });
         const inconsistency = store.shallowConsistencyCheck();
         if (inconsistency) {
@@ -146,7 +171,7 @@ export class TreeManager {
         const msg = err instanceof Error ? err.message : "Unknown error";
         console.error(`[smt-tree-manager] Failed to restore tree "${treeKey}": ${msg}`);
       } finally {
-        await db.close();
+        db.close();
       }
     }
   }

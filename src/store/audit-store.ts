@@ -151,6 +151,7 @@ export class AuditStore {
   private sequence: number;
   private machineId: string;
   private degraded = false;
+  private readOnly: boolean;
   private insertStmt: StatementSync;
 
   private stmts: {
@@ -164,11 +165,16 @@ export class AuditStore {
     maxSequenceSince: StatementSync;
   };
 
-  constructor(dbPath = "~/.openclaw/audit.db") {
+  constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
+    this.readOnly = opts.readOnly === true;
     const resolvedPath = dbPath.replace(/^~/, process.env.HOME ?? ".");
-    mkdirSync(dirname(resolvedPath), { recursive: true });
+    if (!this.readOnly) {
+      mkdirSync(dirname(resolvedPath), { recursive: true });
+    }
 
-    this.db = this.openOrRecover(resolvedPath);
+    this.db = this.readOnly
+      ? this.openReadOnly(resolvedPath)
+      : this.openOrRecover(resolvedPath);
     this.machineId = getMachineId();
 
     const lastRow = this.db
@@ -177,7 +183,12 @@ export class AuditStore {
 
     this.sequence = lastRow?.sequence ?? 0;
 
-    this.insertStmt = this.db.prepare(`
+    // Insert path is unused in read-only mode but the prepared statement is
+    // a property; bind it to a no-op SELECT so the type stays satisfied
+    // without opening write capabilities.
+    this.insertStmt = this.readOnly
+      ? this.db.prepare("SELECT 1 WHERE 0")
+      : this.db.prepare(`
       INSERT INTO audit_events
         (id, sequence, source, machine_id, session_id, org_id, user_id,
          event_type, category, description, metadata, content_gz, created_at)
@@ -204,6 +215,13 @@ export class AuditStore {
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
     };
+  }
+
+  private openReadOnly(resolvedPath: string): DatabaseSync {
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`Audit DB not found at ${resolvedPath} — read-only open requires an existing file`);
+    }
+    return new DatabaseSync(resolvedPath, { readOnly: true });
   }
 
   private openOrRecover(resolvedPath: string): DatabaseSync {
@@ -245,6 +263,10 @@ export class AuditStore {
   }
 
   append(insert: AuditEventInsert): AuditEvent | undefined {
+    if (this.readOnly) {
+      console.error("[audit-plugin] append() called on a read-only store; dropping event");
+      return undefined;
+    }
     try {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";

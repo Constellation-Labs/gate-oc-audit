@@ -51,7 +51,11 @@ export default (() => {
             function getStore(): AuditStore {
                 if (!store) {
                     const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
-                    store = new AuditStore(dbPath);
+                    // CLI handlers only read; open the DB read-only so a running
+                    // gateway (writer) and the CLI can coexist via SQLite WAL.
+                    // The eager full-mode registration below reassigns `store`
+                    // to a writer instance before any hook fires.
+                    store = new AuditStore(dbPath, { readOnly: true });
                 }
                 return store;
             }
