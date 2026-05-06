@@ -192,9 +192,8 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    const stack = new Error("audit-store ctor").stack?.split("\n").slice(2, 7).join("\n  ") ?? "(no stack)";
-    console.error(
-      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}, initialSequence=${this.sequence}\n  ${stack}`,
+    console.info(
+      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}, initialSequence=${this.sequence}`,
     );
 
     // Insert path is unused in read-only mode but the prepared statement is

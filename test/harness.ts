@@ -52,7 +52,7 @@ function createMockApi(config: Record<string, unknown> = {}) {
 function fire(api: ReturnType<typeof createMockApi>, name: string, event: unknown, ctx: unknown = {}) {
   const entry = api.hooks.get(name);
   if (!entry) {
-    console.error(`  [skip] hook "${name}" not registered`);
+    console.warn(`  [skip] hook "${name}" not registered`);
     return;
   }
   entry.handler(event, ctx);

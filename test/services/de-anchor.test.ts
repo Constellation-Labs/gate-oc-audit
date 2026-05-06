@@ -249,48 +249,48 @@ describe("DeAnchorService", () => {
 
     describe("factory", () => {
         it("returns NoOpAnchorService when no credentials configured", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
+            const messages: string[] = [];
+            const origInfo = console.info;
+            console.info = (...args: unknown[]) => messages.push(args.join(" "));
 
             try {
                 const service = createDeAnchorService(store, {});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                console.info = origInfo;
             }
         });
 
         it("returns NoOpAnchorService when API key without org/tenant", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
+            const messages: string[] = [];
+            const origInfo = console.info;
+            console.info = (...args: unknown[]) => messages.push(args.join(" "));
 
             try {
                 const service = createDeAnchorService(store, {deApiKey: "test-key"});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("deOrgId and deTenantId missing")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(messages.some((e) => e.includes("deOrgId and deTenantId missing")));
+                assert.ok(messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                console.info = origInfo;
             }
         });
 
         it("returns NoOpAnchorService when wallet key file does not exist", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
+            const messages: string[] = [];
+            const origInfo = console.info;
+            console.info = (...args: unknown[]) => messages.push(args.join(" "));
 
             try {
                 const service = createDeAnchorService(store, {
                     deWalletKeyFile: "/nonexistent/wallet.key",
                 });
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("not found")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(messages.some((e) => e.includes("not found")));
+                assert.ok(messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                console.info = origInfo;
             }
         });
 
@@ -298,17 +298,17 @@ describe("DeAnchorService", () => {
             const keyFile = join(dirname(dbPath), "bad-wallet.key");
             writeFileSync(keyFile, "not-a-valid-hex-key");
 
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
+            const messages: string[] = [];
+            const origInfo = console.info;
+            console.info = (...args: unknown[]) => messages.push(args.join(" "));
 
             try {
                 const service = createDeAnchorService(store, {deWalletKeyFile: keyFile});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("invalid private key")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(messages.some((e) => e.includes("invalid private key")));
+                assert.ok(messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                console.info = origInfo;
             }
         });
 

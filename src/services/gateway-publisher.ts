@@ -41,7 +41,7 @@ export interface GatewayPublisher {
 
 class NoOpGatewayPublisher implements GatewayPublisher {
   constructor(reason: string) {
-    console.error(`[audit-plugin:gateway-publisher] ${reason}, gateway publishing disabled`);
+    console.info(`[audit-plugin:gateway-publisher] ${reason}, gateway publishing disabled`);
   }
   isActive(): boolean { return false; }
   async start(): Promise<void> { /* no-op */ }
@@ -161,7 +161,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   async start(): Promise<void> {
     if (this.timer) return; // idempotent — repeated start() calls don't leak timers
-    console.error(
+    console.info(
       `[audit-plugin:gateway-publisher] Starting — url: ${this.cfg.ingestUrl}, batchSize: ${this.cfg.batchSize}, intervalMs: ${this.cfg.intervalMs}`,
     );
     this.timer = setInterval(() => {
@@ -181,7 +181,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
     if (this.buffer.length >= this.cfg.bufferCapacity) {
       this.dropped++;
       if (this.dropped >= this.nextDropMilestone) {
-        console.error(
+        console.warn(
           `[audit-plugin:gateway-publisher] Buffer full (${this.cfg.bufferCapacity}), dropped ${this.dropped} event(s) cumulatively`,
         );
         try {
@@ -246,7 +246,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       if (payload === undefined) {
         // Oversized batch — drop with a warn log rather than requeueing
         // (a too-large batch will keep failing forever otherwise).
-        console.error(
+        console.warn(
           `[audit-plugin:gateway-publisher] WARN dropping batch of ${batch.length} event(s): payload exceeds ${this.cfg.maxPayloadBytes} bytes`,
         );
         return true;
@@ -314,7 +314,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       const delayMs = Math.min(CIRCUIT_BREAKER_BASE_MS * 2 ** this.circuitOpenCount, CIRCUIT_BREAKER_MAX_MS);
       this.circuitOpenCount++;
       this.circuitOpenUntil = Date.now() + delayMs;
-      console.error(
+      console.warn(
         `[audit-plugin:gateway-publisher] Circuit breaker open — will retry after ${delayMs / 1000}s`,
       );
     }
@@ -336,7 +336,7 @@ export function createGatewayPublisher(
   const enabledConfig = config.gatewayEnabled;
   if (enabledConfig === false) return new NoOpGatewayPublisher("gatewayEnabled=false");
   if (enabledConfig !== undefined && typeof enabledConfig !== "boolean") {
-    console.error(
+    console.warn(
       `[audit-plugin:gateway-publisher] WARN gatewayEnabled is non-boolean (${typeof enabledConfig}); treating as default`,
     );
   }

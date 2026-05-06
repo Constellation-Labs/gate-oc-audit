@@ -71,7 +71,7 @@ function buildQueryOpts(opts: { type?: string; category?: string; session?: stri
 
 export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void {
   if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+    console.warn("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
   }
 
   const q = buildQueryOpts(opts);
@@ -151,7 +151,7 @@ export async function cliVerifyHandler(
         process.exitCode = 1;
       }
       if (failed > 0) {
-        console.error(`  WARNING: ${failed} proof verification(s) failed.`);
+        console.warn(`  WARNING: ${failed} proof verification(s) failed.`);
         notifier?.notifyIntegrityViolation(0, `${failed} SMT proof verification(s) failed`).catch(() => {});
         process.exitCode = 1;
       }

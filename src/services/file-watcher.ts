@@ -104,7 +104,7 @@ export class FileWatcher {
     const baseDirs = [...new Set(resolvedPatterns.map(globParent))].filter((d) => existsSync(d));
 
     if (baseDirs.length === 0) {
-      console.error("[audit-plugin] No existing directories found for file watch patterns");
+      console.warn("[audit-plugin] No existing directories found for file watch patterns");
       return;
     }
 

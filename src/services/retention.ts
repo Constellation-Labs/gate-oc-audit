@@ -38,7 +38,7 @@ export class RetentionService {
     try {
       const deleted = this.store.prune(this.retentionDays, this.maxSizeMb);
       if (deleted > 0) {
-        console.error(`[audit-plugin] Pruned ${deleted} expired events`);
+        console.info(`[audit-plugin] Pruned ${deleted} expired events`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";

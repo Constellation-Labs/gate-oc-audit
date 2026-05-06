@@ -31,7 +31,7 @@ export class NotificationService {
     if (webhookUrl) {
       const reason = isUnsafeUrl(webhookUrl);
       if (reason) {
-        console.error(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
+        console.warn(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
       } else {
         this.webhookUrl = webhookUrl;
       }
@@ -140,7 +140,7 @@ export class NotificationService {
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       });
       if (!response.ok) {
-        console.error(
+        console.warn(
           `[audit-plugin] Notification webhook returned ${response.status}: ${response.statusText}`,
         );
       }
