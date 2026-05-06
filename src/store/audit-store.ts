@@ -146,6 +146,11 @@ function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
   };
 }
 
+// Per-process counter so log lines can distinguish multiple AuditStore
+// instances created within the same process (different IIFE evaluations
+// in separate VM contexts each start at 0).
+let _auditStoreInstances = 0;
+
 export class AuditStore {
   private db: DatabaseSync;
   private sequence: number;
@@ -153,6 +158,7 @@ export class AuditStore {
   private degraded = false;
   private readOnly: boolean;
   private insertStmt: StatementSync;
+  private instanceId: string;
 
   private stmts: {
     getManifestsByType: StatementSync;
@@ -182,6 +188,14 @@ export class AuditStore {
       .get() as { sequence: number } | undefined;
 
     this.sequence = lastRow?.sequence ?? 0;
+
+    // Diagnostic ID for tracing concurrent-instance issues.
+    _auditStoreInstances++;
+    this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
+    const stack = new Error("audit-store ctor").stack?.split("\n").slice(2, 7).join("\n  ") ?? "(no stack)";
+    console.error(
+      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}, initialSequence=${this.sequence}\n  ${stack}`,
+    );
 
     // Insert path is unused in read-only mode but the prepared statement is
     // a property; bind it to a no-op SELECT so the type stays satisfied
@@ -267,6 +281,7 @@ export class AuditStore {
       console.error("[audit-plugin] append() called on a read-only store; dropping event");
       return undefined;
     }
+    let triedSeq: number | undefined;
     try {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
@@ -315,6 +330,7 @@ export class AuditStore {
       }
 
       const nextSequence = this.sequence + 1;
+      triedSeq = nextSequence;
       const createdAt = new Date().toISOString();
 
       const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
@@ -362,7 +378,25 @@ export class AuditStore {
     } catch (err) {
       this.degraded = true;
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] Failed to append event:", message);
+
+      // Diagnostic dump on UNIQUE/sequence collisions: what we tried, what's
+      // currently in the DB, and what our cached counter thinks. If two
+      // instances are racing, dbMax > our cached this.sequence and the next
+      // attempt will collide again (the in-memory counter never advances on
+      // failure). If dbMax == our cached this.sequence, the cache is in sync
+      // and the bug is elsewhere.
+      let diag = "";
+      try {
+        const row = this.db
+          .prepare("SELECT MAX(sequence) AS m, COUNT(*) AS c FROM audit_events")
+          .get() as { m: number | null; c: number };
+        diag = ` triedSeq=${triedSeq ?? "N/A"} cachedSeq=${this.sequence} dbMax=${row.m ?? 0} dbCount=${row.c} eventType=${insert.eventType}`;
+      } catch {
+        // ignore — best-effort diagnostic
+      }
+      console.error(
+        `[audit-plugin][store=${this.instanceId}] Failed to append event: ${message}${diag}`,
+      );
       return undefined;
     }
   }
