@@ -6,11 +6,14 @@ on:
 env:
   OPENCLAW_BASE_IMAGE: ghcr.io/openclaw/openclaw:2026.4.29
   OPENCLAW_IMAGE: openclaw-test:local
+  # Pinned to a specific tag for reproducibility — bump deliberately.
+  OLLAMA_IMAGE: ollama/ollama:0.5.7
+  OLLAMA_MODEL: qwen2.5:0.5b
 
 jobs:
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +50,37 @@ jobs:
           USER node
           EOF
 
+      - name: Create shared docker network
+        run: docker network create openclaw-net
+
+      - name: Restore Ollama model cache
+        id: ollama-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ollama-cache
+          key: ollama-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_MODEL }}
+
+      - name: Start Ollama sidecar
+        run: |
+          mkdir -p "$HOME/ollama-cache"
+          docker run -d --name ollama \
+            --network openclaw-net \
+            -v "$HOME/ollama-cache:/root/.ollama" \
+            -p 11434:11434 \
+            "$OLLAMA_IMAGE"
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+              echo "ollama ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Pull Ollama model
+        # `pull` is idempotent: a no-op when the cache hit covered the digest,
+        # otherwise downloads the model into the bind-mounted cache dir.
+        run: docker exec ollama ollama pull "$OLLAMA_MODEL"
+
       - name: Onboard openclaw (non-interactive)
         run: |
           docker run --rm \
@@ -55,7 +89,7 @@ jobs:
             "$OPENCLAW_IMAGE" \
             dist/index.js onboard --mode local --no-install-daemon
 
-      - name: Configure gateway runtime
+      - name: Configure gateway runtime + Ollama defaults
         run: |
           docker run --rm \
             --entrypoint node \
@@ -64,7 +98,10 @@ jobs:
             dist/index.js config set --batch-json '[
               {"path":"gateway.mode","value":"local"},
               {"path":"gateway.bind","value":"lan"},
-              {"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}
+              {"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]},
+              {"path":"models.providers.ollama.baseUrl","value":"http://ollama:11434"},
+              {"path":"models.providers.ollama.models","value":[{"id":"'"$OLLAMA_MODEL"'","name":"'"$OLLAMA_MODEL"'","api":"ollama"}]},
+              {"path":"agents.defaults.model","value":"ollama/'"$OLLAMA_MODEL"'"}
             ]'
 
       - name: Install plugin into openclaw
@@ -76,13 +113,22 @@ jobs:
             "$OPENCLAW_IMAGE" \
             dist/index.js plugins install /tmp/plugin.tgz
 
+      - name: Opt audit plugin into conversation hooks
+        run: |
+          docker run --rm \
+            --entrypoint node \
+            -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+            "$OPENCLAW_IMAGE" \
+            dist/index.js config set \
+              plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess true
+
       - name: Start openclaw gateway
         run: |
           docker run -d --name openclaw \
+            --network openclaw-net \
             -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
             -p 18789:18789 \
             -e OPENCLAW_DISABLE_BONJOUR=1 \
-            -e OPENCLAW_GATEWAY_BIND=lan \
             "$OPENCLAW_IMAGE"
 
       - name: Wait for gateway readiness
@@ -98,6 +144,13 @@ jobs:
           docker logs openclaw || true
           exit 1
 
+      - name: Run one agent turn (drives LLM hooks)
+        run: |
+          docker exec openclaw node dist/index.js agent \
+            --agent main \
+            --message "Reply with the single word OK." \
+            2>&1 | tee agent.out
+
       - name: Stop openclaw gateway
         run: docker stop -t 30 openclaw
 
@@ -107,22 +160,39 @@ jobs:
             --entrypoint node \
             -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
             "$OPENCLAW_IMAGE" \
-            dist/index.js audit export json --limit 100 \
+            dist/index.js audit export json --limit 500 \
             > export.jsonl
           echo "--- export.jsonl ---"
           cat export.jsonl
 
-      - name: Assert gateway lifecycle events captured
+      - name: Assert expected event types captured
         run: |
-          if ! grep -q '"eventType":"gateway.start"' export.jsonl; then
-            echo "missing gateway.start event"
+          require_event() {
+            local type="$1"
+            local min="${2:-1}"
+            local count
+            count=$(grep -c "\"eventType\":\"$type\"" export.jsonl || true)
+            if [ "$count" -lt "$min" ]; then
+              echo "missing event: $type (got $count, need >= $min)"
+              exit 1
+            fi
+            echo "OK — $type captured ($count)"
+          }
+          require_event gateway.start
+          require_event gateway.stop
+          require_event prompt.input
+          require_event prompt.model_resolve
+          require_event prompt.build
+          require_event agent.end
+
+          total=$(wc -l < export.jsonl)
+          # 6 required types above, plus rate-limit grouping leaves headroom;
+          # bail loudly if the export is suspiciously thin.
+          if [ "$total" -lt 6 ]; then
+            echo "audit export has only $total events — expected >= 6"
             exit 1
           fi
-          if ! grep -q '"eventType":"gateway.stop"' export.jsonl; then
-            echo "missing gateway.stop event"
-            exit 1
-          fi
-          echo "OK — both gateway.start and gateway.stop captured"
+          echo "OK — $total total events captured"
 
       - name: Verify SMT integrity
         run: |
@@ -137,9 +207,72 @@ jobs:
             exit 1
           fi
 
-      - name: Capture gateway logs on failure
+      - name: Assert SMT inclusion of agent.end
+        run: |
+          run_audit() {
+            docker run --rm \
+              --entrypoint node \
+              -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+              "$OPENCLAW_IMAGE" \
+              dist/index.js audit "$@"
+          }
+          event_id=$(jq -r 'select(.eventType=="agent.end") | .id' export.jsonl | head -n1)
+          session_id=$(jq -r 'select(.eventType=="agent.end") | .sessionId' export.jsonl | head -n1)
+          if [ -z "$event_id" ] || [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
+            echo "could not extract agent.end id/sessionId from export"
+            exit 1
+          fi
+          tree_key=$(run_audit smt trees | awk -F: 'NR==1 {print $1}')
+          if [ -z "$tree_key" ]; then
+            echo "no SMT trees found"
+            exit 1
+          fi
+          run_audit smt chain "$session_id" --tree "$tree_key" | tee chain.out
+          if ! grep -q "\\[$event_id\\]" chain.out; then
+            echo "agent.end event $event_id not found in SMT chain for session $session_id"
+            exit 1
+          fi
+          echo "OK — agent.end ($event_id) committed to SMT tree $tree_key"
+
+      - name: Smoke-test SMT subcommands and event-list filters
+        run: |
+          run_audit() {
+            docker run --rm \
+              --entrypoint node \
+              -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
+              "$OPENCLAW_IMAGE" \
+              dist/index.js audit "$@"
+          }
+          run_audit smt trees | tee smt-trees.out
+          test -s smt-trees.out
+
+          run_audit smt root | tee smt-root.out
+          test -s smt-root.out
+
+          run_audit list --type prompt.input --limit 5 | tee list-prompt-input.out
+          if ! grep -q prompt.input list-prompt-input.out; then
+            echo "audit list --type prompt.input returned no rows"
+            exit 1
+          fi
+
+          run_audit list --type agent.end --limit 5 | tee list-agent-end.out
+          if ! grep -q agent.end list-agent-end.out; then
+            echo "audit list --type agent.end returned no rows"
+            exit 1
+          fi
+
+      - name: Permit Ollama cache save
+        # Runs before the actions/cache post-step. Ollama writes the blob store
+        # as root inside the container; chown back so the runner user can
+        # archive it for cache save.
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "$HOME/ollama-cache" || true
+
+      - name: Capture container logs on failure
         if: failure()
-        run: docker logs openclaw > openclaw.log 2>&1 || true
+        run: |
+          docker logs openclaw > openclaw.log 2>&1 || true
+          docker logs ollama > ollama.log 2>&1 || true
 
       - name: Make config dir readable for artifact upload
         if: failure()
@@ -154,4 +287,11 @@ jobs:
             ${{ steps.cfg.outputs.dir }}
             export.jsonl
             verify.out
+            smt-trees.out
+            smt-root.out
+            list-prompt-input.out
+            list-agent-end.out
+            chain.out
+            agent.out
             openclaw.log
+            ollama.log
