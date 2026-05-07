@@ -192,7 +192,7 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    console.info(
+    console.error(
       `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}, initialSequence=${this.sequence}`,
     );
 

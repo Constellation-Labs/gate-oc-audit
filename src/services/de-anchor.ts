@@ -97,7 +97,7 @@ export interface AnchorService {
 
 export class NoOpAnchorService implements AnchorService {
     constructor(reason: string) {
-        console.info(`[audit-plugin:de-anchor] ${reason}, anchoring disabled`);
+        console.error(`[audit-plugin:de-anchor] ${reason}, anchoring disabled`);
     }
 
     isActive(): boolean {
@@ -184,8 +184,8 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async start(): Promise<void> {
-        console.info(`[audit-plugin:de-anchor] plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
-        console.info(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
+        console.error(`[audit-plugin:de-anchor] plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
+        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
         await this.verifyCheckpoints();
         await this.anchorIfNeeded(this.timerMinEvents);
@@ -193,7 +193,7 @@ class ActiveAnchorService implements AnchorService {
             this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
         }, this.intervalMs);
         this.timer.unref();
-        console.info("[audit-plugin:de-anchor] Started successfully");
+        console.error("[audit-plugin:de-anchor] Started successfully");
     }
 
     stop(): void {
@@ -206,7 +206,7 @@ class ActiveAnchorService implements AnchorService {
     notifyAppend(): void {
         this.appendsSinceLastCheckpoint++;
         if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
-            console.warn(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
+            console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
             this.anchorIfNeeded().catch(() => {});
         }
     }
@@ -215,7 +215,7 @@ class ActiveAnchorService implements AnchorService {
         if (this.anchorInFlight) return;
         if (this.isCircuitOpen()) {
             const waitMs = this.circuitOpenUntil - Date.now();
-            console.warn(`[audit-plugin:de-anchor] WARN anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
+            console.error(`[audit-plugin:de-anchor] WARN anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
             return;
         }
 
@@ -229,18 +229,18 @@ class ActiveAnchorService implements AnchorService {
 
             const smtRoot = this.smtService?.getCurrentSmtRoot();
             if (!smtRoot) {
-                console.warn("[audit-plugin:de-anchor] No SMT root available, skipping anchor");
+                console.error("[audit-plugin:de-anchor] No SMT root available, skipping anchor");
                 return;
             }
 
             const seqEnd = this.store.maxSequenceSince(startSeq);
             if (seqEnd === undefined) {
                 // Theoretically unreachable — countSince just confirmed events exist
-                console.warn("[audit-plugin:de-anchor] maxSequenceSince returned undefined despite positive count, skipping anchor");
+                console.error("[audit-plugin:de-anchor] maxSequenceSince returned undefined despite positive count, skipping anchor");
                 return;
             }
 
-            console.info(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
+            console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
             const txHash = await this.submitFingerprint(smtRoot);
 
             const checkpointId = uuidv7();
@@ -249,11 +249,11 @@ class ActiveAnchorService implements AnchorService {
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
             if (txHash) {
-                console.info(
+                console.error(
                     `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
                 );
             } else {
-                console.warn(
+                console.error(
                     `[audit-plugin:de-anchor] WARN DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
                 );
             }
@@ -286,17 +286,17 @@ class ActiveAnchorService implements AnchorService {
                         try {
                             const detail = await verifyFn(cp.smtRoot);
                             if (!detail) {
-                                console.warn(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
+                                console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
                                 notifier
                                     ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
                                     .catch((notifyErr) => {
                                         const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
-                                        console.warn(`[audit-plugin:de-anchor] WARN divergence notification failed for checkpoint ${cp.id}: ${msg}`);
+                                        console.error(`[audit-plugin:de-anchor] WARN divergence notification failed for checkpoint ${cp.id}: ${msg}`);
                                     });
                             }
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : "Unknown error";
-                            console.warn(`[audit-plugin:de-anchor] WARN verify API call failed for checkpoint ${cp.id}: ${msg}`);
+                            console.error(`[audit-plugin:de-anchor] WARN verify API call failed for checkpoint ${cp.id}: ${msg}`);
                         }
                     }),
             );

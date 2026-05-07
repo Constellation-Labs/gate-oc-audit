@@ -397,7 +397,7 @@ export default (() => {
 
             // --- Background services ---
 
-            console.info(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
+            console.error(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
 
             const retention = new RetentionService(activeStore, config);
             const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
@@ -426,7 +426,7 @@ export default (() => {
             api.registerService({
                 id: "constellation-audit-plugin:smt",
                 async start() {
-                    console.info("[audit-plugin] Service smt start() called");
+                    console.error("[audit-plugin] Service smt start() called");
                     await activeSmt.start();
                     // Replay events the SMT hasn't seen yet (delta since last checkpoint)
                     const lastSeq = activeSmt.getLastCheckpointedSequence();
@@ -442,7 +442,7 @@ export default (() => {
                             }),
                             pending,
                         );
-                        console.info(`[audit-plugin:smt] Replayed ${replayed} event(s) since seq ${lastSeq}`);
+                        console.error(`[audit-plugin:smt] Replayed ${replayed} event(s) since seq ${lastSeq}`);
                     }
                 },
                 async stop() {

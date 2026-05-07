@@ -113,7 +113,7 @@ export class SmtService {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
       const trees = this.manager.listTrees();
-      console.info(
+      console.error(
         `[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`,
       );
     } catch (err) {
@@ -123,7 +123,7 @@ export class SmtService {
   }
 
   async start(): Promise<void> {
-    console.info(
+    console.error(
       `[audit-plugin:smt] Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`,
     );
 
@@ -145,7 +145,7 @@ export class SmtService {
       this.pruneTimer.unref();
     }
 
-    console.info("[audit-plugin:smt] Started successfully");
+    console.error("[audit-plugin:smt] Started successfully");
   }
 
   async stop(): Promise<void> {
@@ -195,7 +195,7 @@ export class SmtService {
   onEventAppended(event: AuditEvent): void {
     try {
       if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        console.warn(
+        console.error(
           "[audit-plugin:smt] Storage cap reached, skipping insert",
         );
         return;

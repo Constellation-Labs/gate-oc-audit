@@ -40,7 +40,7 @@ export class RateLimiter {
     this.bufferCapacity = typeof config.rateLimitBufferSize === "number"
       ? config.rateLimitBufferSize
       : DEFAULT_BUFFER_CAPACITY;
-    console.info(`[audit-plugin:rate-limiter] Initialized — maxPerSec: ${this.maxPerSec}, bufferCapacity: ${this.bufferCapacity}`);
+    console.error(`[audit-plugin:rate-limiter] Initialized — maxPerSec: ${this.maxPerSec}, bufferCapacity: ${this.bufferCapacity}`);
   }
 
   setDeAnchor(deAnchor: AnchorService): void {
@@ -78,7 +78,7 @@ export class RateLimiter {
 
     // Over threshold: buffer the event
     if (this.buffer.length === 0) {
-      console.warn(`[audit-plugin:rate-limiter] Rate limit hit (${this.windowEvents}/${this.maxPerSec}/s), buffering events`);
+      console.error(`[audit-plugin:rate-limiter] Rate limit hit (${this.windowEvents}/${this.maxPerSec}/s), buffering events`);
     }
     if (this.buffer.length < this.bufferCapacity) {
       this.buffer.push(insert);
