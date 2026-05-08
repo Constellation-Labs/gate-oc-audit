@@ -373,6 +373,39 @@ Running `openclaw security audit --deep` may report a `potential-exfiltration` w
 - The database file is created with `0600` permissions (owner read/write only)
 - Sensitive keys (`secret`, `password`, `token`, `apiKey`, `api_key`, `auth`, `credential`, `passphrase`, `jwt`, `bearer`, `cookie`, `privateKey`) are recursively redacted from tool arguments
 - The plugin is fail-open: if the database is unavailable, events are silently dropped and the agent continues normally. A degraded-mode warning appears in `audit list` output
+- CLI commands (`audit list`, `audit verify`, `audit export`, `audit smt …`) open the audit DB read-only, so they coexist with the running gateway via SQLite WAL — no lock contention with the writer
+
+## Upgrade notes
+
+### v0.2.0 — SMT checkpoint format
+
+SMT checkpoint persistence moved from LevelDB to `node:sqlite`. On-disk layout changed from `<checkpointDir>/<treeKey>/` (a LevelDB directory) to `<checkpointDir>/<treeKey>.db` (a single sqlite file).
+
+On first startup after upgrading from 0.1.x, the plugin logs a warning for any legacy LevelDB directory it finds and skips it; trees rebuild from events on the next checkpoint. To silence the warning, delete the legacy directories:
+
+```bash
+rm -rf ~/.openclaw/smt-checkpoints/*/
+```
+
+The migration also drops the `level` runtime dependency, eliminating the `python3` / `build-essential` requirement at install time.
+
+## Maintenance
+
+### Cleaning up orphaned SMT tree files
+
+Each SMT tree is stored as `<smt.checkpointDir>/<treeKey>.db`. With the default `smt.treeKey: "auto"` (derived from `machineId`), exactly one file is reused forever and the directory does not grow. Old `.db` files become orphaned only if:
+
+- you change `smt.treeKey` to a different value (the previous tree's file stays),
+- the machine's `machineId` changes — e.g., container rebuild, OS reinstall — leaving the old `<oldMachineId>.db` behind.
+
+The plugin does not GC these automatically. List the directory and delete any tree files you don't recognize:
+
+```bash
+ls -lh ~/.openclaw/smt-checkpoints/
+rm ~/.openclaw/smt-checkpoints/<old-treeKey>.db
+```
+
+A small `__verifier__.db` is also written on each checkpoint — it's a transient verification tree and is safe to leave in place.
 
 ## Development
 
@@ -388,16 +421,21 @@ The e2e suite simulates openclaw firing lifecycle events through the plugin's ho
 
 ### Local install
 
-To install the plugin from a local checkout into OpenClaw:
+To install the plugin from a local checkout into OpenClaw, build a tarball with `npm pack` and install it:
 
 ```bash
+npm install
 npm run build
-openclaw plugins install --link .
+TGZ=$(npm pack --silent)
+openclaw plugins uninstall constellation-audit-plugin || true
+openclaw plugins install "./$TGZ"
+openclaw gateway restart
+rm -f "./$TGZ"
 ```
 
-The `--link` flag symlinks the local directory instead of copying, so changes are picked up after a rebuild and gateway restart:
+The `uninstall` step ensures a clean reinstall when iterating; the `|| true` guards against errors when no prior install exists. To also wipe the local extension directory and audit database for a fully clean state (development only):
 
 ```bash
-npm run build
-openclaw gateway restart
+rm -rf ~/.openclaw/extensions/constellation-audit-plugin/
+rm -f ~/.openclaw/audit.db*
 ```

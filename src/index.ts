@@ -51,7 +51,11 @@ export default (() => {
             function getStore(): AuditStore {
                 if (!store) {
                     const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
-                    store = new AuditStore(dbPath);
+                    // CLI handlers only read; open the DB read-only so a running
+                    // gateway (writer) and the CLI can coexist via SQLite WAL.
+                    // The eager full-mode registration below reassigns `store`
+                    // to a writer instance before any hook fires.
+                    store = new AuditStore(dbPath, { readOnly: true });
                 }
                 return store;
             }
@@ -141,8 +145,13 @@ export default (() => {
                 ],
             });
 
-            // In cli-metadata mode, only command descriptors are needed
-            if (api.registrationMode === "cli-metadata") return;
+            // Only "full" mode runs the gateway: opens a writer, starts hooks
+            // and services. Other modes (cli-metadata, discovery, setup-only,
+            // setup-runtime) need the CLI registrars above but must not open
+            // a second writer on the audit DB — that would race the running
+            // gateway for the SQLite reserved lock. CLI handlers fall back to
+            // the read-only branch in getStore().
+            if (api.registrationMode !== "full") return;
 
             // Guard against double creation of services — openclaw may load the plugin multiple times.
             // Hooks must be re-registered on every api instance because events may be dispatched
