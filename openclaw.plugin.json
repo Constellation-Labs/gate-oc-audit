@@ -33,6 +33,10 @@
         "type": "string",
         "description": "Path to the OpenClaw configuration directory (default: ~/.openclaw)"
       },
+      "userId": {
+        "type": "string",
+        "description": "Identifier stamped on every audit event as user_id (forwarded to the gateway as plugin_user_id). Resolution order at startup: this config value > OPENCLAW_USER_ID env > USER env > unset (NULL). Useful for multi-operator boxes or CI runners that need stable attribution."
+      },
       "deApiKey": {
         "type": "string",
         "description": "Digital Evidence API key for audit trail anchoring"
@@ -128,11 +132,7 @@
         "type": "number",
         "description": "Maximum JSON payload size for a single POST. Oversized batches are dropped with a warn log rather than retried forever (default: 5000000)"
       },
-      "gatewayIncludeContent": {
-        "type": "boolean",
-        "description": "When true, full event content (prompts, tool args) is forwarded to the gateway. Default false: event.content is stripped from the payload regardless of redactPromptText / redactToolArgs settings, since those govern only local storage. Enable only when the gateway is the trusted source of truth for full content."
-      },
-      "gatewayAllowPrivateHost": {
+"gatewayAllowPrivateHost": {
         "type": "boolean",
         "description": "When true, allows the gateway URL to point at a private/link-local IP (10.x, 172.16-31.x, 192.168.x, 169.254.x, 100.64.0/10, fc00::/7, fe80::/10) over https. Default false (rejected) to mitigate SSRF risk from misconfiguration."
       },

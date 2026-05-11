@@ -183,26 +183,12 @@ describe("GatewayPublisher", () => {
     assert.equal(received[0].body.events.length, 1);
   });
 
-  it("strips event.content by default (gatewayIncludeContent off)", async () => {
+  it("forwards event.content to the gateway", async () => {
     const pub = createGatewayPublisher({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
       gatewayIntervalMs: 60_000,
-    });
-    pub.notifyAppend(makeEvent(1, { content: "secret prompt body" }));
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(received.length, 1);
-    assert.equal(received[0].body.events[0].content, undefined);
-  });
-
-  it("forwards event.content when gatewayIncludeContent=true", async () => {
-    const pub = createGatewayPublisher({
-      gatewayUrl: `http://localhost:${port}`,
-      gatewayApiKey: "sk-gw-test",
-      gatewayBatchSize: 1,
-      gatewayIntervalMs: 60_000,
-      gatewayIncludeContent: true,
     });
     pub.notifyAppend(makeEvent(1, { content: "the prompt" }));
     await new Promise((r) => setTimeout(r, 50));
@@ -217,7 +203,6 @@ describe("GatewayPublisher", () => {
       gatewayBatchSize: 1,
       gatewayIntervalMs: 60_000,
       gatewayMaxPayloadBytes: 1024,
-      gatewayIncludeContent: true,
     });
     // 4 KB content, batchSize=1, max=1024 → payload exceeds limit.
     pub.notifyAppend(makeEvent(1, { content: "x".repeat(4096) }));

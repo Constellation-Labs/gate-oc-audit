@@ -137,7 +137,6 @@ interface ActiveConfig {
   timeoutMs: number;
   bufferCapacity: number;
   shutdownDeadlineMs: number;
-  includeContent: boolean;
   maxPayloadBytes: number;
 }
 
@@ -267,20 +266,12 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   /**
    * Build the JSON payload for one POST. Returns `undefined` when the
-   * serialized batch exceeds `maxPayloadBytes`.
-   * - When `includeContent` is false (default), strips event `content` so the
-   *   gateway doesn't receive prompt/tool-arg text by default.
+   * serialized batch exceeds `maxPayloadBytes`. Event `content` is always
+   * forwarded; the gateway hashes it server-side to populate content_hash
+   * and never persists the raw text.
    */
   private buildPayload(batch: AuditEvent[]): string | undefined {
-    const sanitized = this.cfg.includeContent
-      ? batch
-      : batch.map((e) => {
-          if (e.content === undefined) return e;
-          const copy = { ...e };
-          delete copy.content;
-          return copy;
-        });
-    const body = JSON.stringify({ events: sanitized });
+    const body = JSON.stringify({ events: batch });
     if (Buffer.byteLength(body, "utf8") > this.cfg.maxPayloadBytes) return undefined;
     return body;
   }
@@ -377,7 +368,6 @@ export function createGatewayPublisher(
   const maxPayloadBytes = clampNumber(
     config.gatewayMaxPayloadBytes, MIN_MAX_PAYLOAD_BYTES, DEFAULT_MAX_PAYLOAD_BYTES,
   );
-  const includeContent = config.gatewayIncludeContent === true;
 
   return new ActiveGatewayPublisher({
     ingestUrl,
@@ -387,7 +377,6 @@ export function createGatewayPublisher(
     timeoutMs,
     bufferCapacity,
     shutdownDeadlineMs,
-    includeContent,
     maxPayloadBytes,
   }, deps);
 }

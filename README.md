@@ -89,6 +89,22 @@ Or directly in the config JSON:
 |---|---|---|
 | `notificationWebhook` | — | Webhook URL for alerts (config changes, integrity violations, DE divergence) |
 
+#### Identity
+
+Stamp a stable user identifier on every event. Resolved once at plugin startup and applied to every insert (locally as `user_id`, on the gateway as `plugin_user_id`).
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.userId "alice@example.com"
+```
+
+```json
+{ "config": { "userId": "alice@example.com" } }
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `userId` | — | Identifier to stamp on every event. If unset, falls back to the `OPENCLAW_USER_ID` env var, then the `USER` env var, then NULL. The first non-empty value wins |
+
 #### Redaction
 
 | Option | Default | Description |
@@ -144,6 +160,51 @@ Or directly in the config JSON:
 | Option | Default | Description |
 |---|---|---|
 | `openclawDir` | `~/.openclaw` | Path to the OpenClaw config directory to watch for skill/tool/soul/cron changes |
+
+#### Gateway publishing
+
+Forward audit events to a swarm-deck gateway for centralized retention. Events are POSTed in batches to `<gatewayUrl>/admin/audit/ingest` with the `X-Gateway-Api-Key` header.
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.gatewayUrl "https://gateway.example.com"
+openclaw config set plugins.entries.constellation-audit-plugin.config.gatewayApiKey "sk-gw-…"
+```
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "constellation-audit-plugin": {
+        "config": {
+          "gatewayUrl": "https://gateway.example.com",
+          "gatewayApiKey": "sk-gw-…"
+        }
+      }
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `gatewayUrl` | — | Gateway base URL. Plain `http://` is rejected unless the host is loopback; `https://` to private/link-local IPs requires `gatewayAllowPrivateHost: true` |
+| `gatewayApiKey` | — | API key sent in `X-Gateway-Api-Key`. Required when `gatewayUrl` is set |
+| `gatewayEnabled` | `true` when url+key set | Explicit on/off switch. Setting `false` disables publishing even when url+key are both present |
+| `gatewayAllowPrivateHost` | `false` | Allow `https://` URLs pointing at RFC1918 / link-local / CGNAT hosts |
+| `gatewayBatchSize` | `50` | Max events per POST batch |
+| `gatewayIntervalMs` | `30000` | Max time between POST attempts (ms, min 1000) |
+| `gatewayTimeoutMs` | `15000` | HTTP timeout per POST (ms, min 1000) |
+| `gatewayBufferCapacity` | `10000` | Max events buffered awaiting POST; overflow records a synthetic `gateway.dropped` event on an exponential cadence |
+| `gatewayShutdownDeadlineMs` | `30000` | Wall-clock deadline for the shutdown drain (ms) |
+| `gatewayMaxPayloadBytes` | `5000000` | Drop batches whose JSON exceeds this size rather than retrying forever |
+
+##### Content forwarding
+
+Event `content` (prompt and message bodies, tool result strings) is always forwarded to the gateway. The gateway hashes it server-side and stores only the SHA-256 digest in `plugin_audit_events.content_hash`; the raw text itself is **not** persisted on the gateway.
+
+This is independent of `redactPromptText` / `redactToolArgs`, which govern only what gets written to the plugin's local SQLite database — they do not affect the gateway payload.
+
+> **Migration note.** Earlier versions exposed a `gatewayIncludeContent` flag (default `false`) that stripped `content` from the gateway payload. The flag has been removed — content is now always forwarded. Deployments that explicitly set `gatewayIncludeContent: false` to keep prompt/message bodies off the gateway should remove the key (it will be rejected by `additionalProperties: false`) and rely on `redactPromptText` if they need the content hashed before it leaves the plugin process.
 
 ### Digital Evidence anchoring
 

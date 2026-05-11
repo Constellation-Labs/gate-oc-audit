@@ -17,6 +17,32 @@ const SENSITIVE_KEY =
 
 const AUDIT_PRIORITY = 200;
 
+// Mirrors the gateway DTO's MAX_FIELD_LENGTH cap on userId (see
+// swarm-deck/apps/gateway-proxy/src/audit-ingest/types.ts). Truncating here
+// keeps every batch publishable even when an operator misconfigures the env.
+const USER_ID_MAX_LEN = 1000;
+
+function resolveConfiguredUserId(config: Record<string, unknown>): string | undefined {
+  const candidates: Array<{ source: string; raw: unknown }> = [
+    { source: "config.userId", raw: config.userId },
+    { source: "OPENCLAW_USER_ID env", raw: process.env.OPENCLAW_USER_ID },
+    { source: "USER env", raw: process.env.USER },
+  ];
+  for (const { source, raw } of candidates) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > USER_ID_MAX_LEN) {
+      console.warn(
+        `[audit-plugin] WARN ${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating. Gateway would otherwise reject every batch on validation.`,
+      );
+      return trimmed.slice(0, USER_ID_MAX_LEN);
+    }
+    return trimmed;
+  }
+  return undefined;
+}
+
 // OpenClaw's engine surfaces tool denials/blocks as thrown errors that reach
 // us via after_tool_call's `error` field. We can't distinguish denials from
 // runtime errors structurally, so we match on the engine's authored phrases.
@@ -181,7 +207,17 @@ export function registerHooks(
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
 
+  // Resolution order: explicit config > OPENCLAW_USER_ID env > USER env > unset.
+  // Stamped on every insert; leaves NULL when nothing resolves. Each candidate
+  // is trimmed, skipped when empty, and truncated to USER_ID_MAX_LEN so an
+  // oversized value can't quietly trip the gateway DTO's length cap and stall
+  // every batch on validation rejection.
+  const configuredUserId = resolveConfiguredUserId(config);
+
   const safeAppend = (insert: AuditEventInsert): void => {
+    if (configuredUserId !== undefined && insert.userId === undefined) {
+      insert = { ...insert, userId: configuredUserId };
+    }
     if (
       redactContent &&
       typeof insert.content === "string" &&
