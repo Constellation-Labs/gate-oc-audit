@@ -153,7 +153,6 @@ let _auditStoreInstances = 0;
 
 export class AuditStore {
   private db: DatabaseSync;
-  private sequence: number;
   private machineId: string;
   private degraded = false;
   private readOnly: boolean;
@@ -183,31 +182,30 @@ export class AuditStore {
       : this.openOrRecover(resolvedPath);
     this.machineId = getMachineId();
 
-    const lastRow = this.db
-      .prepare("SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1")
-      .get() as { sequence: number } | undefined;
-
-    this.sequence = lastRow?.sequence ?? 0;
-
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
     console.error(
-      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}, initialSequence=${this.sequence}`,
+      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
     );
 
     // Insert path is unused in read-only mode but the prepared statement is
     // a property; bind it to a no-op SELECT so the type stays satisfied
     // without opening write capabilities.
+    //
+    // sequence is omitted from the column list so that the table's
+    // INTEGER PRIMARY KEY AUTOINCREMENT assigns the next value atomically;
+    // RETURNING reads it back, so no in-process counter is needed.
     this.insertStmt = this.readOnly
       ? this.db.prepare("SELECT 1 WHERE 0")
       : this.db.prepare(`
       INSERT INTO audit_events
-        (id, sequence, source, machine_id, session_id, org_id, user_id,
+        (id, source, machine_id, session_id, org_id, user_id,
          event_type, category, description, metadata, content_gz, created_at)
       VALUES
-        (@id, @sequence, @source, @machineId, @sessionId, @orgId, @userId,
+        (@id, @source, @machineId, @sessionId, @orgId, @userId,
          @eventType, @category, @description, @metadata, @contentGz, @createdAt)
+      RETURNING sequence
     `);
 
     const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
@@ -280,7 +278,6 @@ export class AuditStore {
       console.error("[audit-plugin] append() called on a read-only store; dropping event");
       return undefined;
     }
-    let triedSeq: number | undefined;
     try {
       const id = uuidv7();
       const source = insert.source ?? "openclaw-plugin";
@@ -328,8 +325,6 @@ export class AuditStore {
         );
       }
 
-      const nextSequence = this.sequence + 1;
-      triedSeq = nextSequence;
       const createdAt = new Date().toISOString();
 
       const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
@@ -340,9 +335,8 @@ export class AuditStore {
       }
       const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
 
-      this.insertStmt.run({
+      const returned = this.insertStmt.get({
         id,
-        sequence: nextSequence,
         source,
         machineId: this.machineId,
         sessionId: insert.sessionId ?? null,
@@ -354,14 +348,18 @@ export class AuditStore {
         metadata: metadataCanonical,
         contentGz,
         createdAt,
-      });
+      }) as { sequence: number } | undefined;
 
-      this.sequence = nextSequence;
+      if (!returned) {
+        throw new Error("INSERT ... RETURNING produced no row");
+      }
+      const sequence = returned.sequence;
+
       this.degraded = false;
 
       return {
         id,
-        sequence: nextSequence,
+        sequence,
         source,
         machineId: this.machineId,
         sessionId: insert.sessionId,
@@ -377,24 +375,8 @@ export class AuditStore {
     } catch (err) {
       this.degraded = true;
       const message = err instanceof Error ? err.message : "Unknown error";
-
-      // Diagnostic dump on UNIQUE/sequence collisions: what we tried, what's
-      // currently in the DB, and what our cached counter thinks. If two
-      // instances are racing, dbMax > our cached this.sequence and the next
-      // attempt will collide again (the in-memory counter never advances on
-      // failure). If dbMax == our cached this.sequence, the cache is in sync
-      // and the bug is elsewhere.
-      let diag = "";
-      try {
-        const row = this.db
-          .prepare("SELECT MAX(sequence) AS m, COUNT(*) AS c FROM audit_events")
-          .get() as { m: number | null; c: number };
-        diag = ` triedSeq=${triedSeq ?? "N/A"} cachedSeq=${this.sequence} dbMax=${row.m ?? 0} dbCount=${row.c} eventType=${insert.eventType}`;
-      } catch {
-        // ignore — best-effort diagnostic
-      }
       console.error(
-        `[audit-plugin][store=${this.instanceId}] Failed to append event: ${message}${diag}`,
+        `[audit-plugin][store=${this.instanceId}] Failed to append event (${insert.eventType}): ${message}`,
       );
       return undefined;
     }
@@ -495,7 +477,13 @@ export class AuditStore {
         const minAfter = this.db
           .prepare("SELECT MIN(sequence) as seq FROM audit_events")
           .get() as { seq: number | null } | undefined;
-        const nextExpectedSeq = minAfter?.seq ?? this.sequence + 1;
+        // When the table is empty after pruning, fall back to the
+        // highest-ever-assigned sequence from sqlite_sequence so that every
+        // remaining checkpoint is treated as orphaned.
+        const seqRow = this.db
+          .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'")
+          .get() as { seq: number } | undefined;
+        const nextExpectedSeq = minAfter?.seq ?? (seqRow?.seq ?? 0) + 1;
 
         this.db.prepare(`
           INSERT OR IGNORE INTO checkpoint_archive
