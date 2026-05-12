@@ -1,4 +1,5 @@
 import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
+import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
 import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
@@ -152,7 +153,13 @@ export default (() => {
             // a second writer on the audit DB — that would race the running
             // gateway for the SQLite reserved lock. CLI handlers fall back to
             // the read-only branch in getStore().
-            if (api.registrationMode !== "full") return;
+            if (api.registrationMode !== "full") {
+                // CLI dispatch context — keep subsystem-logger output off stdout
+                // so command output (audit export JSON, smt trees lines, etc.)
+                // stays parseable by jq / awk in scripts.
+                routeLogsToStderr();
+                return;
+            }
 
             // Guard against double creation of services — openclaw may load the plugin multiple times.
             // Hooks must be re-registered on every api instance because events may be dispatched
