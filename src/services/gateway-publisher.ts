@@ -3,6 +3,9 @@ import {gatewayPublisherLog} from "../util/logger.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const MIN_BATCH_SIZE = 1;
+// Spec §11.3 caps batch at 100 events. Clamp gatewayBatchSize so a
+// misconfigured config can never push us past the gateway's MAX_EVENTS_PER_REQUEST.
+const MAX_BATCH_SIZE = 100;
 const DEFAULT_INTERVAL_MS = 30_000;
 const MIN_INTERVAL_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -16,8 +19,15 @@ const MIN_MAX_PAYLOAD_BYTES = 1024;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
 const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
+const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
 
-const INGEST_PATH = "/admin/audit/ingest";
+const INGEST_PATH = "/api/v1/audit/ingest";
+
+type SendResult =
+  | { kind: "ok"; accepted: number; duplicateCount: number; highestSequence?: number }
+  | { kind: "rateLimited"; retryAfterMs: number }
+  | { kind: "payloadTooLarge" }
+  | { kind: "error"; message: string };
 
 // Strict allowlist for X-Gateway-Api-Key header value: ASCII printables minus
 // whitespace, quotes, control chars, and CR/LF — preventing header injection.
@@ -36,6 +46,8 @@ export interface GatewayPublisher {
   bufferedCount(): number;
   /** True when consecutive failures have tripped the breaker — further flushNow calls are no-ops until backoff elapses. */
   isCircuitOpen(): boolean;
+  /** True when flushNow is currently a no-op — either circuit-open OR a 429-mandated rate-limit pause is in effect. */
+  isPaused(): boolean;
   /** Wall-clock deadline (ms) for the shutdown drain. */
   shutdownDeadlineMs(): number;
 }
@@ -51,6 +63,7 @@ class NoOpGatewayPublisher implements GatewayPublisher {
   async flushNow(): Promise<void> { /* no-op */ }
   bufferedCount(): number { return 0; }
   isCircuitOpen(): boolean { return false; }
+  isPaused(): boolean { return false; }
   shutdownDeadlineMs(): number { return 0; }
 }
 
@@ -149,6 +162,14 @@ class ActiveGatewayPublisher implements GatewayPublisher {
   private consecutiveFailures = 0;
   private circuitOpenCount = 0;
   private circuitOpenUntil = 0;
+  // Server-acknowledged watermark from 200 `highestSequence`. In-memory only —
+  // resets to 0 on restart. Used by future progress tracking; not load-bearing
+  // for correctness (the gateway dedupes on event.id regardless).
+  private highestSequence = 0;
+  // Wall-clock deadline (ms) until which we must not POST, set by a 429
+  // response's retryAfterMs. Distinct from the circuit breaker (which is
+  // tripped by consecutive transport/5xx failures).
+  private rateLimitedUntil = 0;
   private dropped = 0;
   private nextDropMilestone = 1;
 
@@ -216,7 +237,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       return;
     }
     if (this.buffer.length === 0) return;
-    if (this.isCircuitOpen()) return;
+    if (this.isPaused()) return;
 
     const promise = this.flushOne();
     this.inFlightPromise = promise;
@@ -232,7 +253,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
     // for the timer tick. Only chain on success — on failure the circuit /
     // requeue logic above handles backoff. Schedule AFTER inFlightPromise is
     // cleared so the queued flushNow can actually run a new flush.
-    if (succeeded && this.buffer.length >= this.cfg.batchSize && !this.isCircuitOpen()) {
+    if (succeeded && this.buffer.length >= this.cfg.batchSize && !this.isPaused()) {
       queueMicrotask(() => {
         this.flushNow().catch(() => { /* errors logged inside */ });
       });
@@ -241,54 +262,175 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   private async flushOne(): Promise<boolean> {
     const batch = this.buffer.splice(0, this.cfg.batchSize);
-    try {
-      const payload = this.buildPayload(batch);
-      if (payload === undefined) {
-        // Oversized batch — drop with a warn log rather than requeueing
-        // (a too-large batch will keep failing forever otherwise).
-        gatewayPublisherLog.warn(
-          `dropping batch of ${batch.length} event(s): payload exceeds ${this.cfg.maxPayloadBytes} bytes`,
+    const succeeded = await this.sendWithSplit(batch);
+    if (!succeeded) {
+      // sendWithSplit already logged the reason and updated rate-limit / circuit
+      // state; we only need to put the batch back so it retries on the next tick.
+      this.buffer.unshift(...batch);
+    }
+    return succeeded;
+  }
+
+  /**
+   * Send one batch, recursively halving on 413 (PAYLOAD_TOO_LARGE) or on a
+   * local maxPayloadBytes overflow. Returns true on successful delivery (or
+   * unrecoverable drop of a single oversized event); false on transient
+   * failure or rate-limit pause — caller requeues.
+   *
+   * Splits accept duplicate-id POSTs gracefully: the gateway dedupes on
+   * `(orgId, plugin_event_id)`, so a partial-success/partial-failure outcome
+   * just means the next retry sends the same events again with no harm.
+   */
+  private async sendWithSplit(batch: AuditEvent[]): Promise<boolean> {
+    if (batch.length === 0) return true;
+
+    const payload = this.buildPayload(batch);
+    if (payload === undefined) {
+      // Local cap exceeded BEFORE we even try the network. Split if possible.
+      if (batch.length === 1) {
+          gatewayPublisherLog.error(
+          `[audit-plugin:gateway-publisher] WARN dropping single event ${batch[0].id}: serialized size exceeds local maxPayloadBytes (${this.cfg.maxPayloadBytes})`,
         );
         return true;
       }
-      await this.send(payload);
-      this.consecutiveFailures = 0;
-      this.circuitOpenCount = 0;
-      return true;
-    } catch (err) {
-      this.recordFailure();
-      this.buffer.unshift(...batch);
-      const message = err instanceof Error ? err.message : "Unknown error";
-      gatewayPublisherLog.error(`Publish failed (${batch.length} events requeued): ${message}`);
-      return false;
+      return this.splitAndSend(batch);
     }
+
+    const result = await this.send(payload);
+    switch (result.kind) {
+      case "ok":
+        if (result.highestSequence !== undefined && result.highestSequence > this.highestSequence) {
+          this.highestSequence = result.highestSequence;
+        }
+        this.consecutiveFailures = 0;
+        this.circuitOpenCount = 0;
+        return true;
+      case "payloadTooLarge":
+        if (batch.length === 1) {
+          console.error(
+            `[audit-plugin:gateway-publisher] WARN dropping single event ${batch[0].id}: gateway rejected as PAYLOAD_TOO_LARGE`,
+          );
+          return true;
+        }
+        console.error(
+          `[audit-plugin:gateway-publisher] Gateway returned 413 for batch of ${batch.length}; splitting and retrying`,
+        );
+        return this.splitAndSend(batch);
+      case "rateLimited": {
+        const wait = Math.min(Math.max(result.retryAfterMs, 0), RATE_LIMIT_MAX_MS);
+        this.rateLimitedUntil = Date.now() + wait;
+        console.error(
+          `[audit-plugin:gateway-publisher] Gateway rate-limited; pausing ${wait}ms (batch of ${batch.length} requeued)`,
+        );
+        return false;
+      }
+      case "error":
+        this.recordFailure();
+          gatewayPublisherLog.error(
+          `[audit-plugin:gateway-publisher] Publish failed (${batch.length} events requeued): ${result.message}`,
+        );
+        return false;
+    }
+  }
+
+  private async splitAndSend(batch: AuditEvent[]): Promise<boolean> {
+    const half = Math.floor(batch.length / 2);
+    const first = batch.slice(0, half);
+    const second = batch.slice(half);
+    // Each half is delivered independently. If the second half fails, we
+    // return false; flushOne requeues the WHOLE original batch — the first
+    // half's events were already accepted by the gateway, so the retry just
+    // hits the (org_id, plugin_event_id) dedupe path.
+    const ok1 = await this.sendWithSplit(first);
+    if (!ok1) return false;
+    return this.sendWithSplit(second);
   }
 
   /**
    * Build the JSON payload for one POST. Returns `undefined` when the
-   * serialized batch exceeds `maxPayloadBytes`. Event `content` is always
-   * forwarded; the gateway hashes it server-side to populate content_hash
-   * and never persists the raw text.
+   * serialized batch exceeds `maxPayloadBytes`. Events carry their own
+   * `contentHash` (sha256 of content) and `previousHash` (chain) so the
+   * gateway never has to recompute either.
    */
   private buildPayload(batch: AuditEvent[]): string | undefined {
-    const body = JSON.stringify({ events: batch });
+    // Spec §11.3 wraps the batch with a top-level machineId. Every event
+    // already carries machineId (set by the local store from the host's
+    // getMachineId()), so pulling it off the first event is safe — a given
+    // AuditStore instance has exactly one machineId.
+    const machineId = batch[0]?.machineId ?? "";
+    const body = JSON.stringify({ machineId, events: batch });
     if (Buffer.byteLength(body, "utf8") > this.cfg.maxPayloadBytes) return undefined;
     return body;
   }
 
-  private async send(body: string): Promise<void> {
-    const response = await fetch(this.cfg.ingestUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Gateway-Api-Key": this.cfg.apiKey,
-      },
-      body,
-      signal: AbortSignal.timeout(this.cfg.timeoutMs),
-    });
-    if (!response.ok) {
-      throw new Error(`Gateway returned ${response.status} ${response.statusText}`);
+  private async send(body: string): Promise<SendResult> {
+    let response: Response;
+    try {
+      response = await fetch(this.cfg.ingestUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Gateway-Api-Key": this.cfg.apiKey,
+        },
+        body,
+        signal: AbortSignal.timeout(this.cfg.timeoutMs),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return { kind: "error", message };
     }
+
+    if (response.ok) {
+      const parsed = await this.safeParseJson(response);
+      const accepted = typeof parsed?.accepted === "number" ? parsed.accepted : 0;
+      const duplicateCount = typeof parsed?.duplicateCount === "number"
+        ? parsed.duplicateCount
+        : (typeof parsed?.deduped === "number" ? parsed.deduped : 0);
+      const highestSequence = typeof parsed?.highestSequence === "number"
+        ? parsed.highestSequence
+        : undefined;
+      return { kind: "ok", accepted, duplicateCount, highestSequence };
+    }
+
+    if (response.status === 429) {
+      const parsed = await this.safeParseJson(response);
+      const retryAfterMs = typeof parsed?.retryAfterMs === "number"
+        ? parsed.retryAfterMs
+        : this.parseRetryAfterHeader(response.headers.get("retry-after"));
+      return { kind: "rateLimited", retryAfterMs: retryAfterMs ?? 30_000 };
+    }
+
+    if (response.status === 413) {
+      // Drain body for connection reuse but ignore the parsed shape.
+      await this.safeParseJson(response);
+      return { kind: "payloadTooLarge" };
+    }
+
+    return { kind: "error", message: `Gateway returned ${response.status} ${response.statusText}` };
+  }
+
+  private async safeParseJson(response: Response): Promise<Record<string, unknown> | undefined> {
+    try {
+      const text = await response.text();
+      if (text.length === 0) return undefined;
+      return JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // `Retry-After: <seconds>` per RFC 7231. HTTP-date form (RFC 1123) is rare
+  // for 429 and not supported here; gateways that need precision should use
+  // the spec's `retryAfterMs` body field instead.
+  private parseRetryAfterHeader(raw: string | null): number | undefined {
+    if (!raw) return undefined;
+    const seconds = Number(raw);
+    if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+    return Math.floor(seconds * 1000);
+  }
+
+  isPaused(): boolean {
+    return this.isCircuitOpen() || Date.now() < this.rateLimitedUntil;
   }
 
   isCircuitOpen(): boolean {
@@ -358,7 +500,13 @@ export function createGatewayPublisher(
   }
 
   const ingestUrl = url.replace(/\/+$/, "") + INGEST_PATH;
-  const batchSize = clampNumber(config.gatewayBatchSize, MIN_BATCH_SIZE, DEFAULT_BATCH_SIZE);
+  // batchSize is both floor- and ceiling-clamped: floor protects against 0/0.5
+  // (would spin), ceiling enforces the spec's 100-event cap so a misconfigured
+  // gatewayBatchSize can never produce a batch the gateway will 413-reject.
+  const batchSize = Math.min(
+    MAX_BATCH_SIZE,
+    clampNumber(config.gatewayBatchSize, MIN_BATCH_SIZE, DEFAULT_BATCH_SIZE),
+  );
   const intervalMs = clampNumber(config.gatewayIntervalMs, MIN_INTERVAL_MS, DEFAULT_INTERVAL_MS);
   const timeoutMs = clampNumber(config.gatewayTimeoutMs, MIN_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
   const bufferCapacity = clampNumber(config.gatewayBufferCapacity, MIN_BUFFER_CAPACITY, DEFAULT_BUFFER_CAPACITY);
@@ -395,7 +543,7 @@ export async function drainForShutdown(publisher: GatewayPublisher): Promise<voi
   let safetyCounter = 0;
   while (
     publisher.bufferedCount() > 0
-    && !publisher.isCircuitOpen()
+    && !publisher.isPaused()
     && Date.now() < deadline
     && safetyCounter < 1000
   ) {
@@ -407,9 +555,11 @@ export async function drainForShutdown(publisher: GatewayPublisher): Promise<voi
   if (remaining > 0) {
     const reason = publisher.isCircuitOpen()
       ? "circuit breaker open"
-      : Date.now() >= deadline
-        ? "shutdown deadline reached"
-        : "iteration cap reached";
+      : publisher.isPaused()
+        ? "rate-limited"
+        : Date.now() >= deadline
+          ? "shutdown deadline reached"
+          : "iteration cap reached";
     gatewayPublisherLog.warn(
       `abandoning ${remaining} buffered event(s) on shutdown — ${reason}`,
     );

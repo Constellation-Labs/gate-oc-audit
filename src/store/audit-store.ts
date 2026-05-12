@@ -2,6 +2,7 @@ import { DatabaseSync, StatementSync } from "node:sqlite";
 import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { constants, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { uuidv7 } from "uuidv7";
 
 import { createRequire } from "module";
@@ -9,6 +10,10 @@ import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../
 import { initializeSchema, runInTransaction } from "./schema.js";
 import { getMachineId } from "../util/machine-id.js";
 import {log} from "../util/logger.js";
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -48,6 +53,8 @@ interface EventRow {
   description: string;
   metadata: string;
   content_gz?: Uint8Array | null;
+  content_hash: string;
+  previous_hash: string | null;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
@@ -109,6 +116,8 @@ function rowToEvent(row: EventRow, contentPreview?: number): AuditEvent {
     description: row.description,
     metadata: JSON.parse(row.metadata),
     content: decodeContent(row, contentPreview),
+    contentHash: row.content_hash,
+    previousHash: row.previous_hash ?? undefined,
     createdAt: row.created_at,
     receivedAt: row.received_at ?? undefined,
     syncedAt: row.synced_at ?? undefined,
@@ -169,6 +178,7 @@ export class AuditStore {
     insertCheckpoint: StatementSync;
     countSince: StatementSync;
     maxSequenceSince: StatementSync;
+    getPreviousHash: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -202,10 +212,12 @@ export class AuditStore {
       : this.db.prepare(`
       INSERT INTO audit_events
         (id, source, machine_id, session_id, org_id, user_id,
-         event_type, category, description, metadata, content_gz, created_at)
+         event_type, category, description, metadata, content_gz,
+         content_hash, previous_hash, created_at)
       VALUES
         (@id, @source, @machineId, @sessionId, @orgId, @userId,
-         @eventType, @category, @description, @metadata, @contentGz, @createdAt)
+         @eventType, @category, @description, @metadata, @contentGz,
+         @contentHash, @previousHash, @createdAt)
       RETURNING sequence
     `);
 
@@ -226,6 +238,7 @@ export class AuditStore {
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
+      getPreviousHash: this.db.prepare("SELECT content_hash FROM audit_events WHERE sequence = ?"),
     };
   }
 
@@ -348,6 +361,8 @@ export class AuditStore {
         description: insert.description,
         metadata: metadataCanonical,
         contentGz,
+        contentHash,
+        previousHash: previousHash ?? null,
         createdAt,
       }) as { sequence: number } | undefined;
 
@@ -371,6 +386,8 @@ export class AuditStore {
         description: insert.description,
         metadata: effectiveMetadata,
         content: rawContent,
+        contentHash,
+        previousHash,
         createdAt,
       };
     } catch (err) {
@@ -415,6 +432,7 @@ export class AuditStore {
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
                 event_type, category, description, metadata${contentCol},
+                content_hash, previous_hash,
                 created_at, received_at, synced_at
          FROM audit_events ${where} ORDER BY sequence ${order} LIMIT @limit OFFSET @offset`,
       )

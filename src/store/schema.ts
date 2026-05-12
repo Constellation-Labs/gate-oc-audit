@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
+import { gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import {log} from "../util/logger.js";
 
 const PRAGMAS = [
@@ -22,6 +24,8 @@ const DDL = [
     description   TEXT NOT NULL,
     metadata      TEXT NOT NULL,
     content_gz    BLOB,
+    content_hash  TEXT NOT NULL DEFAULT '',
+    previous_hash TEXT,
     created_at    TEXT NOT NULL,
     received_at   TEXT,
     synced_at     TEXT
@@ -72,6 +76,42 @@ const DDL = [
 ];
 
 const CURRENT_SCHEMA_VERSION = 4;
+
+function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((r) => r.name === column);
+}
+
+// Walk events in sequence order, populate content_hash = sha256(content) and
+// previous_hash from the prior row. Idempotent on partially-migrated rows.
+function backfillHashChain(db: DatabaseSync): void {
+  const rows = db.prepare(
+    `SELECT id, sequence, content_gz, content_hash, previous_hash
+     FROM audit_events ORDER BY sequence ASC`,
+  ).all() as Array<{
+    id: string;
+    sequence: number;
+    content_gz: Uint8Array | null;
+    content_hash: string;
+    previous_hash: string | null;
+  }>;
+  if (rows.length === 0) return;
+
+  const update = db.prepare("UPDATE audit_events SET content_hash = ?, previous_hash = ? WHERE id = ?");
+  let prev: string | null = null;
+  for (const row of rows) {
+    let hash = row.content_hash;
+    if (!hash) {
+      let content = "";
+      if (row.content_gz) {
+        try { content = gunzipSync(row.content_gz).toString(); } catch { content = ""; }
+      }
+      hash = createHash("sha256").update(content).digest("hex");
+    }
+    update.run(hash, prev, row.id);
+    prev = hash;
+  }
+}
 
 export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
   db.exec("BEGIN");
@@ -128,8 +168,20 @@ export function initializeSchema(db: DatabaseSync): void {
       // v3: Removed hash chain (content_hash, previous_hash columns),
       //     renamed merkle_root to smt_root, removed sync_state table.
 
-      // v4: audit_events.sequence is now INTEGER PRIMARY KEY AUTOINCREMENT and
+      // v4: Re-introduce content_hash + previous_hash on audit_events for
+      //     wire-format chain integrity per Product Spec §11.3. ALTER for
+      //     existing dbs; fresh dbs already have the columns from the DDL.
+      //     audit_events.sequence is now INTEGER PRIMARY KEY AUTOINCREMENT and
       //     id moved to UNIQUE — see migrateAuditEventsToV4.
+      if (current < 4) {
+        if (!hasColumn(db, "audit_events", "content_hash")) {
+          db.exec("ALTER TABLE audit_events ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''");
+        }
+        if (!hasColumn(db, "audit_events", "previous_hash")) {
+          db.exec("ALTER TABLE audit_events ADD COLUMN previous_hash TEXT");
+        }
+        backfillHashChain(db);
+      }
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

@@ -1396,13 +1396,17 @@ describe("e2e: registration failure on before_install records system.install_hoo
   });
 });
 
-describe("e2e: oversized metadata is recorded with a truncation marker rather than dropped", () => {
+describe("e2e: oversized metadata fields are truncated per gateway DTO caps, not dropped", () => {
   let rig: Rig;
   before(async () => { rig = await createRig(); });
   after(async () => { await destroyRig(rig); });
 
-  it("preserves the audit signal AND keeps the SMT proof valid when sender-controlled fields blow past the 1MB metadata cap", () => {
+  it("clamps individual metadata strings to MAX_FIELD_LENGTH and keeps the SMT proof valid", () => {
     // A hostile install request stuffs >1MB into a sender-controlled scalar.
+    // The hook layer's per-string cap (mirrors gateway DTO MAX_FIELD_LENGTH=1000)
+    // now catches this BEFORE the store sees it — the store's total-size cap
+    // (which would have produced a $auditTruncation marker) only fires if many
+    // distinct fields still sum past 1MB after per-string clipping.
     const hostileSpecifier = "x".repeat(1024 * 1024 + 100);
     fire(rig.api, "before_install",
       {
@@ -1424,12 +1428,15 @@ describe("e2e: oversized metadata is recorded with a truncation marker rather th
     assert.equal(events.length, 1,
       "event must still be recorded — silent skipping would erase forensic signal");
     const meta = events[0].metadata as Record<string, unknown>;
-    const marker = meta.$auditTruncation as Record<string, unknown>;
-    assert.ok(marker, "marker must live under reserved $auditTruncation key");
-    assert.equal(marker.reason, "size-cap");
-    assert.ok(typeof marker.originalSize === "number");
-    assert.equal("requestedSpecifier" in meta, false,
-      "oversized field must not survive truncation");
+    assert.equal(meta.$auditTruncation, undefined,
+      "single huge field is handled by per-string cap; the store-layer marker is only for the multi-field overflow case");
+    const surviving = meta.requestedSpecifier;
+    assert.equal(typeof surviving, "string",
+      "oversized field must survive truncation, not be dropped");
+    assert.ok((surviving as string).length <= 1000,
+      `oversized field must be clipped to MAX_FIELD_LENGTH=1000 (got ${(surviving as string).length})`);
+    assert.ok((surviving as string).endsWith("…[truncated]"),
+      "truncated values must carry the truncation suffix so consumers can spot them");
 
     // Tamper-evidence regression guard: SMT membership proof must still
     // verify against the persisted row. Earlier versions of this code
@@ -1592,7 +1599,7 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
     assert.ok(gateway.received.length >= 1, "expected at least one POST to the gateway");
     for (const req of gateway.received) {
       assert.equal(req.method, "POST");
-      assert.equal(req.url, "/admin/audit/ingest");
+      assert.equal(req.url, "/api/v1/audit/ingest");
       assert.equal(req.headers["x-gateway-api-key"], "sk-gw-e2e-test");
       assert.equal(req.headers["content-type"], "application/json");
     }

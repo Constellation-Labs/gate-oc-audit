@@ -153,6 +153,58 @@ describe("AuditStore", () => {
 
   });
 
+  describe("chain hashes (spec §11.3)", () => {
+    // contentHash = sha256("") for events with no content. Cached here so each
+    // assertion reads as "what the spec says", not as a magic constant.
+    const SHA256_EMPTY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    it("computes contentHash = sha256(content ?? '') and omits previousHash on genesis", () => {
+      const e1 = store.append(sampleInsert({ content: "hello" }))!;
+      assert.equal(e1.sequence, 1);
+      assert.equal(e1.previousHash, undefined,
+        "sequence 1 has no predecessor — previousHash must be omitted");
+      // sha256("hello")
+      assert.equal(e1.contentHash, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+
+      const e2 = store.append(sampleInsert({ description: "no content" }))!;
+      assert.equal(e2.contentHash, SHA256_EMPTY,
+        "missing content hashes as sha256 of the empty string");
+    });
+
+    it("chains previousHash to the prior event's contentHash", () => {
+      const e1 = store.append(sampleInsert({ content: "first" }))!;
+      const e2 = store.append(sampleInsert({ content: "second" }))!;
+      const e3 = store.append(sampleInsert({ content: "third" }))!;
+      assert.equal(e2.previousHash, e1.contentHash);
+      assert.equal(e3.previousHash, e2.contentHash);
+    });
+
+    it("chain survives restart — predecessor lookup reads from the persisted row", () => {
+      const e1 = store.append(sampleInsert({ content: "before restart" }))!;
+      store.close();
+
+      const store2 = new AuditStore(dbPath);
+      const e2 = store2.append(sampleInsert({ content: "after restart" }))!;
+      assert.equal(e2.sequence, 2);
+      assert.equal(e2.previousHash, e1.contentHash,
+        "restart must not break the chain — previous_hash lookup must read from SQLite, not in-memory state");
+      store2.close();
+
+      dbPath = makeTempDb();
+      store = new AuditStore(dbPath);
+    });
+
+    it("query() returns events with contentHash and previousHash populated", () => {
+      store.append(sampleInsert({ content: "first" }));
+      store.append(sampleInsert({ content: "second" }));
+      const events = store.query({ order: "asc" });
+      assert.equal(events.length, 2);
+      assert.ok(events[0].contentHash);
+      assert.equal(events[0].previousHash, undefined);
+      assert.equal(events[1].previousHash, events[0].contentHash);
+    });
+  });
+
   describe("degraded mode", () => {
     it("is not degraded initially", () => {
       assert.equal(store.isDegraded(), false);

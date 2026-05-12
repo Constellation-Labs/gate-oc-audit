@@ -117,6 +117,8 @@ export interface AuditEvent {
   description: string;
   metadata: Record<string, unknown>;
   content?: string;
+  contentHash: string;
+  previousHash?: string;
   createdAt: string;
   receivedAt?: string;
   syncedAt?: string;

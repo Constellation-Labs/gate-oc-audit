@@ -8,7 +8,7 @@ interface ReceivedRequest {
   url: string;
   method: string;
   headers: NodeJS.Dict<string | string[]>;
-  body: { events: AuditEvent[] };
+  body: { machineId?: string; events: AuditEvent[] };
 }
 
 function makeEvent(seq: number, overrides: Partial<AuditEvent> = {}): AuditEvent {
@@ -21,6 +21,7 @@ function makeEvent(seq: number, overrides: Partial<AuditEvent> = {}): AuditEvent
     category: "tool",
     description: `event ${seq}`,
     metadata: { tool: "echo", seq },
+    contentHash: "",
     createdAt: new Date(2026, 0, 1, 0, 0, seq).toISOString(),
     ...overrides,
   };
@@ -251,7 +252,7 @@ describe("GatewayPublisher", () => {
     assert.equal(received.length, before, "circuit-open must suppress further POSTs");
   });
 
-  it("POSTs batch with X-Gateway-Api-Key header to /admin/audit/ingest", async () => {
+  it("POSTs batch with X-Gateway-Api-Key header to /api/v1/audit/ingest", async () => {
     const pub = createGatewayPublisher({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
@@ -269,7 +270,7 @@ describe("GatewayPublisher", () => {
     assert.equal(received.length, 1);
     const req = received[0];
     assert.equal(req.method, "POST");
-    assert.equal(req.url, "/admin/audit/ingest");
+    assert.equal(req.url, "/api/v1/audit/ingest");
     assert.equal(req.headers["x-gateway-api-key"], "sk-gw-test");
     assert.equal(req.headers["content-type"], "application/json");
     assert.equal(req.body.events.length, 2);
@@ -288,7 +289,7 @@ describe("GatewayPublisher", () => {
     pub.notifyAppend(makeEvent(1));
     await new Promise((r) => setTimeout(r, 50));
 
-    assert.equal(received[0].url, "/admin/audit/ingest");
+    assert.equal(received[0].url, "/api/v1/audit/ingest");
   });
 
   it("requeues events on failure and retries on next flush", async () => {
@@ -538,5 +539,131 @@ describe("GatewayPublisher", () => {
     pub.notifyAppend(makeEvent(2));
     await new Promise((r) => setTimeout(r, 1200));
     assert.equal(received.length, seenAfterStart);
+  });
+
+  // --- Spec §11.3 wire-contract coverage ---
+
+  it("wraps the batch with top-level machineId per spec §11.3", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 2,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1, { machineId: "machine-A" }));
+    pub.notifyAppend(makeEvent(2, { machineId: "machine-A" }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(received.length, 1);
+    assert.equal(received[0].body.machineId, "machine-A",
+      "envelope must carry top-level machineId, not just per-event machineId");
+    assert.equal(received[0].body.events.length, 2);
+  });
+
+  it("clamps gatewayBatchSize > 100 down to the spec cap (100)", async () => {
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 500,
+      gatewayIntervalMs: 60_000,
+    });
+    // Push 150 events. With batchSize ceiling at 100, the publisher should
+    // POST in two batches: 100 then 50 (chained auto-flush on the first).
+    for (let i = 1; i <= 150; i++) pub.notifyAppend(makeEvent(i));
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(received.length, 1,
+      "first batch flushes on cross-threshold; partial 50 awaits timer/chain");
+    assert.equal(received[0].body.events.length, 100,
+      "batch size must be clamped to spec cap (100), not the misconfigured 500");
+  });
+
+  it("pauses publishing on 429 with retryAfterMs and requeues the batch", async () => {
+    let callCount = 0;
+    respond = () => {
+      callCount++;
+      if (callCount === 1) return { status: 429, body: '{"error":"RATE_LIMITED","retryAfterMs":500}' };
+      return { status: 200, body: '{"accepted":1,"duplicateCount":0,"highestSequence":1}' };
+    };
+
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 50));
+    // First POST hit 429 — batch must be back in the buffer and publisher paused.
+    assert.equal(received.length, 1);
+    assert.equal(pub.isPaused(), true, "429 must pause the publisher");
+    assert.equal(pub.bufferedCount(), 1, "rate-limited batch must be requeued");
+
+    // While paused, flushNow is a no-op.
+    await pub.flushNow();
+    assert.equal(received.length, 1, "must not POST while rate-limit window is active");
+
+    // Wait out the rate-limit window, then drive a retry.
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(pub.isPaused(), false);
+    await pub.flushNow();
+    assert.equal(received.length, 2, "retry after rate-limit window must POST again");
+    assert.equal(pub.bufferedCount(), 0);
+  });
+
+  it("splits a 413'd batch in half and retries each piece", async () => {
+    let callCount = 0;
+    const seenBatchSizes: number[] = [];
+    respond = (_req, raw) => {
+      callCount++;
+      const parsed = JSON.parse(raw) as { events: AuditEvent[] };
+      seenBatchSizes.push(parsed.events.length);
+      // First POST (size=4) → 413; subsequent halves → 200.
+      if (callCount === 1) return { status: 413, body: '{"error":"PAYLOAD_TOO_LARGE"}' };
+      return { status: 200, body: '{"accepted":' + parsed.events.length + '}' };
+    };
+
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 4,
+      gatewayIntervalMs: 60_000,
+    });
+    for (let i = 1; i <= 4; i++) pub.notifyAppend(makeEvent(i));
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.deepEqual(seenBatchSizes, [4, 2, 2],
+      "413 must trigger a halving retry: 4 → 2 + 2");
+    assert.equal(pub.bufferedCount(), 0);
+  });
+
+  it("drops a single oversized event on 413 rather than spinning", async () => {
+    respond = () => ({ status: 413, body: '{"error":"PAYLOAD_TOO_LARGE"}' });
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1, "single event sent once, then dropped (no infinite split)");
+    assert.equal(pub.bufferedCount(), 0, "single oversized event must be dropped, not requeued");
+  });
+
+  it("treats spec 200 response as success and accepts {duplicateCount, highestSequence} body", async () => {
+    respond = () => ({ status: 200, body: '{"accepted":1,"duplicateCount":0,"highestSequence":42}' });
+    const pub = createGatewayPublisher({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 50));
+    // Successful path: no requeue, no circuit-open, no rate-limit.
+    assert.equal(pub.bufferedCount(), 0);
+    assert.equal(pub.isCircuitOpen(), false);
+    assert.equal(pub.isPaused(), false);
   });
 });
