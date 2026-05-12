@@ -8,6 +8,7 @@
 import { SmtStore } from "./smt-store.js";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import {smtTreeManagerLog} from "../util/logger.js";
 import { join } from "node:path";
 
 const DB_SUFFIX = ".db";
@@ -113,8 +114,8 @@ export class TreeManager {
       // in v0.2.0 — operators must clear stale checkpoint dirs (or accept
       // that the tree rebuilds from events on next checkpoint).
       if (entry.isDirectory()) {
-        console.error(
-          `[smt-tree-manager] Skipping legacy LevelDB checkpoint at "${entry.name}"; ` +
+        smtTreeManagerLog.warn(
+          `Skipping legacy LevelDB checkpoint at "${entry.name}"; ` +
             `rebuild required (sqlite layout introduced in v0.2.0). ` +
             `Delete the directory to silence this warning.`,
         );
@@ -130,7 +131,7 @@ export class TreeManager {
         db = new DatabaseSync(dbPath);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
-        console.error(`[smt-tree-manager] Failed to open sqlite checkpoint at ${dbPath}: ${msg}`);
+        smtTreeManagerLog.error(`Failed to open sqlite checkpoint at ${dbPath}: ${msg}`);
         continue;
       }
 
@@ -139,7 +140,7 @@ export class TreeManager {
           | { value: string }
           | undefined;
         if (!rootRow) {
-          console.error(`[smt-tree-manager] Tree "${treeKey}" missing meta:root, skipping`);
+          smtTreeManagerLog.warn(`Tree "${treeKey}" missing meta:root, skipping`);
           continue;
         }
         const root = rootRow.value;
@@ -161,15 +162,15 @@ export class TreeManager {
         store.restore({ root, nodes, frozenKeys });
         const inconsistency = store.shallowConsistencyCheck();
         if (inconsistency) {
-          console.error(
-            `[smt-tree-manager] Tree "${treeKey}" restored but looks inconsistent: ${inconsistency}. ` +
+          smtTreeManagerLog.warn(
+            `Tree "${treeKey}" restored but looks inconsistent: ${inconsistency}. ` +
               `Proof generation will fail until the tree is rebuilt.`,
           );
         }
         this.trees.set(treeKey, store);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
-        console.error(`[smt-tree-manager] Failed to restore tree "${treeKey}": ${msg}`);
+        smtTreeManagerLog.error(`Failed to restore tree "${treeKey}": ${msg}`);
       } finally {
         db.close();
       }

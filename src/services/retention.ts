@@ -1,4 +1,5 @@
 import type { AuditStore } from "../store/audit-store.js";
+import {log} from "../util/logger.js";
 
 const DEFAULT_RETENTION_DAYS = 365;
 const DEFAULT_MAX_SIZE_MB = 500;
@@ -38,11 +39,11 @@ export class RetentionService {
     try {
       const deleted = this.store.prune(this.retentionDays, this.maxSizeMb);
       if (deleted > 0) {
-        console.error(`[audit-plugin] Pruned ${deleted} expired events`);
+        log.info(`Pruned ${deleted} expired events`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] Retention prune failed:", message);
+      log.error(`Retention prune failed: ${message}`);
     }
   }
 }

@@ -1,4 +1,5 @@
 import type { ConfigChangeMetadata, ScanFinding } from "../types/events.js";
+import {log} from "../util/logger.js";
 
 const SEND_TIMEOUT_MS = 10_000;
 
@@ -31,7 +32,7 @@ export class NotificationService {
     if (webhookUrl) {
       const reason = isUnsafeUrl(webhookUrl);
       if (reason) {
-        console.error(`[audit-plugin] Webhook URL rejected (${reason}), notifications disabled`);
+        log.warn(`Webhook URL rejected (${reason}), notifications disabled`);
       } else {
         this.webhookUrl = webhookUrl;
       }
@@ -140,13 +141,13 @@ export class NotificationService {
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       });
       if (!response.ok) {
-        console.error(
-          `[audit-plugin] Notification webhook returned ${response.status}: ${response.statusText}`,
+        log.error(
+          `Notification webhook returned ${response.status}: ${response.statusText}`,
         );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] Notification webhook failed:", message);
+      log.error(`Notification webhook failed: ${message}`);
     }
   }
 }

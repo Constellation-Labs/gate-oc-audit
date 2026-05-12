@@ -33,6 +33,7 @@ import type {
   SmtConfig,
 } from "../types/smt.js";
 import { getMachineId } from "../util/machine-id.js";
+import {log, smtLog} from "../util/logger.js";
 
 export type VerifyResult =
   | { status: "valid" }
@@ -113,18 +114,18 @@ export class SmtService {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
       const trees = this.manager.listTrees();
-      console.error(
-        `[audit-plugin:smt] Restored ${trees.length} tree(s) from checkpoint`,
+      smtLog.info(
+        `Restored ${trees.length} tree(s) from checkpoint`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Checkpoint restore failed:", msg);
+      smtLog.error(`Checkpoint restore failed: ${msg}`);
     }
   }
 
   async start(): Promise<void> {
-    console.error(
-      `[audit-plugin:smt] Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`,
+    smtLog.info(
+      `Starting — tree: ${this.config.treeKey}, maxSize: ${this.config.maxTreeSize}, checkpointDir: ${this.config.checkpointDir}, checkpointInterval: ${this.config.checkpointIntervalMs}ms`,
     );
 
     await this.ensureReady();
@@ -145,7 +146,7 @@ export class SmtService {
       this.pruneTimer.unref();
     }
 
-    console.error("[audit-plugin:smt] Started successfully");
+    smtLog.info("Started successfully");
   }
 
   async stop(): Promise<void> {
@@ -168,13 +169,13 @@ export class SmtService {
       await this.manager.checkpointAll(this.config.checkpointDir);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+      smtLog.error(`Tree checkpoint failed: ${msg}`);
     }
     try {
       await this.checkpointMetadata();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
+      smtLog.error(`Metadata checkpoint failed: ${msg}`);
     }
   }
 
@@ -195,8 +196,8 @@ export class SmtService {
   onEventAppended(event: AuditEvent): void {
     try {
       if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        console.error(
-          "[audit-plugin:smt] Storage cap reached, skipping insert",
+        smtLog.warn(
+          "Storage cap reached, skipping insert",
         );
         return;
       }
@@ -231,7 +232,7 @@ export class SmtService {
       });
 
       if ("error" in result) {
-        console.error(`[audit-plugin:smt] Insert rejected: ${result.error}`);
+        smtLog.warn(`Insert rejected: ${result.error}`);
         return;
       }
 
@@ -245,7 +246,7 @@ export class SmtService {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Insert failed:", msg);
+      smtLog.error(`Insert failed: ${msg}`);
     }
   }
 
@@ -293,8 +294,8 @@ export class SmtService {
       proof = store.createProof(hash);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[audit-plugin:smt] createProof failed for tree ${key}: ${msg}. ` +
+      smtLog.error(
+        `createProof failed for tree ${key}: ${msg}. ` +
           `Tree state may be inconsistent (dangling node reference in restored checkpoint).`,
       );
       return null;
@@ -569,7 +570,7 @@ export class SmtService {
       await rename(tmpPath, filePath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Metadata checkpoint failed:", msg);
+      smtLog.error(`Metadata checkpoint failed: ${msg}`);
     }
   }
 
@@ -626,7 +627,7 @@ export class SmtService {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin:smt] Metadata restore failed:", msg);
+      smtLog.error(`Metadata restore failed: ${msg}`);
     }
   }
 
@@ -641,14 +642,11 @@ export class SmtService {
         Promise.all([
           this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
             const msg = err instanceof Error ? err.message : "Unknown error";
-            console.error("[audit-plugin:smt] Tree checkpoint failed:", msg);
+            smtLog.error(`Tree checkpoint failed: ${msg}`);
           }),
           this.checkpointMetadata().catch((err) => {
             const msg = err instanceof Error ? err.message : "Unknown error";
-            console.error(
-              "[audit-plugin:smt] Metadata checkpoint failed:",
-              msg,
-            );
+            smtLog.error(`Metadata checkpoint failed: ${msg}`);
           }),
         ]).then(() => {}),
       );
@@ -672,12 +670,12 @@ export class SmtService {
       for (const epoch of expiredEpochs) {
         const result = this.pruneEpoch(treeKey, epoch);
         if ("error" in result) {
-          console.error(
-            `[audit-plugin] Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`,
+          log.error(
+            `Auto-prune failed for tree ${treeKey} epoch ${epoch}: ${result.error}`,
           );
         } else if (result.pruned > 0) {
-          console.error(
-            `[audit-plugin] Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`,
+          log.info(
+            `Froze epoch ${epoch} in SMT tree ${treeKey}: ${result.pruned} entries`,
           );
         }
       }

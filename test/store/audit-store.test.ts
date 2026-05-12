@@ -7,6 +7,8 @@ import { gunzipSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../../src/store/audit-store.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
+import { log } from "../../src/util/logger.js";
+import { captureLogger } from "../test-utils/capture-logger.js";
 
 function makeTempDb(): string {
   const dir = mkdtempSync(join(tmpdir(), "audit-test-"));
@@ -285,17 +287,15 @@ describe("AuditStore", () => {
     });
 
     it("drops content exceeding MAX_CONTENT_SIZE and logs warning", () => {
-      const warnings: string[] = [];
-      const origErr = console.error;
-      console.error = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+      const capture = captureLogger(log);
       try {
         const bigContent = "x".repeat(5 * 1024 * 1024 + 1);
         const event = store.append(sampleInsert({ content: bigContent }))!;
         assert.ok(event);
         assert.equal(event.content, undefined);
-        assert.ok(warnings.some((w) => w.includes("Content exceeds")));
+        assert.ok(capture.messages.some((w) => w.includes("Content exceeds")));
       } finally {
-        console.error = origErr;
+        capture.restore();
       }
     });
 

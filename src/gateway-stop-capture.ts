@@ -1,4 +1,5 @@
 import type { AuditStore } from "./store/audit-store.js";
+import {log} from "./util/logger.js";
 
 /**
  * Captures the `gateway.stop` audit event reliably across openclaw shutdown
@@ -87,7 +88,7 @@ export class GatewayStopCapture {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] failed to record gateway.stop on signal:", msg);
+      log.error(`failed to record gateway.stop on signal: ${msg}`);
     }
   }
 }

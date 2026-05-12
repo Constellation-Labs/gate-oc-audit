@@ -4,6 +4,7 @@ import type { AuditStore } from "../store/audit-store.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { ConfigChangeType, FileChangeMetadata } from "../types/events.js";
 import { fileHash, fileSizeBytes } from "../util/fs.js";
+import {log} from "../util/logger.js";
 
 const MANIFEST_TYPE = "file_watch";
 
@@ -74,7 +75,7 @@ export class FileWatcher {
     try {
       chokidar = await import("chokidar");
     } catch {
-      console.error("[audit-plugin] chokidar not available, file watching disabled");
+      log.warn("chokidar not available, file watching disabled");
       return;
     }
 
@@ -86,7 +87,7 @@ export class FileWatcher {
       isMatch = pm.isMatch ?? pm;
       if (typeof isMatch !== "function") throw new Error("isMatch not found");
     } catch {
-      console.error("[audit-plugin] picomatch not available, file watching disabled");
+      log.warn("picomatch not available, file watching disabled");
       return;
     }
 
@@ -104,7 +105,7 @@ export class FileWatcher {
     const baseDirs = [...new Set(resolvedPatterns.map(globParent))].filter((d) => existsSync(d));
 
     if (baseDirs.length === 0) {
-      console.error("[audit-plugin] No existing directories found for file watch patterns");
+      log.warn("No existing directories found for file watch patterns");
       return;
     }
 
@@ -146,7 +147,7 @@ export class FileWatcher {
         if (!existing) return;
         this.manifest.delete(resolvedPath);
         try { this.store.deleteManifest(`${MANIFEST_TYPE}:${resolvedPath}`); } catch (err) {
-          console.error("[audit-plugin] Failed to delete file watch manifest:", err instanceof Error ? err.message : err);
+          log.error(`Failed to delete file watch manifest: ${err instanceof Error ? err.message : err}`);
         }
       } else {
         const hash = fileHash(resolvedPath);
@@ -155,7 +156,7 @@ export class FileWatcher {
 
         this.manifest.set(resolvedPath, { contentHash: hash, filePath: resolvedPath });
         try { this.store.upsertManifest(`${MANIFEST_TYPE}:${resolvedPath}`, MANIFEST_TYPE, hash, resolvedPath); } catch (err) {
-          console.error("[audit-plugin] Failed to upsert file watch manifest:", err instanceof Error ? err.message : err);
+          log.error(`Failed to upsert file watch manifest: ${err instanceof Error ? err.message : err}`);
         }
 
         if (!existing) effectiveChangeType = "added";
@@ -179,7 +180,7 @@ export class FileWatcher {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] File change handler error:", message);
+      log.error(`File change handler error: ${message}`);
     }
   }
 

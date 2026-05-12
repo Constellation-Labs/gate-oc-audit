@@ -1,4 +1,5 @@
 import type { AuditEvent } from "../types/events.js";
+import {gatewayPublisherLog} from "../util/logger.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const MIN_BATCH_SIZE = 1;
@@ -41,7 +42,7 @@ export interface GatewayPublisher {
 
 class NoOpGatewayPublisher implements GatewayPublisher {
   constructor(reason: string) {
-    console.error(`[audit-plugin:gateway-publisher] ${reason}, gateway publishing disabled`);
+    gatewayPublisherLog.info(`${reason}, gateway publishing disabled`);
   }
   isActive(): boolean { return false; }
   async start(): Promise<void> { /* no-op */ }
@@ -161,8 +162,8 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   async start(): Promise<void> {
     if (this.timer) return; // idempotent — repeated start() calls don't leak timers
-    console.error(
-      `[audit-plugin:gateway-publisher] Starting — url: ${this.cfg.ingestUrl}, batchSize: ${this.cfg.batchSize}, intervalMs: ${this.cfg.intervalMs}`,
+    gatewayPublisherLog.info(
+      `Starting — url: ${this.cfg.ingestUrl}, batchSize: ${this.cfg.batchSize}, intervalMs: ${this.cfg.intervalMs}`,
     );
     this.timer = setInterval(() => {
       this.flushNow().catch(() => { /* errors logged inside */ });
@@ -181,14 +182,14 @@ class ActiveGatewayPublisher implements GatewayPublisher {
     if (this.buffer.length >= this.cfg.bufferCapacity) {
       this.dropped++;
       if (this.dropped >= this.nextDropMilestone) {
-        console.error(
-          `[audit-plugin:gateway-publisher] Buffer full (${this.cfg.bufferCapacity}), dropped ${this.dropped} event(s) cumulatively`,
+        gatewayPublisherLog.warn(
+          `Buffer full (${this.cfg.bufferCapacity}), dropped ${this.dropped} event(s) cumulatively`,
         );
         try {
           this.deps.onDropMilestone?.(this.dropped);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown error";
-          console.error(`[audit-plugin:gateway-publisher] WARN onDropMilestone callback threw: ${msg}`);
+          gatewayPublisherLog.warn(`onDropMilestone callback threw: ${msg}`);
         }
         // Exponential cadence: 1, 10, 100, 1000, … bounds log noise during
         // sustained outages while still surfacing magnitude.
@@ -246,8 +247,8 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       if (payload === undefined) {
         // Oversized batch — drop with a warn log rather than requeueing
         // (a too-large batch will keep failing forever otherwise).
-        console.error(
-          `[audit-plugin:gateway-publisher] WARN dropping batch of ${batch.length} event(s): payload exceeds ${this.cfg.maxPayloadBytes} bytes`,
+        gatewayPublisherLog.warn(
+          `dropping batch of ${batch.length} event(s): payload exceeds ${this.cfg.maxPayloadBytes} bytes`,
         );
         return true;
       }
@@ -259,7 +260,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       this.recordFailure();
       this.buffer.unshift(...batch);
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(`[audit-plugin:gateway-publisher] Publish failed (${batch.length} events requeued): ${message}`);
+      gatewayPublisherLog.error(`Publish failed (${batch.length} events requeued): ${message}`);
       return false;
     }
   }
@@ -314,8 +315,8 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       const delayMs = Math.min(CIRCUIT_BREAKER_BASE_MS * 2 ** this.circuitOpenCount, CIRCUIT_BREAKER_MAX_MS);
       this.circuitOpenCount++;
       this.circuitOpenUntil = Date.now() + delayMs;
-      console.error(
-        `[audit-plugin:gateway-publisher] Circuit breaker open — will retry after ${delayMs / 1000}s`,
+      gatewayPublisherLog.warn(
+        `Circuit breaker open — will retry after ${delayMs / 1000}s`,
       );
     }
   }
@@ -336,8 +337,8 @@ export function createGatewayPublisher(
   const enabledConfig = config.gatewayEnabled;
   if (enabledConfig === false) return new NoOpGatewayPublisher("gatewayEnabled=false");
   if (enabledConfig !== undefined && typeof enabledConfig !== "boolean") {
-    console.error(
-      `[audit-plugin:gateway-publisher] WARN gatewayEnabled is non-boolean (${typeof enabledConfig}); treating as default`,
+    gatewayPublisherLog.warn(
+      `gatewayEnabled is non-boolean (${typeof enabledConfig}); treating as default`,
     );
   }
 
@@ -360,8 +361,8 @@ export function createGatewayPublisher(
 
   // Surface http:// (cleartext) misconfiguration loudly even when allowed (loopback dev).
   if (url.toLowerCase().startsWith("http://")) {
-    console.error(
-      "[audit-plugin:gateway-publisher] WARN gatewayUrl uses http:// — API key will be transmitted in cleartext (allowed only because host is loopback)",
+    gatewayPublisherLog.warn(
+      "gatewayUrl uses http:// — API key will be transmitted in cleartext (allowed only because host is loopback)",
     );
   }
 
@@ -420,8 +421,8 @@ export async function drainForShutdown(publisher: GatewayPublisher): Promise<voi
       : Date.now() >= deadline
         ? "shutdown deadline reached"
         : "iteration cap reached";
-    console.error(
-      `[audit-plugin:gateway-publisher] WARN abandoning ${remaining} buffered event(s) on shutdown — ${reason}`,
+    gatewayPublisherLog.warn(
+      `abandoning ${remaining} buffered event(s) on shutdown — ${reason}`,
     );
   }
 }
