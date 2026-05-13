@@ -5,6 +5,14 @@ import type { SmtService } from "./services/smt-service.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
+// Write CLI command output directly to stdout, bypassing console.log. The
+// openclaw SDK's routeLogsToStderr() (enabled in CLI dispatch mode to keep
+// subsystem-logger noise off stdout) also patches console.log to stderr,
+// which would otherwise route this command's actual output to stderr too.
+function outLine(s: string): void {
+  process.stdout.write(`${s}\n`);
+}
+
 export interface AuditListOptions {
   last?: string;
   type?: string;
@@ -82,15 +90,15 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   const events = store.query(q);
 
   if (events.length === 0) {
-    console.log("No audit events found.");
+    outLine("No audit events found.");
     return;
   }
 
   const total = store.count();
-  console.log(`Showing ${events.length} of ${total} events:\n`);
+  outLine(`Showing ${events.length} of ${total} events:\n`);
 
   for (const event of events.reverse()) {
-    console.log(formatEvent(event));
+    outLine(formatEvent(event));
   }
 }
 
@@ -100,19 +108,19 @@ export async function cliVerifyHandler(
   notifier?: NotificationService,
 ): Promise<void> {
   await smtService.ensureReady();
-  console.log("Verifying audit trail integrity...\n");
+  outLine("Verifying audit trail integrity...\n");
 
   // 1. SMT verification — check trees and sample proofs
   const trees = smtService.listTrees();
   if (trees.length === 0) {
-    console.log("No SMT trees found. Events may not have been committed yet.");
+    outLine("No SMT trees found. Events may not have been committed yet.");
   } else {
     let allValid = true;
 
     const knownRoots = smtService.getKnownRoots(store.getCheckpointedRoots());
 
     for (const tree of trees) {
-      console.log(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
+      outLine(`SMT tree "${tree.key}": root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
 
       // Sample recent events and verify their proofs
       const recentEvents = store.query({ limit: 10, includeContent: true });
@@ -139,7 +147,7 @@ export async function cliVerifyHandler(
       }
 
       if (verified > 0) {
-        console.log(`  Sampled ${verified} event proof(s) — all valid.`);
+        outLine(`  Sampled ${verified} event proof(s) — all valid.`);
       }
       if (errored > 0) {
         const dbPath = `${smtService.getCheckpointDir()}/${tree.key}`;
@@ -158,14 +166,14 @@ export async function cliVerifyHandler(
     }
 
     if (allValid && trees.some((t) => t.entryCount > 0)) {
-      console.log(`\nOK — ${trees.length} tree(s), all sampled proofs valid.`);
+      outLine(`\nOK — ${trees.length} tree(s), all sampled proofs valid.`);
     }
   }
 
   // 2. DE checkpoint verification
   const checkpoints = store.getCheckpoints();
   if (checkpoints.length > 0) {
-    console.log(`\nVerifying ${checkpoints.length} DE checkpoint(s)...`);
+    outLine(`\nVerifying ${checkpoints.length} DE checkpoint(s)...`);
     let cpValid = 0;
     let cpFailed = false;
 
@@ -180,9 +188,9 @@ export async function cliVerifyHandler(
       }
     }
 
-    console.log(`  ${cpValid} anchored to DE`);
+    outLine(`  ${cpValid} anchored to DE`);
     if (!cpFailed) {
-      console.log("  All checkpoints have DE transaction hashes.");
+      outLine("  All checkpoints have DE transaction hashes.");
     }
   }
 }
@@ -196,9 +204,9 @@ export function cliExportHandler(store: AuditStore, format?: string, opts: Audit
   const fmt = format ?? "json";
 
   if (fmt === "csv") {
-    console.log(toCsv(events, opts.includeContent));
+    outLine(toCsv(events, opts.includeContent));
   } else {
-    console.log(toJsonLines(events));
+    outLine(toJsonLines(events));
   }
 }
 
@@ -213,11 +221,11 @@ export async function cliSmtHandler(
     case "root": {
       const result = smtService.getRoot(opts.tree);
       if (!result) {
-        console.log("No SMT tree found.");
+        outLine("No SMT tree found.");
         return;
       }
-      console.log(`Root: ${result.root}`);
-      console.log(`Entries: ${result.entryCount}`);
+      outLine(`Root: ${result.root}`);
+      outLine(`Entries: ${result.entryCount}`);
       break;
     }
     case "proof": {
@@ -227,7 +235,7 @@ export async function cliSmtHandler(
         process.exitCode = 1;
         return;
       }
-      console.log(JSON.stringify(proof, null, 2));
+      outLine(JSON.stringify(proof, null, 2));
       break;
     }
     case "verify-proof": {
@@ -237,7 +245,7 @@ export async function cliSmtHandler(
         const result = smtService.verifyProofWithRoots(proof, knownRoots);
         switch (result.status) {
           case "valid":
-            console.log("OK — proof is valid.");
+            outLine("OK — proof is valid.");
             break;
           case "unverifiable":
             console.error(`UNVERIFIABLE — ${result.reason}.`);
@@ -258,11 +266,11 @@ export async function cliSmtHandler(
     case "trees": {
       const trees = smtService.listTrees();
       if (trees.length === 0) {
-        console.log("No SMT trees.");
+        outLine("No SMT trees.");
         return;
       }
       for (const tree of trees) {
-        console.log(`${tree.key}: root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
+        outLine(`${tree.key}: root=${tree.root}, ${tree.entryCount} entries, ${tree.size} nodes`);
       }
       break;
     }
@@ -275,11 +283,11 @@ export async function cliSmtHandler(
       }
       const chain = smtService.getChain(treeKey, opts.conversationId);
       if (chain.length === 0) {
-        console.log("No chain entries found.");
+        outLine("No chain entries found.");
         return;
       }
       for (const entry of chain) {
-        console.log(`#${entry.seqNo} ${new Date(entry.timestamp * 1000).toISOString()} ${entry.rawHash.slice(0, 16)}... [${entry.auditEventId}]`);
+        outLine(`#${entry.seqNo} ${new Date(entry.timestamp * 1000).toISOString()} ${entry.rawHash.slice(0, 16)}... [${entry.auditEventId}]`);
       }
       break;
     }
