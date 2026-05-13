@@ -178,7 +178,6 @@ export class AuditStore {
     insertCheckpoint: StatementSync;
     countSince: StatementSync;
     maxSequenceSince: StatementSync;
-    getPreviousHash: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -245,7 +244,6 @@ export class AuditStore {
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
-      getPreviousHash: this.db.prepare("SELECT content_hash FROM audit_events WHERE sequence = ?"),
     };
   }
 
