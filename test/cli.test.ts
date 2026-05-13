@@ -28,13 +28,19 @@ function captureConsole(fn: () => void): { stdout: string; stderr: string } {
   const errors: string[] = [];
   const origLog = console.log;
   const origErr = console.error;
+  const origStdout = process.stdout.write.bind(process.stdout);
   console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    logs.push(typeof chunk === "string" ? chunk.replace(/\n$/, "") : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stdout.write;
   try {
     fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
+    process.stdout.write = origStdout;
   }
   return { stdout: logs.join("\n"), stderr: errors.join("\n") };
 }
@@ -44,13 +50,19 @@ async function captureConsoleAsync(fn: () => Promise<void>): Promise<{ stdout: s
   const errors: string[] = [];
   const origLog = console.log;
   const origErr = console.error;
+  const origStdout = process.stdout.write.bind(process.stdout);
   console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
   console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    logs.push(typeof chunk === "string" ? chunk.replace(/\n$/, "") : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stdout.write;
   try {
     await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
+    process.stdout.write = origStdout;
   }
   return { stdout: logs.join("\n"), stderr: errors.join("\n") };
 }

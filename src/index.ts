@@ -1,4 +1,5 @@
 import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
+import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
 import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
@@ -14,6 +15,7 @@ import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
 import {GatewayStopCapture} from "./gateway-stop-capture.js";
+import {log, smtLog} from "./util/logger.js";
 
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
@@ -151,7 +153,13 @@ export default (() => {
             // a second writer on the audit DB — that would race the running
             // gateway for the SQLite reserved lock. CLI handlers fall back to
             // the read-only branch in getStore().
-            if (api.registrationMode !== "full") return;
+            if (api.registrationMode !== "full") {
+                // CLI dispatch context — keep subsystem-logger output off stdout
+                // so command output (audit export JSON, smt trees lines, etc.)
+                // stays parseable by jq / awk in scripts.
+                routeLogsToStderr();
+                return;
+            }
 
             // Guard against double creation of services — openclaw may load the plugin multiple times.
             // Hooks must be re-registered on every api instance because events may be dispatched
@@ -160,7 +168,7 @@ export default (() => {
                 if (_store && _limiter && _gatewayStopCapture) {
                     registerHooks(api, _store, _limiter, config, _gatewayStopCapture);
                 }
-                console.warn("[audit-plugin] Re-registered hooks on new api instance");
+                log.warn("Re-registered hooks on new api instance");
                 return;
             }
             _registered = true;
@@ -397,7 +405,7 @@ export default (() => {
 
             // --- Background services ---
 
-            console.error(`[audit-plugin] Registering services (registrationMode: ${api.registrationMode})`);
+            log.info(`Registering services (registrationMode: ${api.registrationMode})`);
 
             const retention = new RetentionService(activeStore, config);
             const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
@@ -426,7 +434,7 @@ export default (() => {
             api.registerService({
                 id: "constellation-audit-plugin:smt",
                 async start() {
-                    console.error("[audit-plugin] Service smt start() called");
+                    log.info("Service smt start() called");
                     await activeSmt.start();
                     // Replay events the SMT hasn't seen yet (delta since last checkpoint)
                     const lastSeq = activeSmt.getLastCheckpointedSequence();
@@ -442,7 +450,7 @@ export default (() => {
                             }),
                             pending,
                         );
-                        console.error(`[audit-plugin:smt] Replayed ${replayed} event(s) since seq ${lastSeq}`);
+                        smtLog.info(`Replayed ${replayed} event(s) since seq ${lastSeq}`);
                     }
                 },
                 async stop() {

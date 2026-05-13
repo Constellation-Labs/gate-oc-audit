@@ -5,6 +5,7 @@ import {uuidv7} from "uuidv7";
 import type {AuditStore} from "../store/audit-store.js";
 import type {NotificationService} from "./notifications.js";
 import type {SmtService} from "./smt-service.js";
+import {deAnchorLog} from "../util/logger.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
@@ -97,7 +98,7 @@ export interface AnchorService {
 
 export class NoOpAnchorService implements AnchorService {
     constructor(reason: string) {
-        console.error(`[audit-plugin:de-anchor] ${reason}, anchoring disabled`);
+        deAnchorLog.info(`${reason}, anchoring disabled`);
     }
 
     isActive(): boolean {
@@ -184,8 +185,8 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async start(): Promise<void> {
-        console.error(`[audit-plugin:de-anchor] plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
-        console.error(`[audit-plugin:de-anchor] Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
+        deAnchorLog.info(`plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
+        deAnchorLog.info(`Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
         await this.verifyCheckpoints();
         await this.anchorIfNeeded(this.timerMinEvents);
@@ -193,7 +194,7 @@ class ActiveAnchorService implements AnchorService {
             this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
         }, this.intervalMs);
         this.timer.unref();
-        console.error("[audit-plugin:de-anchor] Started successfully");
+        deAnchorLog.info("Started successfully");
     }
 
     stop(): void {
@@ -206,7 +207,7 @@ class ActiveAnchorService implements AnchorService {
     notifyAppend(): void {
         this.appendsSinceLastCheckpoint++;
         if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
-            console.error(`[audit-plugin:de-anchor] Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
+            deAnchorLog.info(`Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
             this.anchorIfNeeded().catch(() => {});
         }
     }
@@ -215,7 +216,7 @@ class ActiveAnchorService implements AnchorService {
         if (this.anchorInFlight) return;
         if (this.isCircuitOpen()) {
             const waitMs = this.circuitOpenUntil - Date.now();
-            console.error(`[audit-plugin:de-anchor] WARN anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
+            deAnchorLog.warn(`anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
             return;
         }
 
@@ -229,18 +230,18 @@ class ActiveAnchorService implements AnchorService {
 
             const smtRoot = this.smtService?.getCurrentSmtRoot();
             if (!smtRoot) {
-                console.error("[audit-plugin:de-anchor] No SMT root available, skipping anchor");
+                deAnchorLog.warn("No SMT root available, skipping anchor");
                 return;
             }
 
             const seqEnd = this.store.maxSequenceSince(startSeq);
             if (seqEnd === undefined) {
                 // Theoretically unreachable — countSince just confirmed events exist
-                console.error("[audit-plugin:de-anchor] maxSequenceSince returned undefined despite positive count, skipping anchor");
+                deAnchorLog.error("maxSequenceSince returned undefined despite positive count, skipping anchor");
                 return;
             }
 
-            console.error(`[audit-plugin:de-anchor] Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
+            deAnchorLog.info(`Submitting fingerprint — root: ${smtRoot.slice(0, 16)}…, events: ${eventCount}, seq: ${startSeq}-${seqEnd}`);
             const txHash = await this.submitFingerprint(smtRoot);
 
             const checkpointId = uuidv7();
@@ -249,18 +250,18 @@ class ActiveAnchorService implements AnchorService {
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
             if (txHash) {
-                console.error(
-                    `[audit-plugin:de-anchor] Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
+                deAnchorLog.info(
+                    `Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
                 );
             } else {
-                console.error(
-                    `[audit-plugin:de-anchor] WARN DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
+                deAnchorLog.warn(
+                    `DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
                 );
             }
         } catch (err) {
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
-            console.error("[audit-plugin:de-anchor] Anchor failed:", message);
+            deAnchorLog.error(`Anchor failed: ${message}`);
         } finally {
             // Reset unconditionally: authoritative gating uses store.countSince(startSeq),
             // so the counter is only a hint for when notifyAppend should dispatch. Resetting
@@ -286,23 +287,23 @@ class ActiveAnchorService implements AnchorService {
                         try {
                             const detail = await verifyFn(cp.smtRoot);
                             if (!detail) {
-                                console.error(`[audit-plugin:de-anchor] Verification failed for checkpoint ${cp.id}`);
+                                deAnchorLog.error(`Verification failed for checkpoint ${cp.id}`);
                                 notifier
                                     ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
                                     .catch((notifyErr) => {
                                         const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
-                                        console.error(`[audit-plugin:de-anchor] WARN divergence notification failed for checkpoint ${cp.id}: ${msg}`);
+                                        deAnchorLog.warn(`divergence notification failed for checkpoint ${cp.id}: ${msg}`);
                                     });
                             }
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : "Unknown error";
-                            console.error(`[audit-plugin:de-anchor] WARN verify API call failed for checkpoint ${cp.id}: ${msg}`);
+                            deAnchorLog.warn(`verify API call failed for checkpoint ${cp.id}: ${msg}`);
                         }
                     }),
             );
         } catch (err) {
             const message = err instanceof Error ? err.message : "Unknown error";
-            console.error("[audit-plugin:de-anchor] Checkpoint verification error:", message);
+            deAnchorLog.error(`Checkpoint verification error: ${message}`);
         }
     }
 
@@ -325,7 +326,7 @@ class ActiveAnchorService implements AnchorService {
         const result = results[0];
         if (!result?.accepted) {
             const reason = result?.errors?.join(", ") ?? "unknown reason";
-            console.error(`[audit-plugin:de-anchor] WARN DE rejected fingerprint — root: ${smtRoot.slice(0, 16)}…, reason: ${reason}, response: ${JSON.stringify(result)}`);
+            deAnchorLog.warn(`DE rejected fingerprint — root: ${smtRoot.slice(0, 16)}…, reason: ${reason}, response: ${JSON.stringify(result)}`);
             throw new Error(`DE rejected fingerprint: ${reason}`);
         }
         return result.hash ?? result.eventId ?? null;
@@ -348,8 +349,8 @@ class ActiveAnchorService implements AnchorService {
             const delayMs = Math.min(CIRCUIT_BREAKER_BASE_MS * 2 ** this.circuitOpenCount, CIRCUIT_BREAKER_MAX_MS);
             this.circuitOpenCount++;
             this.circuitOpenUntil = Date.now() + delayMs;
-            console.error(
-                `[audit-plugin:de-anchor] Circuit breaker open — will retry after ${delayMs / 1000}s`,
+            deAnchorLog.warn(
+                `Circuit breaker open — will retry after ${delayMs / 1000}s`,
             );
         }
     }
@@ -377,7 +378,7 @@ function resolveSigningKey(config: Record<string, unknown>): string {
         return config.deSigningKey;
     }
     const kp = dedCore.generateKeyPair();
-    console.error("[audit-plugin:de-anchor] No signing key configured, generated ephemeral key pair");
+    deAnchorLog.warn("No signing key configured, generated ephemeral key pair");
     return kp.privateKey;
 }
 
@@ -456,7 +457,7 @@ export class WalletAnchorService extends ActiveAnchorService {
                 throw new Error("x402 payment required but could not be fulfilled");
             }
             if (res.kind !== "result") {
-                console.error(`[audit-plugin:de-anchor] WARN x402 submit returned unexpected kind="${res.kind}"`);
+                deAnchorLog.warn(`x402 submit returned unexpected kind="${res.kind}"`);
                 throw new Error(`x402 submit returned unexpected kind="${res.kind}"`);
             }
             return res.data;
@@ -478,7 +479,7 @@ export class WalletAnchorService extends ActiveAnchorService {
             authLabel: "x402 wallet",
         });
 
-        console.error(`[audit-plugin:de-anchor] Wallet loaded (address: ${client.walletAddress}), auth: x402`);
+        deAnchorLog.info(`Wallet loaded (address: ${client.walletAddress}), auth: x402`);
     }
 }
 
@@ -498,7 +499,7 @@ export function createDeAnchorService(
 
     if (deApiKey && hasOrgId && hasTenantId) {
         if (deWalletKeyFile) {
-            console.error("[audit-plugin:de-anchor] Both deApiKey and deWalletKeyFile configured, API key takes precedence");
+            deAnchorLog.warn("Both deApiKey and deWalletKeyFile configured, API key takes precedence");
         }
         return new ApiKeyAnchorService(store, config, notifier);
     }

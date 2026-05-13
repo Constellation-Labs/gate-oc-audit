@@ -12,6 +12,8 @@ import {
     WalletAnchorService,
 } from "../../src/services/de-anchor.js";
 import type {AuditEventInsert} from "../../src/types/events.js";
+import {deAnchorLog} from "../../src/util/logger.js";
+import {captureLogger} from "../test-utils/capture-logger.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
@@ -249,48 +251,39 @@ describe("DeAnchorService", () => {
 
     describe("factory", () => {
         it("returns NoOpAnchorService when no credentials configured", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(capture.messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
 
         it("returns NoOpAnchorService when API key without org/tenant", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {deApiKey: "test-key"});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("deOrgId and deTenantId missing")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(capture.messages.some((e) => e.includes("deOrgId and deTenantId missing")));
+                assert.ok(capture.messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
 
         it("returns NoOpAnchorService when wallet key file does not exist", () => {
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {
                     deWalletKeyFile: "/nonexistent/wallet.key",
                 });
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("not found")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(capture.messages.some((e) => e.includes("not found")));
+                assert.ok(capture.messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
 
@@ -298,17 +291,14 @@ describe("DeAnchorService", () => {
             const keyFile = join(dirname(dbPath), "bad-wallet.key");
             writeFileSync(keyFile, "not-a-valid-hex-key");
 
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {deWalletKeyFile: keyFile});
                 assert.equal(service.isActive(), false);
-                assert.ok(errors.some((e) => e.includes("invalid private key")));
-                assert.ok(errors.some((e) => e.includes("anchoring disabled")));
+                assert.ok(capture.messages.some((e) => e.includes("invalid private key")));
+                assert.ok(capture.messages.some((e) => e.includes("anchoring disabled")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
 
@@ -317,10 +307,7 @@ describe("DeAnchorService", () => {
             const keyFile = join(dirname(dbPath), "wallet.key");
             writeFileSync(keyFile, kp.privateKey);
 
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 process.env.DE_TEST_URL = "http://localhost:9999/v1";
                 const service = createDeAnchorService(store, {
@@ -331,10 +318,10 @@ describe("DeAnchorService", () => {
                     deWalletKeyFile: keyFile,
                 });
                 assert.equal(service.isActive(), true);
-                assert.ok(errors.some((e) => e.includes("API key takes precedence")));
-                assert.ok(!errors.some((e) => e.includes("Wallet loaded")));
+                assert.ok(capture.messages.some((e) => e.includes("API key takes precedence")));
+                assert.ok(!capture.messages.some((e) => e.includes("Wallet loaded")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
     });
@@ -351,17 +338,14 @@ describe("DeAnchorService", () => {
             const keyFile = join(dirname(dbPath), "wallet.key");
             writeFileSync(keyFile, kp.privateKey);
 
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {deWalletKeyFile: keyFile});
                 assert.equal(service.isActive(), true);
-                assert.ok(errors.some((e) => e.includes("Wallet loaded")));
-                assert.ok(errors.some((e) => e.includes("auth: x402")));
+                assert.ok(capture.messages.some((e) => e.includes("Wallet loaded")));
+                assert.ok(capture.messages.some((e) => e.includes("auth: x402")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
 
@@ -412,16 +396,13 @@ describe("DeAnchorService", () => {
             const keyFile = join(dirname(dbPath), "wallet.key");
             writeFileSync(keyFile, `0x${kp.privateKey}`);
 
-            const errors: string[] = [];
-            const origError = console.error;
-            console.error = (...args: unknown[]) => errors.push(args.join(" "));
-
+            const capture = captureLogger(deAnchorLog);
             try {
                 const service = createDeAnchorService(store, {deWalletKeyFile: keyFile});
                 assert.equal(service.isActive(), true);
-                assert.ok(errors.some((e) => e.includes("Wallet loaded")));
+                assert.ok(capture.messages.some((e) => e.includes("Wallet loaded")));
             } finally {
-                console.error = origError;
+                capture.restore();
             }
         });
     });

@@ -8,6 +8,7 @@ import { createRequire } from "module";
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
 import { initializeSchema, runInTransaction } from "./schema.js";
 import { getMachineId } from "../util/machine-id.js";
+import {log} from "../util/logger.js";
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -185,7 +186,7 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    console.error(
+    console.info(
       `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
     );
 
@@ -247,8 +248,8 @@ export class AuditStore {
     } catch (err) {
       if (isNew) throw err; // Fresh DB failed — nothing to recover
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(`[audit-plugin] Database corrupt or unreadable: ${message}`);
-      console.error("[audit-plugin] Preserving old DB and creating fresh database");
+      log.error(`Database corrupt or unreadable: ${message}`);
+      log.warn("Preserving old DB and creating fresh database");
 
       // Preserve the old DB for forensic recovery
       const backupPath = `${resolvedPath}.corrupt.${Date.now()}`;
@@ -260,9 +261,9 @@ export class AuditStore {
             renameSync(resolvedPath + suffix, backupPath + suffix);
           }
         }
-        console.error(`[audit-plugin] Old database preserved at ${backupPath}`);
+        log.warn(`Old database preserved at ${backupPath}`);
       } catch {
-        console.error("[audit-plugin] Failed to rename corrupt DB, overwriting");
+        log.error("Failed to rename corrupt DB, overwriting");
       }
 
       // Create fresh DB
@@ -275,7 +276,7 @@ export class AuditStore {
 
   append(insert: AuditEventInsert): AuditEvent | undefined {
     if (this.readOnly) {
-      console.error("[audit-plugin] append() called on a read-only store; dropping event");
+      log.warn("append() called on a read-only store; dropping event");
       return undefined;
     }
     try {
@@ -298,7 +299,7 @@ export class AuditStore {
       try {
         metadataCanonical = sdk.canonicalize(insert.metadata);
       } catch {
-        console.error("[audit-plugin] Metadata is not serializable, recording marker");
+        log.warn("Metadata is not serializable, recording marker");
         effectiveMetadata = { $auditTruncation: { reason: "non-serializable" } };
         metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
@@ -306,8 +307,8 @@ export class AuditStore {
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
         // Sender-controlled fields (messageId, sourcePath, requestedSpecifier,
         // etc.) could otherwise erase the very event that records the abuse.
-        console.error(
-          `[audit-plugin] Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
+        log.warn(
+          `Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
         );
         effectiveMetadata = {
           $auditTruncation: { reason: "size-cap", originalSize: metadataCanonical.length },
@@ -331,7 +332,7 @@ export class AuditStore {
         ? insert.content
         : undefined;
       if (insert.content && !rawContent) {
-        console.error(`[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
+        log.warn(`Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
       }
       const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
 

@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import {log} from "../util/logger.js";
 
 const PRAGMAS = [
   "PRAGMA journal_mode = WAL",
@@ -82,7 +83,7 @@ export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
     try {
       db.exec("ROLLBACK");
     } catch (rollbackErr) {
-      console.error("[audit-plugin] ROLLBACK failed:", rollbackErr);
+      log.error(`ROLLBACK failed: ${rollbackErr instanceof Error ? rollbackErr.message : rollbackErr}`);
     }
     throw err;
   }
@@ -95,7 +96,7 @@ export function initializeSchema(db: DatabaseSync): void {
 
   const mode = (db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
   if (mode !== "wal" && mode !== "memory") {
-    console.warn(`[audit-plugin] journal_mode fell back to '${mode}' (expected 'wal'); durability/concurrency guarantees are reduced`);
+    log.warn(`journal_mode fell back to '${mode}' (expected 'wal'); durability/concurrency guarantees are reduced`);
   }
 
   runInTransaction(db, () => {

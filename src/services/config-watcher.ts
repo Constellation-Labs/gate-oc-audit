@@ -6,6 +6,7 @@ import type { ToolScanner } from "../scanner.js";
 import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
 import { fileHash } from "../util/fs.js";
+import {log} from "../util/logger.js";
 
 interface ManifestEntry {
   contentHash: string;
@@ -74,7 +75,7 @@ export class ConfigWatcher {
     try {
       chokidar = await import("chokidar");
     } catch {
-      console.error("[audit-plugin] chokidar not available, config watching disabled");
+      log.warn("chokidar not available, config watching disabled");
       return;
     }
 
@@ -89,7 +90,7 @@ export class ConfigWatcher {
     }
 
     if (watchPaths.length === 0) {
-      console.error("[audit-plugin] No config paths found to watch");
+      log.warn("No config paths found to watch");
       return;
     }
 
@@ -138,7 +139,7 @@ export class ConfigWatcher {
         if (!existing) return;
         this.manifest.delete(resolvedPath);
         try { this.store.deleteManifest(`${manifestType}:${resolvedPath}`); } catch (err) {
-          console.error("[audit-plugin] Failed to delete config manifest:", err instanceof Error ? err.message : err);
+          log.error(`Failed to delete config manifest: ${err instanceof Error ? err.message : err}`);
         }
       } else {
         const hash = fileHash(resolvedPath);
@@ -147,7 +148,7 @@ export class ConfigWatcher {
 
         this.manifest.set(resolvedPath, { contentHash: hash, filePath: resolvedPath });
         try { this.store.upsertManifest(`${manifestType}:${resolvedPath}`, manifestType, hash, resolvedPath); } catch (err) {
-          console.error("[audit-plugin] Failed to upsert config manifest:", err instanceof Error ? err.message : err);
+          log.error(`Failed to upsert config manifest: ${err instanceof Error ? err.message : err}`);
         }
 
         if (!existing) effectiveChangeType = "added";
@@ -208,11 +209,11 @@ export class ConfigWatcher {
       }
 
       this.notifier.notifyConfigChange(changeMeta, scanFindings).catch((err) => {
-        console.error("[audit-plugin] Notification error:", err);
+        log.error(`Notification error: ${err instanceof Error ? err.message : err}`);
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin] Config change handler error:", message);
+      log.error(`Config change handler error: ${message}`);
     }
   }
 

@@ -3,6 +3,7 @@ import type { AuditEvent, AuditEventInsert } from "./types/events.js";
 import type { AnchorService } from "./services/de-anchor.js";
 import type { GatewayPublisher } from "./services/gateway-publisher.js";
 import type { SmtService } from "./services/smt-service.js";
+import {rateLimiterLog} from "./util/logger.js";
 
 const DEFAULT_MAX_EVENTS_PER_SEC = 100;
 const DEFAULT_BUFFER_CAPACITY = 10_000;
@@ -40,7 +41,7 @@ export class RateLimiter {
     this.bufferCapacity = typeof config.rateLimitBufferSize === "number"
       ? config.rateLimitBufferSize
       : DEFAULT_BUFFER_CAPACITY;
-    console.error(`[audit-plugin:rate-limiter] Initialized — maxPerSec: ${this.maxPerSec}, bufferCapacity: ${this.bufferCapacity}`);
+    rateLimiterLog.info(`Initialized — maxPerSec: ${this.maxPerSec}, bufferCapacity: ${this.bufferCapacity}`);
   }
 
   setDeAnchor(deAnchor: AnchorService): void {
@@ -78,7 +79,7 @@ export class RateLimiter {
 
     // Over threshold: buffer the event
     if (this.buffer.length === 0) {
-      console.error(`[audit-plugin:rate-limiter] Rate limit hit (${this.windowEvents}/${this.maxPerSec}/s), buffering events`);
+      rateLimiterLog.warn(`Rate limit hit (${this.windowEvents}/${this.maxPerSec}/s), buffering events`);
     }
     if (this.buffer.length < this.bufferCapacity) {
       this.buffer.push(insert);

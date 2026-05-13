@@ -4,6 +4,7 @@ import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 import type { RateLimiter } from "./rate-limiter.js";
 import type { GatewayStopCapture } from "./gateway-stop-capture.js";
+import {log} from "./util/logger.js";
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -86,7 +87,7 @@ export function _resetConversationAccessWarningStateForTests(): void {
 
 
 const CONVERSATION_ACCESS_WARNING =
-  "[audit-plugin] tool.invoked observed without any preceding llm_input — " +
+  "tool.invoked observed without any preceding llm_input — " +
   "either (a) openclaw 2026.4.24+ dropped the conversation hook registrations " +
   "because the operator opt-in is missing (set " +
   "plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true), " +
@@ -196,7 +197,7 @@ export function registerHooks(
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error("[audit-plugin]", message);
+      log.error(message);
     }
   };
 
@@ -288,7 +289,7 @@ export function registerHooks(
     (evt, ctx) => {
       if (!llmInputObserved && !conversationAccessWarned) {
         conversationAccessWarned = true;
-        console.warn(CONVERSATION_ACCESS_WARNING);
+        log.warn(CONVERSATION_ACCESS_WARNING);
       }
       const sanitized = sanitizeArgs(evt.params);
       const args = redactToolArgs
@@ -823,7 +824,7 @@ export function registerHooks(
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.warn("[audit-plugin] before_install hook unavailable:", message);
+    log.warn(`before_install hook unavailable: ${message}`);
     // Record the registration miss in the audit trail so operators reviewing
     // the SQLite log later can distinguish "no installs happened" from "we
     // silently couldn't register".
