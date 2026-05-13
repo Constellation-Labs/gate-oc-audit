@@ -23,6 +23,8 @@ import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import { registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
+import { gatewayPublisherLog } from "../src/util/logger.js";
+import { captureLogger } from "./test-utils/capture-logger.js";
 import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
 import {
@@ -1732,11 +1734,10 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
     gateway.received.length = 0;
     gateway.setRespond(() => ({ status: 500, body: "down" }));
 
-    const warnings: string[] = [];
-    const originalErr = console.error;
-    console.error = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    // The abandonment WARN goes through the gateway publisher's subsystem
+    // logger now, not console.error — capture it via captureLogger so the
+    // assertion runs against the real log call rather than a side-channel.
+    const captured = captureLogger(gatewayPublisherLog);
 
     const rig = await createRig({
       gatewayUrl: `http://localhost:${gateway.port}`,
@@ -1758,15 +1759,15 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
       );
     } finally {
       await destroyRig(rig);
-      console.error = originalErr;
+      captured.restore();
       // Restore default response for the next case.
       gateway.setRespond(() => ({ status: 202, body: '{"accepted":1}' }));
     }
 
-    const abandoned = warnings.find((w) => w.includes("abandoning") && w.includes("buffered event"));
+    const abandoned = captured.messages.find((m) => m.includes("abandoning") && m.includes("buffered event"));
     assert.ok(
       abandoned,
-      `expected drainForShutdown to log an abandoned-events WARN; saw: ${warnings.join(" | ")}`,
+      `expected drainForShutdown to log an abandoned-events WARN; saw: ${captured.messages.join(" | ")}`,
     );
   });
 });
