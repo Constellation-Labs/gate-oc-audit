@@ -267,7 +267,7 @@ export class AuditStore {
       if (isNew) throw err; // Fresh DB failed — nothing to recover
       const message = err instanceof Error ? err.message : "Unknown error";
       log.error(`Database corrupt or unreadable: ${message}`);
-      log.warn("Preserving old DB and creating fresh database");
+      log.error("Preserving old DB and creating fresh database");
 
       // Preserve the old DB for forensic recovery
       const backupPath = `${resolvedPath}.corrupt.${Date.now()}`;
@@ -323,7 +323,7 @@ export class AuditStore {
       const contentOversize = hasContent && insert.content!.length > MAX_CONTENT_SIZE;
       const rawContent = hasContent && !contentOversize ? insert.content : undefined;
       if (contentOversize) {
-        console.error(
+        log.warn(
           `[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event with truncation marker`,
         );
       }
@@ -434,7 +434,7 @@ export class AuditStore {
     } catch (err) {
       this.degraded = true;
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(
+      log.error(
         `[audit-plugin][store=${this.instanceId}] Failed to append event (${insert.eventType}): ${message}`,
       );
       return undefined;
