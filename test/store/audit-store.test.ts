@@ -221,6 +221,41 @@ describe("AuditStore", () => {
     });
   });
 
+  // Regression: under the pre-v4 schema each AuditStore cached the next
+  // sequence in memory, so two instances opened on the same file would race
+  // and one would fail every append with UNIQUE constraint violations.
+  // With AUTOINCREMENT + RETURNING the DB owns allocation and interleaved
+  // writes must all succeed with unique sequences.
+  describe("concurrent writers", () => {
+    it("interleaved appends from two instances all succeed with unique sequences", () => {
+      const storeA = new AuditStore(dbPath);
+      const storeB = new AuditStore(dbPath);
+
+      const events = [];
+      const N = 25;
+      for (let i = 0; i < N; i++) {
+        const a = storeA.append(sampleInsert({ description: `A-${i}` }));
+        const b = storeB.append(sampleInsert({ description: `B-${i}` }));
+        assert.ok(a, `storeA append #${i} returned undefined`);
+        assert.ok(b, `storeB append #${i} returned undefined`);
+        events.push(a, b);
+      }
+
+      assert.equal(storeA.isDegraded(), false, "storeA should not be degraded");
+      assert.equal(storeB.isDegraded(), false, "storeB should not be degraded");
+
+      const sequences = events.map((e) => e.sequence).sort((x, y) => x - y);
+      assert.equal(sequences.length, 2 * N);
+      assert.equal(new Set(sequences).size, 2 * N, "sequences must be unique");
+      // The pre-existing `store` from beforeEach has not appended, so the
+      // sequence space for this test starts at 1.
+      assert.deepEqual(sequences, Array.from({ length: 2 * N }, (_, i) => i + 1));
+
+      storeA.close();
+      storeB.close();
+    });
+  });
+
   describe("handlers with minimal context", () => {
     it("appends with all optional fields undefined", () => {
       const event = store.append({
