@@ -17,6 +17,70 @@ const SENSITIVE_KEY =
 
 const AUDIT_PRIORITY = 200;
 
+// Mirrors gateway DTO caps (spec §11.3 + swarm-deck/apps/gateway-proxy/src/
+// audit-ingest/types.ts) so the publisher never produces a 400-doomed batch.
+// USER_ID_MAX_LEN is retained as an alias for resolveConfiguredUserId, where
+// truncation already happens at config-read time.
+const MAX_FIELD_LENGTH = 1000;
+const MAX_DESCRIPTION_LENGTH = 4_000;
+const MAX_CONTENT_LENGTH = 64_000;
+const USER_ID_MAX_LEN = MAX_FIELD_LENGTH;
+const TRUNCATE_SUFFIX = "…[truncated]";
+
+function truncateString(s: string, max: number, label: string): string {
+  if (s.length <= max) return s;
+  console.warn(
+    `[audit-plugin] truncating ${label}: ${s.length} → ${max} chars (gateway cap)`,
+  );
+  let end = max - TRUNCATE_SUFFIX.length;
+  if (end < 1) end = max;
+  const code = s.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return s.slice(0, end) + TRUNCATE_SUFFIX;
+}
+
+// Walk metadata; clamp every string value to MAX_FIELD_LENGTH. Bounded
+// recursion via the same `seen` guard pattern as `sanitize()`.
+function truncateMetadataStrings(value: unknown, seen = new WeakSet()): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_FIELD_LENGTH
+      ? truncateString(value, MAX_FIELD_LENGTH, "metadata string")
+      : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value as object)) return value; // sanitize() already replaced cycles with "[Circular]"
+  seen.add(value as object);
+  if (Array.isArray(value)) {
+    return value.map((v) => truncateMetadataStrings(v, seen));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = truncateMetadataStrings(v, seen);
+  }
+  return out;
+}
+
+function resolveConfiguredUserId(config: Record<string, unknown>): string | undefined {
+  const candidates: Array<{ source: string; raw: unknown }> = [
+    { source: "config.userId", raw: config.userId },
+    { source: "OPENCLAW_USER_ID env", raw: process.env.OPENCLAW_USER_ID },
+    { source: "USER env", raw: process.env.USER },
+  ];
+  for (const { source, raw } of candidates) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > USER_ID_MAX_LEN) {
+      console.warn(
+        `[audit-plugin] WARN ${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating. Gateway would otherwise reject every batch on validation.`,
+      );
+      return trimmed.slice(0, USER_ID_MAX_LEN);
+    }
+    return trimmed;
+  }
+  return undefined;
+}
+
 // OpenClaw's engine surfaces tool denials/blocks as thrown errors that reach
 // us via after_tool_call's `error` field. We can't distinguish denials from
 // runtime errors structurally, so we match on the engine's authored phrases.
@@ -171,6 +235,29 @@ function safeComposite(value: string): string {
   return value.slice(0, end) + "…";
 }
 
+function applyFieldCaps(insert: AuditEventInsert): AuditEventInsert {
+  let next = insert;
+  if (next.sessionId !== undefined && next.sessionId.length > MAX_FIELD_LENGTH) {
+    next = { ...next, sessionId: truncateString(next.sessionId, MAX_FIELD_LENGTH, "sessionId") };
+  }
+  if (next.userId !== undefined && next.userId.length > MAX_FIELD_LENGTH) {
+    next = { ...next, userId: truncateString(next.userId, MAX_FIELD_LENGTH, "userId") };
+  }
+  if (next.description.length > MAX_DESCRIPTION_LENGTH) {
+    // safeDesc/safeComposite already clamp at 256 — this branch only triggers
+    // if a hook bypasses them. Kept as a safety net to match the spec cap.
+    next = { ...next, description: truncateString(next.description, MAX_DESCRIPTION_LENGTH, "description") };
+  }
+  if (next.content !== undefined && next.content.length > MAX_CONTENT_LENGTH) {
+    next = { ...next, content: truncateString(next.content, MAX_CONTENT_LENGTH, "content") };
+  }
+  // Metadata is canonicalized + persisted by the store. Walking on every event
+  // costs an extra O(N) pass over its keys; acceptable since metadata is small
+  // by construction and the walk short-circuits on non-string leaves.
+  next = { ...next, metadata: truncateMetadataStrings(next.metadata) as Record<string, unknown> };
+  return next;
+}
+
 export function registerHooks(
   api: OpenClawPluginApi,
   store: AuditStore,
@@ -181,7 +268,17 @@ export function registerHooks(
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
 
+  // Resolution order: explicit config > OPENCLAW_USER_ID env > USER env > unset.
+  // Stamped on every insert; leaves NULL when nothing resolves. Each candidate
+  // is trimmed, skipped when empty, and truncated to USER_ID_MAX_LEN so an
+  // oversized value can't quietly trip the gateway DTO's length cap and stall
+  // every batch on validation rejection.
+  const configuredUserId = resolveConfiguredUserId(config);
+
   const safeAppend = (insert: AuditEventInsert): void => {
+    if (configuredUserId !== undefined && insert.userId === undefined) {
+      insert = { ...insert, userId: configuredUserId };
+    }
     if (
       redactContent &&
       typeof insert.content === "string" &&
@@ -189,6 +286,10 @@ export function registerHooks(
     ) {
       insert = { ...insert, content: "sha256:" + sdk.hashDocument(insert.content) };
     }
+    // Mirror the gateway DTO's field caps (spec §11.3) at the single chokepoint
+    // so every hook inherits truncation. Must run before store.append so the
+    // computed contentHash matches what eventually goes on the wire.
+    insert = applyFieldCaps(insert);
     try {
       if (limiter) {
         limiter.append(insert);

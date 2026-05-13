@@ -1380,3 +1380,121 @@ describe("redactPromptText", () => {
     assert.equal(readContent(dbPath), null);
   });
 });
+
+// --- userId resolution ---
+
+describe("registerHooks — userId resolution", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
+  let originalEnv: { OPENCLAW_USER_ID?: string; USER?: string };
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    api = createMockApi();
+    _resetConversationAccessWarningStateForTests();
+    gatewayStopCapture = new GatewayStopCapture(store);
+    gatewayStopCapture.installSignalFallback();
+    originalEnv = {
+      OPENCLAW_USER_ID: process.env.OPENCLAW_USER_ID,
+      USER: process.env.USER,
+    };
+    delete process.env.OPENCLAW_USER_ID;
+    delete process.env.USER;
+  });
+
+  afterEach(() => {
+    gatewayStopCapture.detachSignalListeners();
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+    if (originalEnv.OPENCLAW_USER_ID !== undefined) process.env.OPENCLAW_USER_ID = originalEnv.OPENCLAW_USER_ID;
+    else delete process.env.OPENCLAW_USER_ID;
+    if (originalEnv.USER !== undefined) process.env.USER = originalEnv.USER;
+    else delete process.env.USER;
+  });
+
+  function readUserId(): string | null {
+    const db = new DatabaseSync(dbPath);
+    const row = db.prepare("SELECT user_id FROM audit_events ORDER BY sequence LIMIT 1").get() as
+      | { user_id: string | null }
+      | undefined;
+    db.close();
+    return row?.user_id ?? null;
+  }
+
+  function fireOne(): void {
+    fireHook(api, "before_model_resolve",
+      { trigger: "user", promptLength: 10 },
+      { sessionId: "s1" },
+    );
+  }
+
+  it("config.userId wins over env vars", () => {
+    process.env.OPENCLAW_USER_ID = "from-openclaw-env";
+    process.env.USER = "from-user-env";
+    registerHooks(api, store, undefined, { userId: "from-config" }, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "from-config");
+  });
+
+  it("falls back to OPENCLAW_USER_ID when config is unset", () => {
+    process.env.OPENCLAW_USER_ID = "from-openclaw-env";
+    process.env.USER = "from-user-env";
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "from-openclaw-env");
+  });
+
+  it("falls back to USER when config and OPENCLAW_USER_ID are unset", () => {
+    process.env.USER = "from-user-env";
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "from-user-env");
+  });
+
+  it("leaves user_id NULL when nothing resolves", () => {
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), null);
+  });
+
+  it("treats an empty config.userId as unset and falls through to env", () => {
+    process.env.OPENCLAW_USER_ID = "from-openclaw-env";
+    registerHooks(api, store, undefined, { userId: "" }, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "from-openclaw-env");
+  });
+
+  it("treats a whitespace-only config.userId as unset and falls through to env", () => {
+    process.env.OPENCLAW_USER_ID = "from-openclaw-env";
+    registerHooks(api, store, undefined, { userId: "   \t\n " }, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "from-openclaw-env");
+  });
+
+  it("trims surrounding whitespace from resolved userId", () => {
+    registerHooks(api, store, undefined, { userId: "  alice@example.com\n" }, gatewayStopCapture);
+    fireOne();
+    assert.equal(readUserId(), "alice@example.com");
+  });
+
+  it("truncates oversize values (matches gateway DTO cap) with a one-shot warn", () => {
+    const original = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    try {
+      const huge = "a".repeat(5000);
+      registerHooks(api, store, undefined, { userId: huge }, gatewayStopCapture);
+      fireOne();
+      const stored = readUserId();
+      assert.equal(stored?.length, 1000);
+      assert.ok(stored && /^a+$/.test(stored));
+      assert.equal(warnings.length, 1, `expected exactly one warning, got ${warnings.length}`);
+      assert.ok(warnings[0].includes("config.userId"), "warning should name the source");
+    } finally {
+      console.warn = original;
+    }
+  });
+});

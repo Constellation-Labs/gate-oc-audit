@@ -2,6 +2,7 @@ import { DatabaseSync, StatementSync } from "node:sqlite";
 import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { constants, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { uuidv7 } from "uuidv7";
 
 import { createRequire } from "module";
@@ -9,6 +10,10 @@ import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../
 import { initializeSchema, runInTransaction } from "./schema.js";
 import { getMachineId } from "../util/machine-id.js";
 import {log} from "../util/logger.js";
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -48,6 +53,8 @@ interface EventRow {
   description: string;
   metadata: string;
   content_gz?: Uint8Array | null;
+  content_hash: string;
+  previous_hash: string | null;
   created_at: string;
   received_at: string | null;
   synced_at: string | null;
@@ -109,6 +116,8 @@ function rowToEvent(row: EventRow, contentPreview?: number): AuditEvent {
     description: row.description,
     metadata: JSON.parse(row.metadata),
     content: decodeContent(row, contentPreview),
+    contentHash: row.content_hash,
+    previousHash: row.previous_hash ?? undefined,
     createdAt: row.created_at,
     receivedAt: row.received_at ?? undefined,
     syncedAt: row.synced_at ?? undefined,
@@ -186,8 +195,8 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    console.info(
-      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
+    process.stderr.write(
+      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}\n`,
     );
 
     // Insert path is unused in read-only mode but the prepared statement is
@@ -195,18 +204,27 @@ export class AuditStore {
     // without opening write capabilities.
     //
     // sequence is omitted from the column list so that the table's
-    // INTEGER PRIMARY KEY AUTOINCREMENT assigns the next value atomically;
-    // RETURNING reads it back, so no in-process counter is needed.
+    // INTEGER PRIMARY KEY AUTOINCREMENT assigns the next value atomically.
+    // previous_hash is computed inline as a scalar subquery against the
+    // committed table state, so concurrent writers serialize on the write
+    // lock and each insert chains to the row the prior writer just
+    // committed — no race window between a separate SELECT and INSERT.
+    // RETURNING reads back both the assigned sequence and the linked
+    // previous_hash so the caller sees exactly what was persisted.
     this.insertStmt = this.readOnly
       ? this.db.prepare("SELECT 1 WHERE 0")
       : this.db.prepare(`
       INSERT INTO audit_events
         (id, source, machine_id, session_id, org_id, user_id,
-         event_type, category, description, metadata, content_gz, created_at)
+         event_type, category, description, metadata, content_gz,
+         content_hash, previous_hash, created_at)
       VALUES
         (@id, @source, @machineId, @sessionId, @orgId, @userId,
-         @eventType, @category, @description, @metadata, @contentGz, @createdAt)
-      RETURNING sequence
+         @eventType, @category, @description, @metadata, @contentGz,
+         @contentHash,
+         (SELECT content_hash FROM audit_events ORDER BY sequence DESC LIMIT 1),
+         @createdAt)
+      RETURNING sequence, previous_hash
     `);
 
     const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
@@ -249,7 +267,7 @@ export class AuditStore {
       if (isNew) throw err; // Fresh DB failed — nothing to recover
       const message = err instanceof Error ? err.message : "Unknown error";
       log.error(`Database corrupt or unreadable: ${message}`);
-      log.warn("Preserving old DB and creating fresh database");
+      log.error("Preserving old DB and creating fresh database");
 
       // Preserve the old DB for forensic recovery
       const backupPath = `${resolvedPath}.corrupt.${Date.now()}`;
@@ -290,17 +308,48 @@ export class AuditStore {
       // returned the original, which made SMT proofs fail for truncated rows.
       //
       // Truncation marker shape: a single reserved key `$auditTruncation`
-      // namespaces the metadata-replacement payload so a real event whose
-      // plugin happens to pick a name like `metadataDropped` cannot be
-      // confused with the marker. Consumers detect truncation via
-      // `"$auditTruncation" in metadata`.
-      let effectiveMetadata: Record<string, unknown> = insert.metadata;
+      // holds a structured object describing what was truncated:
+      //   { metadata?: { reason, originalSize? }, content?: { reason, originalSize } }
+      // Both arms are optional and independent — content truncation is
+      // recorded inside the user's metadata, while metadata truncation
+      // replaces the whole metadata blob. A future "both truncated" event
+      // collapses to a marker-only metadata that still carries the content
+      // arm. Consumers detect truncation via `"$auditTruncation" in metadata`
+      // and read whichever arms are present.
+      // Empty-string content collapses to "no content" (same as `undefined`)
+      // so callers that explicitly clear content and callers that omit it
+      // produce observationally identical events. Both hash to sha256("").
+      const hasContent = !!insert.content;
+      const contentOversize = hasContent && insert.content!.length > MAX_CONTENT_SIZE;
+      const rawContent = hasContent && !contentOversize ? insert.content : undefined;
+      if (contentOversize) {
+        log.warn(
+          `[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event with truncation marker`,
+        );
+      }
+      const contentTruncationArm: Record<string, unknown> | undefined = contentOversize
+        ? { reason: "size-cap", originalSize: insert.content!.length }
+        : undefined;
+
+      // Fold the content-truncation arm (if any) into the user's metadata
+      // before canonicalization, so a normal-sized metadata blob carries
+      // evidence of the dropped content. If user metadata is itself
+      // unserializable or oversize, both fallback branches below preserve
+      // the content arm in the replacement marker.
+      let effectiveMetadata: Record<string, unknown> = contentTruncationArm
+        ? { ...insert.metadata, $auditTruncation: { content: contentTruncationArm } }
+        : insert.metadata;
       let metadataCanonical: string;
       try {
-        metadataCanonical = sdk.canonicalize(insert.metadata);
+        metadataCanonical = sdk.canonicalize(effectiveMetadata);
       } catch {
-        log.warn("Metadata is not serializable, recording marker");
-        effectiveMetadata = { $auditTruncation: { reason: "non-serializable" } };
+        log.warn("[audit-plugin] Metadata is not serializable, recording marker");
+        effectiveMetadata = {
+          $auditTruncation: {
+            metadata: { reason: "non-serializable" },
+            ...(contentTruncationArm ? { content: contentTruncationArm } : {}),
+          },
+        };
         metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
 
@@ -311,7 +360,10 @@ export class AuditStore {
           `Metadata exceeds ${MAX_METADATA_SIZE} bytes, recording event with truncated metadata`,
         );
         effectiveMetadata = {
-          $auditTruncation: { reason: "size-cap", originalSize: metadataCanonical.length },
+          $auditTruncation: {
+            metadata: { reason: "size-cap", originalSize: metadataCanonical.length },
+            ...(contentTruncationArm ? { content: contentTruncationArm } : {}),
+          },
         };
         metadataCanonical = sdk.canonicalize(effectiveMetadata);
       }
@@ -328,13 +380,15 @@ export class AuditStore {
 
       const createdAt = new Date().toISOString();
 
-      const rawContent = insert.content && insert.content.length <= MAX_CONTENT_SIZE
-        ? insert.content
-        : undefined;
-      if (insert.content && !rawContent) {
-        log.warn(`Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event without content`);
-      }
       const contentGz = rawContent ? gzipSync(Buffer.from(rawContent), { level: 1 }) : null;
+
+      // Chain integrity (Product Spec §11.3): contentHash hashes the stored
+      // content; previousHash is the prior event's contentHash, looked up
+      // by a scalar subquery inside the INSERT so that the read of the
+      // predecessor and the write of the new row are atomic with respect
+      // to other writers. RETURNING gives us back the value SQLite linked
+      // to so we can populate the in-memory AuditEvent without a re-read.
+      const contentHash = sha256(rawContent ?? "");
 
       const returned = this.insertStmt.get({
         id,
@@ -348,13 +402,15 @@ export class AuditStore {
         description: insert.description,
         metadata: metadataCanonical,
         contentGz,
+        contentHash,
         createdAt,
-      }) as { sequence: number } | undefined;
+      }) as { sequence: number; previous_hash: string | null } | undefined;
 
       if (!returned) {
         throw new Error("INSERT ... RETURNING produced no row");
       }
       const sequence = returned.sequence;
+      const previousHash = returned.previous_hash ?? undefined;
 
       this.degraded = false;
 
@@ -371,12 +427,14 @@ export class AuditStore {
         description: insert.description,
         metadata: effectiveMetadata,
         content: rawContent,
+        contentHash,
+        previousHash,
         createdAt,
       };
     } catch (err) {
       this.degraded = true;
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(
+      log.error(
         `[audit-plugin][store=${this.instanceId}] Failed to append event (${insert.eventType}): ${message}`,
       );
       return undefined;
@@ -415,6 +473,7 @@ export class AuditStore {
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
                 event_type, category, description, metadata${contentCol},
+                content_hash, previous_hash,
                 created_at, received_at, synced_at
          FROM audit_events ${where} ORDER BY sequence ${order} LIMIT @limit OFFSET @offset`,
       )

@@ -112,9 +112,12 @@ describe("AuditStore", () => {
         "returned and persisted metadata must be identical (regression guard)");
       const marker = persistedMd.$auditTruncation as Record<string, unknown>;
       assert.ok(marker, "marker must live under reserved $auditTruncation key");
-      assert.equal(marker.reason, "size-cap");
-      assert.ok(typeof marker.originalSize === "number"
-        && marker.originalSize > 1024 * 1024);
+      const metadataArm = marker.metadata as Record<string, unknown>;
+      assert.ok(metadataArm, "marker.metadata arm must be present");
+      assert.equal(metadataArm.reason, "size-cap");
+      assert.ok(typeof metadataArm.originalSize === "number"
+        && metadataArm.originalSize > 1024 * 1024);
+      assert.equal(marker.content, undefined, "content arm must be absent when content was not provided");
       assert.equal("big" in persistedMd, false, "oversized field must not survive truncation");
     });
 
@@ -132,7 +135,57 @@ describe("AuditStore", () => {
         "returned and persisted metadata must be identical (regression guard)");
       const marker = persistedMd.$auditTruncation as Record<string, unknown>;
       assert.ok(marker, "marker must live under reserved $auditTruncation key");
-      assert.equal(marker.reason, "non-serializable");
+      const metadataArm = marker.metadata as Record<string, unknown>;
+      assert.ok(metadataArm, "marker.metadata arm must be present");
+      assert.equal(metadataArm.reason, "non-serializable");
+    });
+
+    it("records oversized content with a marker rather than silently hashing sha256('')", () => {
+      const bigContent = "x".repeat(5 * 1024 * 1024 + 1);
+      const result = store.append(sampleInsert({ content: bigContent }))!;
+
+      assert.ok(result, "expected event to be recorded with truncation marker");
+      assert.equal(store.isDegraded(), false);
+      // contentHash is sha256("") because the bytes were dropped — but the
+      // metadata marker records that there *was* content, distinguishing
+      // this row from a normal no-content event.
+      assert.equal(result.contentHash,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "oversized content hashes the empty string (bytes were dropped)");
+
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const persistedMd = persisted.metadata as Record<string, unknown>;
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker, "marker must live under reserved $auditTruncation key");
+      const contentArm = marker.content as Record<string, unknown>;
+      assert.ok(contentArm, "marker.content arm must be present when content was dropped");
+      assert.equal(contentArm.reason, "size-cap");
+      assert.equal(contentArm.originalSize, bigContent.length,
+        "originalSize must record the dropped content's true length");
+      assert.equal(marker.metadata, undefined,
+        "metadata arm must be absent when only content was truncated");
+      // User's other metadata fields must survive when only content is truncated.
+      assert.equal(persistedMd.test, true, "user metadata must survive content-only truncation");
+    });
+
+    it("records both metadata and content truncation in one marker", () => {
+      const bigValue = "x".repeat(1024 * 1024 + 1);
+      const bigContent = "y".repeat(5 * 1024 * 1024 + 1);
+      const result = store.append(sampleInsert({
+        metadata: { big: bigValue },
+        content: bigContent,
+      }))!;
+
+      assert.ok(result);
+      const persisted = store.query({ limit: 1, includeContent: false })[0];
+      const persistedMd = persisted.metadata as Record<string, unknown>;
+      const marker = persistedMd.$auditTruncation as Record<string, unknown>;
+      assert.ok(marker);
+      const metadataArm = marker.metadata as Record<string, unknown>;
+      const contentArm = marker.content as Record<string, unknown>;
+      assert.equal(metadataArm.reason, "size-cap");
+      assert.equal(contentArm.reason, "size-cap");
+      assert.equal(contentArm.originalSize, bigContent.length);
     });
   });
 
@@ -151,6 +204,58 @@ describe("AuditStore", () => {
       store = new AuditStore(dbPath);
     });
 
+  });
+
+  describe("chain hashes (spec §11.3)", () => {
+    // contentHash = sha256("") for events with no content. Cached here so each
+    // assertion reads as "what the spec says", not as a magic constant.
+    const SHA256_EMPTY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    it("computes contentHash = sha256(content ?? '') and omits previousHash on genesis", () => {
+      const e1 = store.append(sampleInsert({ content: "hello" }))!;
+      assert.equal(e1.sequence, 1);
+      assert.equal(e1.previousHash, undefined,
+        "sequence 1 has no predecessor — previousHash must be omitted");
+      // sha256("hello")
+      assert.equal(e1.contentHash, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+
+      const e2 = store.append(sampleInsert({ description: "no content" }))!;
+      assert.equal(e2.contentHash, SHA256_EMPTY,
+        "missing content hashes as sha256 of the empty string");
+    });
+
+    it("chains previousHash to the prior event's contentHash", () => {
+      const e1 = store.append(sampleInsert({ content: "first" }))!;
+      const e2 = store.append(sampleInsert({ content: "second" }))!;
+      const e3 = store.append(sampleInsert({ content: "third" }))!;
+      assert.equal(e2.previousHash, e1.contentHash);
+      assert.equal(e3.previousHash, e2.contentHash);
+    });
+
+    it("chain survives restart — predecessor lookup reads from the persisted row", () => {
+      const e1 = store.append(sampleInsert({ content: "before restart" }))!;
+      store.close();
+
+      const store2 = new AuditStore(dbPath);
+      const e2 = store2.append(sampleInsert({ content: "after restart" }))!;
+      assert.equal(e2.sequence, 2);
+      assert.equal(e2.previousHash, e1.contentHash,
+        "restart must not break the chain — previous_hash lookup must read from SQLite, not in-memory state");
+      store2.close();
+
+      dbPath = makeTempDb();
+      store = new AuditStore(dbPath);
+    });
+
+    it("query() returns events with contentHash and previousHash populated", () => {
+      store.append(sampleInsert({ content: "first" }));
+      store.append(sampleInsert({ content: "second" }));
+      const events = store.query({ order: "asc" });
+      assert.equal(events.length, 2);
+      assert.ok(events[0].contentHash);
+      assert.equal(events[0].previousHash, undefined);
+      assert.equal(events[1].previousHash, events[0].contentHash);
+    });
   });
 
   describe("degraded mode", () => {
@@ -256,6 +361,39 @@ describe("AuditStore", () => {
       storeA.close();
       storeB.close();
     });
+
+    // The predecessor lookup is a subquery inside the INSERT, so concurrent
+    // writers serialize on the write lock and each row's previous_hash must
+    // equal the immediately preceding row's content_hash. Without the
+    // subquery (separate SELECT MAX → INSERT), two writers could read the
+    // same predecessor and produce a chain fork.
+    it("interleaved appends preserve previous_hash chain integrity", () => {
+      const storeA = new AuditStore(dbPath);
+      const storeB = new AuditStore(dbPath);
+
+      const N = 25;
+      for (let i = 0; i < N; i++) {
+        // Distinct content per row so contentHash varies — otherwise a
+        // broken chain would still match against the identical hashes of
+        // neighbouring rows and the test would pass trivially.
+        assert.ok(storeA.append(sampleInsert({ content: `A-${i}` })));
+        assert.ok(storeB.append(sampleInsert({ content: `B-${i}` })));
+      }
+
+      const events = storeA.query({ limit: 2 * N, order: "asc" });
+      assert.equal(events.length, 2 * N);
+      assert.equal(events[0].previousHash, undefined, "genesis row must have no previousHash");
+      for (let i = 1; i < events.length; i++) {
+        assert.equal(
+          events[i].previousHash,
+          events[i - 1].contentHash,
+          `chain link broken at sequence ${events[i].sequence}`,
+        );
+      }
+
+      storeA.close();
+      storeB.close();
+    });
   });
 
   describe("handlers with minimal context", () => {
@@ -284,6 +422,25 @@ describe("AuditStore", () => {
     it("append returns undefined content when not provided", () => {
       const event = store.append(sampleInsert())!;
       assert.equal(event.content, undefined);
+    });
+
+    // Empty-string content collapses to "no content" so `{content: ""}` and
+    // `{}` produce observationally identical events. Both hash to sha256("")
+    // and round-trip with `content: undefined`. Pins this behavior so a
+    // future refactor doesn't silently introduce a "present but empty"
+    // surface that downstream consumers would have to disambiguate.
+    it("treats empty-string content as no content (same as omitted)", () => {
+      const event = store.append(sampleInsert({ content: "" }))!;
+      assert.equal(event.content, undefined,
+        "empty-string content must round-trip as undefined on the returned event");
+      assert.equal(event.contentHash,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "empty-string content must hash to sha256('')");
+
+      const persisted = store.query({ limit: 1, includeContent: true })[0];
+      assert.equal(persisted.content, undefined,
+        "persisted row must also report content as undefined, not as ''");
+      assert.equal(persisted.contentHash, event.contentHash);
     });
 
     it("drops content exceeding MAX_CONTENT_SIZE and logs warning", () => {

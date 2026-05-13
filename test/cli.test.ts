@@ -254,6 +254,7 @@ function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
     category: "system",
     description: "test",
     metadata: { test: true },
+    contentHash: "",
     createdAt: new Date().toISOString(),
     ...overrides,
   };
