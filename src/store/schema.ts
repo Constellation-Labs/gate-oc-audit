@@ -8,6 +8,11 @@ const PRAGMAS = [
   "PRAGMA synchronous = NORMAL",
   "PRAGMA foreign_keys = ON",
   "PRAGMA auto_vacuum = INCREMENTAL",
+  // Wait up to 5s for the write lock before returning SQLITE_BUSY. Multi-
+  // process writers (gateway + CLI, multiple gateway instances) would
+  // otherwise drop events on transient contention; this absorbs normal
+  // contention and WAL checkpoint pauses without JS-level retry logic.
+  "PRAGMA busy_timeout = 5000",
 ];
 
 const DDL = [
