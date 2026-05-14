@@ -144,6 +144,27 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
         });
         if (result) smt.onEventAppended(result);
       },
+      computeHashes: (event) => ({
+        rawHash: smt.computeRawHash(event),
+        censoredHash: smt.computeCensoredHash(event),
+      }),
+      latestAnchoredCheckpoint: (maxSequence) => {
+        let best: ReturnType<typeof store.getCheckpoints>[number] | undefined;
+        for (const cp of store.getCheckpoints()) {
+          if (cp.deTxHash === null) continue;
+          if (cp.sequenceStart > maxSequence) continue;
+          if (!best || cp.sequenceEnd > best.sequenceEnd) best = cp;
+        }
+        return best
+          ? {
+              smtRoot: best.smtRoot,
+              sequenceStart: best.sequenceStart,
+              sequenceEnd: best.sequenceEnd,
+              deTxHash: best.deTxHash as string,
+              createdAt: best.createdAt,
+            }
+          : null;
+      },
     });
     limiter.setGatewayPublisher(gatewayPublisher);
     await gatewayPublisher.start();

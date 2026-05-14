@@ -128,9 +128,33 @@ export function validateGatewayApiKey(key: string): ValidationResult {
 }
 
 /**
- * Optional dependencies for the active publisher. Wired by the plugin entry
- * point so the publisher can record buffer-full drops as local audit events
- * without owning a reference to the store/SMT.
+ * SMT-anchored checkpoint payload mirrored from the plugin's local
+ * `audit_checkpoint` rows. Sent as the optional `smtCheckpoint` envelope
+ * field — gateway upserts it into `plugin_audit_checkpoints` and links
+ * every covered event row.
+ */
+export interface SmtCheckpointPayload {
+  smtRoot: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  deTxHash: string;
+  createdAt: string;
+}
+
+/** Stateless function producing the SMT-leaf hashes the gateway expects per event. */
+export type ComputeHashesFn = (event: AuditEvent) => { rawHash: string; censoredHash: string };
+
+/**
+ * Returns the most recent DE-anchored checkpoint whose range covers the
+ * batch's highest sequence, or null when no anchor covers it yet.
+ */
+export type LatestAnchoredCheckpointFn = (maxSequence: number) => SmtCheckpointPayload | null;
+
+/**
+ * Dependencies for the active publisher. Wired by the plugin entry point
+ * so the publisher can compute SMT hashes, look up anchor state, and
+ * record buffer-full drops without owning a direct reference to the
+ * store/SMT.
  */
 export interface GatewayPublisherDeps {
   /**
@@ -140,6 +164,20 @@ export interface GatewayPublisherDeps {
    * detect the gap. Must NOT call back into the publisher (recursion risk).
    */
   onDropMilestone?(cumulativeDropped: number): void;
+  /**
+   * Required: stateless per-event hash producer. Production wires this to
+   * `SmtService.computeRawHash` / `computeCensoredHash`. When omitted the
+   * factory returns a NoOp publisher — the gateway's DTO requires both
+   * hashes on every event so we'd be sending guaranteed-400 payloads.
+   */
+  computeHashes?: ComputeHashesFn;
+  /**
+   * Optional: attaches a DE-anchored `smtCheckpoint` to each batch when
+   * available. Anchor-pending batches simply omit the field; the gateway
+   * persists those rows with `last_checkpoint_id = NULL` and will backfill
+   * them when the matching checkpoint arrives on a later batch.
+   */
+  latestAnchoredCheckpoint?: LatestAnchoredCheckpointFn;
 }
 
 interface ActiveConfig {
@@ -151,6 +189,8 @@ interface ActiveConfig {
   bufferCapacity: number;
   shutdownDeadlineMs: number;
   maxPayloadBytes: number;
+  computeHashes: ComputeHashesFn;
+  latestAnchoredCheckpoint?: LatestAnchoredCheckpointFn;
 }
 
 class ActiveGatewayPublisher implements GatewayPublisher {
@@ -347,18 +387,55 @@ class ActiveGatewayPublisher implements GatewayPublisher {
   }
 
   /**
-   * Build the JSON payload for one POST. Returns `undefined` when the
-   * serialized batch exceeds `maxPayloadBytes`. Events carry their own
-   * `contentHash` (sha256 of content) and `previousHash` (chain) so the
-   * gateway never has to recompute either.
+   * Build the JSON payload for one POST per the SMT-envelope contract
+   * (`docs/swarm-deck-publisher-redesign.md`). Each event is projected to
+   * the gateway's DTO shape — `orgId` and `syncedAt` are dropped (gateway
+   * `forbidNonWhitelisted` rejects unknown fields), and the local-only
+   * `contentHash`/`previousHash` chain is replaced with the SMT-leaf
+   * `rawHash` + `censoredHash` the gateway recomputes server-side. When
+   * a DE-anchored checkpoint covers the batch's highest sequence, it's
+   * attached as the optional `smtCheckpoint` envelope field.
+   *
+   * Returns `undefined` when the serialized batch exceeds `maxPayloadBytes`.
    */
   private buildPayload(batch: AuditEvent[]): string | undefined {
-    // Spec §11.3 wraps the batch with a top-level machineId. Every event
-    // already carries machineId (set by the local store from the host's
-    // getMachineId()), so pulling it off the first event is safe — a given
-    // AuditStore instance has exactly one machineId.
-    const machineId = batch[0]?.machineId ?? "";
-    const body = JSON.stringify({ machineId, events: batch });
+    if (batch.length === 0) return undefined;
+    // A given AuditStore instance has exactly one machineId, so pulling
+    // off the first event is safe. The plugin's local rate-limiter never
+    // intermingles events from multiple machines into one buffer.
+    const machineId = batch[0].machineId;
+    const events = batch.map((event) => {
+      const { rawHash, censoredHash } = this.cfg.computeHashes(event);
+      return {
+        id: event.id,
+        sequence: event.sequence,
+        source: event.source,
+        machineId: event.machineId,
+        sessionId: event.sessionId,
+        userId: event.userId,
+        eventType: event.eventType,
+        category: event.category,
+        description: event.description,
+        metadata: event.metadata,
+        content: event.content,
+        rawHash,
+        censoredHash,
+        createdAt: event.createdAt,
+        receivedAt: event.receivedAt,
+      };
+    });
+
+    let smtCheckpoint: SmtCheckpointPayload | undefined;
+    const lookup = this.cfg.latestAnchoredCheckpoint;
+    if (lookup) {
+      const maxSeq = batch[batch.length - 1].sequence;
+      smtCheckpoint = lookup(maxSeq) ?? undefined;
+    }
+
+    const envelope = smtCheckpoint
+      ? { machineId, events, smtCheckpoint }
+      : { machineId, events };
+    const body = JSON.stringify(envelope);
     if (Buffer.byteLength(body, "utf8") > this.cfg.maxPayloadBytes) return undefined;
     return body;
   }
@@ -406,7 +483,20 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       return { kind: "payloadTooLarge" };
     }
 
-    return { kind: "error", message: `Gateway returned ${response.status} ${response.statusText}` };
+    // Surface the response body in the error so contract drift (400 from a
+    // schema mismatch, 401 from a bad key, etc.) self-explains without a
+    // round-trip through gateway logs. Bounded to keep log lines sane.
+    const errBody = await this.readResponseBodySafe(response);
+    const suffix = errBody ? `: ${errBody.slice(0, 500)}` : "";
+    return { kind: "error", message: `Gateway returned ${response.status} ${response.statusText}${suffix}` };
+  }
+
+  private async readResponseBodySafe(response: Response): Promise<string> {
+    try {
+      return await response.text();
+    } catch {
+      return "";
+    }
   }
 
   private async safeParseJson(response: Response): Promise<Record<string, unknown> | undefined> {
@@ -492,6 +582,12 @@ export function createGatewayPublisher(
     return new NoOpGatewayPublisher(`gatewayApiKey rejected (${keyValidation.reason})`);
   }
 
+  if (typeof deps.computeHashes !== "function") {
+    return new NoOpGatewayPublisher(
+      "computeHashes dep missing — gateway requires rawHash/censoredHash on every event",
+    );
+  }
+
   // Surface http:// (cleartext) misconfiguration loudly even when allowed (loopback dev).
   if (url.toLowerCase().startsWith("http://")) {
     gatewayPublisherLog.warn(
@@ -526,6 +622,8 @@ export function createGatewayPublisher(
     bufferCapacity,
     shutdownDeadlineMs,
     maxPayloadBytes,
+    computeHashes: deps.computeHashes,
+    latestAnchoredCheckpoint: deps.latestAnchoredCheckpoint,
   }, deps);
 }
 
