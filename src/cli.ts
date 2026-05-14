@@ -2,6 +2,7 @@ import type { AuditStore, QueryOptions } from "./store/audit-store.js";
 import type { AuditEvent } from "./types/events.js";
 import type { NotificationService } from "./services/notifications.js";
 import type { SmtService } from "./services/smt-service.js";
+import { resolveAuditUiUrl } from "./util/gateway-url.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -208,6 +209,10 @@ export function cliExportHandler(store: AuditStore, format?: string, opts: Audit
   } else {
     outLine(toJsonLines(events));
   }
+}
+
+export function cliAuditUiHandler(): void {
+  outLine(resolveAuditUiUrl());
 }
 
 export async function cliSmtHandler(

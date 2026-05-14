@@ -21,6 +21,10 @@ const DE_ENV_URLS = {
     integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net/v1",
     mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net/v1",
 } as const;
+const DE_EXPLORER_URLS = {
+    integration: "https://staging.digitalevidence.constellationnetwork.net",
+    mainnet: "https://digitalevidence.constellationnetwork.io",
+} as const;
 export type DeEnv = "test" | keyof typeof DE_ENV_URLS;
 const DEFAULT_DE_ENV: DeEnv = "mainnet";
 const DE_TEST_URL_ENV_VAR = "DE_TEST_URL";
@@ -67,6 +71,16 @@ export function resolveBaseUrl(env: DeEnv): string {
         return url;
     }
     return DE_ENV_URLS[env];
+}
+
+/**
+ * Public-facing Digital Evidence explorer base URL for a given environment.
+ * Returns undefined for `test` mode (no public explorer exists for local
+ * loopback DE servers).
+ */
+export function resolveExplorerBaseUrl(env: DeEnv): string | undefined {
+    if (env === "test") return undefined;
+    return DE_EXPLORER_URLS[env];
 }
 
 type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;

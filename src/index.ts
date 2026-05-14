@@ -2,19 +2,22 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAuditHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
+import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
 import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
-import {createDeAnchorService} from "./services/de-anchor.js";
+import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
 import {createGatewayPublisher, drainForShutdown} from "./services/gateway-publisher.js";
 import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
+import {Verifier} from "./services/verifier.js";
 import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
 import {GatewayStopCapture} from "./gateway-stop-capture.js";
+import {registerAuditUiRoutes} from "./ui/routes.js";
+import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
 
 /**
@@ -95,6 +98,11 @@ export default (() => {
                     .command("verify")
                     .description("Verify SMT integrity and DE checkpoints")
                     .action(() => cliVerifyHandler(getSmtService(), getStore(), getNotifier()));
+
+                audit
+                    .command("ui")
+                    .description("Print the audit UI URL")
+                    .action(() => cliAuditUiHandler());
 
                 audit
                     .command("export [format]")
@@ -510,6 +518,31 @@ export default (() => {
                 },
                 stop() {
                     fileWatcher.stop();
+                },
+            });
+
+            const verifier = new Verifier(activeStore, activeSmt);
+            const deExplorerBaseUrl = (() => {
+                const env = typeof config.deEnv === "string"
+                  && (config.deEnv === "test" || config.deEnv === "integration" || config.deEnv === "mainnet")
+                    ? config.deEnv
+                    : "mainnet";
+                return resolveExplorerBaseUrl(env);
+            })();
+            registerAuditUiRoutes(api, activeStore, activeSmt, verifier, deExplorerBaseUrl);
+
+            api.registerService({
+                id: "constellation-audit-plugin:ui-server",
+                start() {
+                    const info = resolveGatewayBaseUrl();
+                    log.info(`Audit UI: ${resolveAuditUiUrl()}`);
+                    if (info.nonLoopback) {
+                        log.warn(
+                            `Gateway is bound to "${info.bindMode}" — the audit UI is exposed beyond loopback ` +
+                            `and currently has no auth check. Bind the gateway to loopback or add auth before ` +
+                            `running on a shared network.`,
+                        );
+                    }
                 },
             });
         },
