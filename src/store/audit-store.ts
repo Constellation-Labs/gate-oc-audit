@@ -487,6 +487,20 @@ export class AuditStore {
     return (this.db.prepare("SELECT COUNT(*) as c FROM audit_events").get() as { c: number }).c;
   }
 
+  getById(id: string, opts: { includeContent?: boolean } = {}): AuditEvent | undefined {
+    const wantContent = opts.includeContent === true;
+    const contentCol = wantContent ? ", content_gz" : "";
+    const row = this.db
+      .prepare(
+        `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
+                event_type, category, description, metadata${contentCol},
+                created_at, received_at, synced_at
+         FROM audit_events WHERE id = @id`,
+      )
+      .get({ id }) as unknown as EventRow | undefined;
+    return row ? rowToEvent(row) : undefined;
+  }
+
   prune(maxAgeDays: number, maxSizeMb: number): number {
     let totalDeleted = 0;
 

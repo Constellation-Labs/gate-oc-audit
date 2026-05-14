@@ -185,6 +185,11 @@ export class SmtService {
       : this.config.treeKey;
   }
 
+  /** Stable machine identifier this service uses when an event has no sessionId. */
+  getMachineId(): string {
+    return this.machineId;
+  }
+
   private estimateStorageBytes(): number {
     return this.manager.totalNodeCount() * BYTES_PER_NODE;
   }
@@ -346,6 +351,22 @@ export class SmtService {
 
   listTrees(): TreeInfo[] {
     return this.manager.listTrees().filter((t) => t.key !== "__verifier__");
+  }
+
+  /**
+   * Returns the treeKey of the first tree whose store contains the given leaf
+   * hash, or null when no tree contains it. Used by the UI to flag tampered
+   * events at a glance — if the current event content does not hash to a
+   * known SMT leaf, the row was modified after insertion.
+   */
+  findContainingTreeKey(hash: string): string | null {
+    for (const tree of this.listTrees()) {
+      const store = this.manager.get(tree.key);
+      if (store && store.get(hash) !== undefined) {
+        return tree.key;
+      }
+    }
+    return null;
   }
 
   getKnownRoots(checkpointedRoots?: Iterable<string>): Set<string> {

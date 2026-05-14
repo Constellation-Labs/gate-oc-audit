@@ -1,6 +1,6 @@
 {
   "name": "@constellation-network/openclaw-audit-plugin",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Tamper-evident audit trail for AI coding agent activity",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,9 @@
     "openclaw.plugin.json"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && vite build",
+    "build:server": "tsc",
+    "build:ui": "vite build",
     "clean": "rm -rf dist",
     "test": "node --import tsx --test test/*.test.ts test/**/*.test.ts",
     "test:e2e": "node --import tsx --test test/e2e.test.ts"
@@ -30,9 +32,11 @@
     "@types/node": "^24.0.0",
     "@types/picomatch": "^4.0.3",
     "ethers": "^6.0.0",
+    "lit": "^3.2.0",
     "openclaw": "^2026.4.24",
     "tsx": "^4.21.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vite": "^5.4.0"
   },
   "peerDependencies": {
     "ethers": "^6.0.0",
