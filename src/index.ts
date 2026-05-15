@@ -7,7 +7,7 @@ import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
-import {createGatewayPublisher, drainForShutdown} from "./services/gateway-publisher.js";
+import {createGatewayPublisher, drainForShutdown, selectAnchorCovering} from "./services/gateway-publisher.js";
 import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
@@ -440,27 +440,8 @@ export default (() => {
                     rawHash: activeSmt.computeRawHash(event),
                     censoredHash: activeSmt.computeCensoredHash(event),
                 }),
-                latestAnchoredCheckpoint: (maxSequence) => {
-                    // Pick the most recent DE-anchored checkpoint whose range
-                    // covers any event ≤ maxSequence. Scans top-down by
-                    // sequenceEnd descending; first match wins. Most workloads
-                    // have a handful of checkpoints so the linear scan is fine
-                    // — if it ever isn't we can add an index/cached pointer.
-                    let best: ReturnType<typeof activeStore.getCheckpoints>[number] | undefined;
-                    for (const cp of activeStore.getCheckpoints()) {
-                        if (cp.deTxHash === null) continue;
-                        if (cp.sequenceStart > maxSequence) continue;
-                        if (!best || cp.sequenceEnd > best.sequenceEnd) best = cp;
-                    }
-                    if (!best) return null;
-                    return {
-                        smtRoot: best.smtRoot,
-                        sequenceStart: best.sequenceStart,
-                        sequenceEnd: best.sequenceEnd,
-                        deTxHash: best.deTxHash as string,
-                        createdAt: best.createdAt,
-                    };
-                },
+                latestAnchoredCheckpoint: (maxSequence) =>
+                    selectAnchorCovering(activeStore.getCheckpoints(), maxSequence),
             });
             limiter.setGatewayPublisher(gatewayPublisher);
 

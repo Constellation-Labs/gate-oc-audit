@@ -8,12 +8,22 @@ import {
   type GatewayPublisherDeps,
   type SmtCheckpointPayload,
 } from "../../src/services/gateway-publisher.js";
+import { gatewayPublisherLog } from "../../src/util/logger.js";
+import { captureLogger } from "../test-utils/capture-logger.js";
 import type { AuditEvent } from "../../src/types/events.js";
 
-interface WireEvent extends Omit<AuditEvent, "contentHash" | "previousHash" | "orgId" | "syncedAt"> {
+// Wire events are not structurally tied to AuditEvent — the envelope-shape
+// test (below) is the authority on which fields cross the boundary. The
+// known fields are listed for ergonomic test access; everything else falls
+// through `[k: string]: unknown` so a typo'd field reference still type-checks.
+type WireEvent = {
+  id: string;
+  sequence: number;
+  content?: string;
   rawHash: string;
   censoredHash: string;
-}
+  [k: string]: unknown;
+};
 interface ReceivedRequest {
   url: string;
   method: string;
@@ -795,6 +805,55 @@ describe("GatewayPublisher", () => {
 
   it("includes the response body in the error message on 4xx so contract drift self-explains", async () => {
     respond = () => ({ status: 400, body: '{"error":"rawHash mismatch for event evt-1"}' });
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      assert.ok(pub.bufferedCount() >= 1, "failed batch should be requeued");
+      const errLine = captured.messages.find((m) => m.includes("Publish failed"));
+      assert.ok(errLine, `expected a Publish failed log line; saw: ${captured.messages.join(" | ")}`);
+      assert.ok(
+        errLine.includes("rawHash mismatch for event evt-1"),
+        `expected gateway response body in error message; got: ${errLine}`,
+      );
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("sanitizes CR/LF in 4xx response body so a hostile gateway can't forge log lines", async () => {
+    respond = () => ({
+      status: 400,
+      body: "evil\r\n[audit-plugin] CRITICAL fake forged line\r\nrest",
+    });
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      const errLine = captured.messages.find((m) => m.includes("Publish failed"));
+      assert.ok(errLine, "expected a Publish failed log line");
+      assert.equal(errLine.includes("\r"), false, "carriage return must be stripped");
+      assert.equal(errLine.includes("\n"), false, "newline must be stripped");
+      assert.ok(errLine.includes("fake forged line"), "sanitized body is still present (just with spaces)");
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("does not increment circuit breaker on 429 — rate-limit is not a transport failure", async () => {
+    respond = () => ({ status: 429, body: '{"error":"RATE_LIMITED","retryAfterMs":50}' });
     const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
@@ -802,12 +861,91 @@ describe("GatewayPublisher", () => {
       gatewayIntervalMs: 60_000,
     });
     pub.notifyAppend(makeEvent(1));
-    // Drive a synchronous flush so the error logging happens before we check.
+    // Drive enough flush attempts to trip the breaker if 429 counted as a failure.
+    for (let i = 0; i < 6; i++) {
+      await pub.flushNow();
+      // Wait out the (50ms) rate-limit window between attempts.
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    assert.equal(pub.isCircuitOpen(), false, "429 must not trip the circuit breaker");
+  });
+
+  it("requeues the batch when computeHashes throws — events are not silently lost", async () => {
+    const pub = createPublisherInternal({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    }, {
+      computeHashes: () => { throw new Error("simulated SDK crash"); },
+    });
+    pub.notifyAppend(makeEvent(1));
     await pub.flushNow();
-    // Error path: event is requeued; we can re-flush to confirm circuit
-    // recordFailure ticked. The body-in-error assertion lives in the
-    // implementation — surface here is that requeue + breaker-state behavior
-    // is unchanged.
-    assert.ok(pub.bufferedCount() >= 1, "failed batch should be requeued");
+    assert.equal(pub.bufferedCount(), 1, "thrown computeHashes must not drop the event");
+  });
+
+  it("refuses to send a batch whose machineIds disagree (and drops it without requeue)", async () => {
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 2,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1, { machineId: "machine-A" }));
+      pub.notifyAppend(makeEvent(2, { machineId: "machine-B" }));
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(received.length, 0, "mixed-machineId batch must not POST");
+      assert.equal(pub.bufferedCount(), 0, "permanent invariant violation: drop, do not requeue");
+      const errLine = captured.messages.find((m) => m.includes("mixes machineIds"));
+      assert.ok(errLine, `expected a mixes-machineIds log line; saw: ${captured.messages.join(" | ")}`);
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("omits smtCheckpoint when the latest anchor's sequenceEnd does not cover the batch tail", async () => {
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 2,
+      gatewayIntervalMs: 60_000,
+    }, {
+      latestAnchoredCheckpoint: (_maxSeq) => null,
+    });
+    pub.notifyAppend(makeEvent(10));
+    pub.notifyAppend(makeEvent(11));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal("smtCheckpoint" in received[0].body, false,
+      "anchor that doesn't fully cover the tail must be omitted, not silently misattributed");
+  });
+
+  it("requeues only the failing half on partial split failure (gateway dedupe not relied on)", async () => {
+    let callCount = 0;
+    const seenBatchSizes: number[] = [];
+    respond = (_req, raw) => {
+      callCount++;
+      const parsed = JSON.parse(raw) as { events: AuditEvent[] };
+      seenBatchSizes.push(parsed.events.length);
+      // First POST (4) → 413; first half (2) → 200; second half (2) → 500.
+      if (callCount === 1) return { status: 413, body: '{"error":"PAYLOAD_TOO_LARGE"}' };
+      if (callCount === 2) return { status: 200, body: '{"accepted":2}' };
+      return { status: 500, body: "transient" };
+    };
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 4,
+      gatewayIntervalMs: 60_000,
+    });
+    for (let i = 1; i <= 4; i++) pub.notifyAppend(makeEvent(i));
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.deepEqual(seenBatchSizes, [4, 2, 2]);
+    // The accepted first half (sequences 1-2) must NOT be requeued. Only the
+    // failing second half (sequences 3-4) returns to the buffer.
+    assert.equal(pub.bufferedCount(), 2, "only the failing second half should be requeued");
   });
 });

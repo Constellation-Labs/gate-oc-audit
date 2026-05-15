@@ -30,6 +30,7 @@ import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
 import {
   createGatewayPublisher,
   drainForShutdown,
+  selectAnchorCovering,
   type GatewayPublisher,
 } from "../src/services/gateway-publisher.js";
 import type { AuditEvent } from "../src/types/events.js";
@@ -148,23 +149,8 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
         rawHash: smt.computeRawHash(event),
         censoredHash: smt.computeCensoredHash(event),
       }),
-      latestAnchoredCheckpoint: (maxSequence) => {
-        let best: ReturnType<typeof store.getCheckpoints>[number] | undefined;
-        for (const cp of store.getCheckpoints()) {
-          if (cp.deTxHash === null) continue;
-          if (cp.sequenceStart > maxSequence) continue;
-          if (!best || cp.sequenceEnd > best.sequenceEnd) best = cp;
-        }
-        return best
-          ? {
-              smtRoot: best.smtRoot,
-              sequenceStart: best.sequenceStart,
-              sequenceEnd: best.sequenceEnd,
-              deTxHash: best.deTxHash as string,
-              createdAt: best.createdAt,
-            }
-          : null;
-      },
+      latestAnchoredCheckpoint: (maxSequence) =>
+        selectAnchorCovering(store.getCheckpoints(), maxSequence),
     });
     limiter.setGatewayPublisher(gatewayPublisher);
     await gatewayPublisher.start();
@@ -1511,7 +1497,7 @@ interface ReceivedGatewayRequest {
   url: string;
   method: string;
   headers: NodeJS.Dict<string | string[]>;
-  body: { events: AuditEvent[] };
+  body: { events: (AuditEvent & { rawHash: string; censoredHash: string })[] };
 }
 
 type RespondFn = (req: IncomingMessage, body: string) => { status: number; body: string };
@@ -1645,6 +1631,39 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
     }
     for (const expected of ["message.received", "prompt.input", "tool.invoked", "tool.result", "prompt.response"]) {
       assert.ok(seenTypes.has(expected), `expected event type ${expected} in gateway batch`);
+    }
+  });
+
+  it("wire rawHash and censoredHash match smt.computeRawHash / computeCensoredHash on the original event", async () => {
+    gateway.received.length = 0;
+    const rig = await createRig({
+      gatewayUrl: `http://localhost:${gateway.port}`,
+      gatewayApiKey: "sk-gw-e2e-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    try {
+      const sessionId = "sess-e2e-projection";
+      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
+      fire(rig.api, "before_tool_call",
+        { toolName: "Read", params: { file_path: "/tmp/projection-check.txt" } },
+        { ...ctx, toolName: "Read" },
+      );
+      await new Promise((r) => setTimeout(r, 100));
+
+      assert.equal(gateway.received.length, 1);
+      const wire = gateway.received[0].body.events[0];
+      const stored = rig.store.query({ category: "tool", eventType: "tool.invoked", limit: 1, includeContent: true })[0];
+      assert.ok(stored, "tool.invoked event should be in the store");
+      // Independently project the stored event through SMT and compare —
+      // catches a misordered projection (e.g. rawHash/censoredHash swapped)
+      // that a mocked unit test wouldn't surface.
+      assert.equal(wire.rawHash, rig.smt.computeRawHash(stored),
+        "wire.rawHash must equal smt.computeRawHash(original)");
+      assert.equal(wire.censoredHash, rig.smt.computeCensoredHash(stored),
+        "wire.censoredHash must equal smt.computeCensoredHash(original)");
+    } finally {
+      await destroyRig(rig);
     }
   });
 
