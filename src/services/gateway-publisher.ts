@@ -220,12 +220,16 @@ interface AnchorCandidate {
 }
 
 /**
- * Picks the most recent DE-anchored checkpoint whose range *fully* covers
- * `maxSequence` (sequenceStart ≤ maxSequence ≤ sequenceEnd). Full coverage
- * is required: shipping a checkpoint whose `sequenceEnd < maxSequence` would
- * imply anchored provenance for events past the anchor — placing the safety
- * check on the gateway alone. When no anchor covers the batch, returns null
- * and the envelope simply omits `smtCheckpoint`.
+ * Picks the most recent DE-anchored checkpoint whose `sequenceStart` is on
+ * or before `maxSequence`. Full coverage (`sequenceEnd >= maxSequence`) is
+ * *not* required: in steady state new events accumulate past the latest
+ * anchor, so a strict coverage check would mean the envelope's
+ * `smtCheckpoint` almost never ships. The gateway's controller does its
+ * own per-event coverage filter (see `audit-ingest.controller.ts`:
+ * `event.sequence >= smtCheckpoint.sequenceStart && <= sequenceEnd`), so
+ * events past the anchor's `sequenceEnd` land gateway-side as
+ * anchor-pending regardless of what the plugin attaches. Returns null
+ * when no anchored checkpoint exists yet at all.
  */
 export function selectAnchorCovering(
   checkpoints: readonly AnchorCandidate[],
@@ -235,7 +239,6 @@ export function selectAnchorCovering(
   for (const cp of checkpoints) {
     if (cp.deTxHash === null) continue;
     if (cp.sequenceStart > maxSequence) continue;
-    if (cp.sequenceEnd < maxSequence) continue;
     if (best && best.sequenceEnd >= cp.sequenceEnd) continue;
     best = {
       smtRoot: cp.smtRoot,

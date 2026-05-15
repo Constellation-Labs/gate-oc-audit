@@ -4,6 +4,7 @@ import { createServer, type Server, type IncomingMessage } from "node:http";
 import {
   createGatewayPublisher as createPublisherInternal,
   drainForShutdown,
+  selectAnchorCovering,
   type GatewayPublisher,
   type GatewayPublisherDeps,
   type SmtCheckpointPayload,
@@ -216,7 +217,11 @@ describe("GatewayPublisher", () => {
     assert.equal(pub.isActive(), true);
 
     pub.notifyAppend(makeEvent(1));
-    await new Promise((r) => setTimeout(r, 80));
+    // notifyAppend kicks off a fire-and-forget flush (batchSize=1 crossed).
+    // Awaiting flushNow returns when the in-flight POST completes — avoids
+    // a hard sleep that flakes on slower VMs where the round-trip exceeds
+    // an arbitrary timeout.
+    await pub.flushNow();
     // batchSize clamped to 1 — single event flushes successfully (POST landed,
     // not an empty body re-firing endlessly).
     assert.equal(received.length, 1);
@@ -905,21 +910,33 @@ describe("GatewayPublisher", () => {
     }
   });
 
-  it("omits smtCheckpoint when the latest anchor's sequenceEnd does not cover the batch tail", async () => {
-    const pub = createPub({
-      gatewayUrl: `http://localhost:${port}`,
-      gatewayApiKey: "sk-gw-test",
-      gatewayBatchSize: 2,
-      gatewayIntervalMs: 60_000,
-    }, {
-      latestAnchoredCheckpoint: (_maxSeq) => null,
-    });
-    pub.notifyAppend(makeEvent(10));
-    pub.notifyAppend(makeEvent(11));
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(received.length, 1);
-    assert.equal("smtCheckpoint" in received[0].body, false,
-      "anchor that doesn't fully cover the tail must be omitted, not silently misattributed");
+  it("selectAnchorCovering returns the latest anchored checkpoint even when sequenceEnd < maxSequence", () => {
+    // In steady state the buffer's maxSequence is always past the last
+    // anchor's sequenceEnd (new events accumulate after the anchor). The
+    // helper must still return the anchor so the envelope ships it; the
+    // gateway controller does its own per-event coverage filter to decide
+    // which rows link to the checkpoint vs. land as anchor-pending.
+    const checkpoints = [
+      { smtRoot: "r1", sequenceStart: 1, sequenceEnd: 5, deTxHash: "tx-1", createdAt: "2026-05-15T12:32:33Z" },
+      // anchor-pending — must be skipped
+      { smtRoot: "r2", sequenceStart: 6, sequenceEnd: 7, deTxHash: null,   createdAt: "2026-05-15T12:32:48Z" },
+    ];
+    const result = selectAnchorCovering(checkpoints, 7);
+    assert.ok(result, "anchored checkpoint must be returned even though sequenceEnd=5 < maxSequence=7");
+    assert.equal(result.smtRoot, "r1");
+    assert.equal(result.deTxHash, "tx-1");
+  });
+
+  it("selectAnchorCovering skips checkpoints whose sequenceStart is past maxSequence", () => {
+    // A future-anchored range starting after the batch tail can't possibly
+    // cover any event in the batch; skip it. (Pathological in practice
+    // because anchors are always over already-published roots, but the
+    // helper should defensively skip rather than return a hint that can't
+    // link any event.)
+    const checkpoints = [
+      { smtRoot: "r1", sequenceStart: 100, sequenceEnd: 110, deTxHash: "tx", createdAt: "2026-05-15T12:32:33Z" },
+    ];
+    assert.equal(selectAnchorCovering(checkpoints, 5), null);
   });
 
   it("requeues only the failing half on partial split failure (gateway dedupe not relied on)", async () => {
