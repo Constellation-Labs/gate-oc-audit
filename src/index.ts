@@ -194,6 +194,7 @@ export default (() => {
             // Captures gateway.stop via either the openclaw hook or a signal
             // fallback — see GatewayStopCapture for why both paths exist.
             const gatewayStopCapture = new GatewayStopCapture(store);
+            gatewayStopCapture.setSmtService(smtService);
             gatewayStopCapture.installSignalFallback();
             _gatewayStopCapture = gatewayStopCapture;
             // Hooks are re-registered on every API instance (see guard above);

@@ -1,4 +1,5 @@
 import type { AuditStore } from "./store/audit-store.js";
+import type { SmtService } from "./services/smt-service.js";
 import {log} from "./util/logger.js";
 
 /**
@@ -17,10 +18,12 @@ import {log} from "./util/logger.js";
  *     the row lands in the WAL even when openclaw's async shutdown is
  *     preempted (observed in CI: container can exit ~250ms after SIGTERM
  *     with no further log lines past "received SIGTERM; shutting down").
- *     Bypasses the limiter to write straight to the store. The bypass means
- *     the row enters the SMT only via the next startup's replay path (see
- *     SmtService.start in src/index.ts) — intentional, since the limiter's
- *     side-effects can't run inside a synchronous signal callback.
+ *     Bypasses the rate limiter (so its async side-effects — gateway publish,
+ *     DE anchor — don't try to run inside a synchronous signal callback), but
+ *     still feeds the result into `SmtService.onEventAppended` so the leaf is
+ *     present in the in-memory SMT before `SmtService.stop` checkpoints it
+ *     to disk. The later async services (gateway-publisher, de-anchor) pick
+ *     the row up on next startup via their own replay/backfill paths.
  *
  * `tryClaim()` deduplicates: whichever path runs first writes the row, the
  * other returns without writing.
@@ -29,8 +32,18 @@ export class GatewayStopCapture {
   private recorded = false;
   private sigtermHandler: (() => void) | undefined;
   private sigintHandler: (() => void) | undefined;
+  private smtService: SmtService | undefined;
 
   constructor(private readonly store: AuditStore) {}
+
+  /**
+   * Wire the SMT service so the signal-path write also updates the
+   * in-memory tree. Optional — without it, the row only enters the SMT via
+   * the next plugin start's replay path.
+   */
+  setSmtService(smt: SmtService): void {
+    this.smtService = smt;
+  }
 
   /**
    * Reserve the gateway.stop slot. Returns true on the first call (caller
@@ -80,12 +93,19 @@ export class GatewayStopCapture {
     else this.sigintHandler = undefined;
     if (!this.tryClaim()) return;
     try {
-      this.store.append({
+      const event = this.store.append({
         eventType: "gateway.stop",
         category: "gateway",
         description: `Gateway stopped: ${signal}`,
         metadata: { reason: signal },
       });
+      // Update the in-memory SMT so SmtService.stop's final checkpoint
+      // persists the leaf. onEventAppended is fully synchronous and
+      // swallows its own errors, so it's safe to call inside the signal
+      // callback.
+      if (event && this.smtService) {
+        this.smtService.onEventAppended(event);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       log.error(`failed to record gateway.stop on signal: ${msg}`);

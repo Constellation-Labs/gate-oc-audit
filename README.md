@@ -14,9 +14,43 @@ That's it. The plugin automatically starts recording audit events when your agen
 
 ### Required openclaw config (openclaw ≥ 2026.4.24)
 
-Starting in openclaw `2026.4.24`, non-bundled plugins must explicitly opt in to receive raw conversation content from the `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end` hooks. Without this opt-in, openclaw silently drops those hook registrations and three of the audit plugin's most important event types (`prompt.input`, `prompt.response`, `agent.end`) will be missing from the audit trail.
+Two operator-policy opt-ins are required for full functionality. Both are decisions openclaw forces on the operator — the plugin cannot self-grant either.
 
-Add the following to your openclaw configuration:
+#### Trust the plugin
+
+Add `constellation-audit-plugin` to `plugins.allow`. When `plugins.allow` is empty, openclaw still auto-loads discovered plugins but logs a warning on every startup:
+
+```
+[plugins] plugins.allow is empty; discovered non-bundled plugins may auto-load …
+```
+
+Setting an explicit allowlist silences the warning and locks loading down to the listed ids:
+
+```bash
+openclaw config set plugins.allow '["constellation-audit-plugin"]'
+```
+
+Or directly in the config JSON:
+
+```json
+{
+  "plugins": {
+    "allow": ["constellation-audit-plugin"]
+  }
+}
+```
+
+If you already have other trusted plugins in `plugins.allow`, append `"constellation-audit-plugin"` to the existing array rather than replacing it.
+
+#### Grant conversation access
+
+Non-bundled plugins must explicitly opt in to receive raw conversation content from the `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end` hooks. Without this opt-in, openclaw blocks those hook registrations and logs:
+
+```
+[plugins] typed hook "llm_input" blocked because non-bundled plugins must set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true …
+```
+
+Three of the audit plugin's most important event types (`prompt.input`, `prompt.response`, `agent.end`) will be missing from the audit trail until this is set.
 
 ```bash
 openclaw config set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess true
@@ -36,7 +70,7 @@ Or directly in the config JSON:
 }
 ```
 
-The plugin logs a warning at startup if a tool call is observed without any preceding `llm_input` event, which usually indicates this opt-in is missing. The plugin cannot self-grant this — `allowConversationAccess` is an operator policy decision per openclaw's design.
+The plugin also logs a warning at startup if a tool call is observed without any preceding `llm_input` event, which usually indicates this opt-in is missing.
 
 ### Configuration (optional)
 
