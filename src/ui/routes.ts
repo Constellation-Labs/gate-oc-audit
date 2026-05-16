@@ -14,6 +14,7 @@ import type { Verifier } from "../services/verifier.js";
 import type { SmtProof } from "../store/smt-store.js";
 import type { AuditEvent } from "../types/events.js";
 import { serveStaticFile } from "../util/asset-server.js";
+import { pipeExportToResponse, type ExportFilters, type ExportFormat } from "./export.js";
 import { log } from "../util/logger.js";
 
 const ROUTE_BASE = "/plugins/audit";
@@ -303,6 +304,43 @@ async function handleApi(
     }
     const result = ctx.verifier.verifyRange({ from, to });
     sendJson(res, 200, result);
+    return true;
+  }
+
+  // GET /api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=
+  if (apiPath === "export" && req.method === "GET") {
+    const url = parseUrl(req);
+    if (!url) {
+      sendError(res, 400, "invalid url");
+      return true;
+    }
+    const formatParam = (url.searchParams.get("format") ?? "json").toLowerCase();
+    if (formatParam !== "json" && formatParam !== "csv") {
+      sendError(res, 400, "format must be 'json' or 'csv'");
+      return true;
+    }
+    const from = url.searchParams.get("from") ?? undefined;
+    const to = url.searchParams.get("to") ?? undefined;
+    for (const [name, value] of [["from", from], ["to", to]] as const) {
+      if (value !== undefined && Number.isNaN(Date.parse(value))) {
+        sendError(res, 400, `${name} must be an ISO 8601 timestamp`);
+        return true;
+      }
+    }
+    const filters: ExportFilters = {
+      from,
+      to,
+      eventType: url.searchParams.get("type") ?? undefined,
+      category: url.searchParams.get("category") ?? undefined,
+      sessionId: url.searchParams.get("session") ?? undefined,
+      securityOnly: url.searchParams.get("securityOnly") === "true",
+      includeContent: url.searchParams.get("includeContent") === "true",
+    };
+    await pipeExportToResponse(res, {
+      store: ctx.store,
+      filters,
+      format: formatParam as ExportFormat,
+    });
     return true;
   }
 
