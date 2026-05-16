@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../src/store/audit-store.js";
+import { SmtService } from "../src/services/smt-service.js";
 import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 
 function makeTempDb(): string {
@@ -112,6 +113,33 @@ describe("GatewayStopCapture", () => {
       process.emit("SIGTERM");
 
       assert.equal(getEvents(dbPath).length, 0);
+    });
+  });
+
+  describe("setSmtService", () => {
+    it("feeds the signal-written row into the SMT so the leaf is present in-memory", async () => {
+      const smt = new SmtService({
+        smt: {
+          checkpointDir: join(dirname(dbPath), "smt"),
+          checkpointIntervalMs: 0,
+        },
+      });
+      await smt.start();
+      capture.setSmtService(smt);
+      capture.installSignalFallback();
+
+      process.emit("SIGTERM");
+
+      const rows = getEvents(dbPath);
+      assert.equal(rows.length, 1);
+      // Re-read the event via the store so we get the same canonical shape
+      // the SMT was fed — matches the rawHash the UI would compute.
+      const event = store.query({ eventType: "gateway.stop", includeContent: true })[0];
+      assert.ok(event, "gateway.stop row should be queryable");
+      const rawHash = smt.computeRawHash(event);
+      assert.equal(smt.findContainingTreeKey(rawHash), smt.getMachineId());
+
+      await smt.stop();
     });
   });
 });
