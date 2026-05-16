@@ -23,6 +23,19 @@ const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
 
 const INGEST_PATH = "/api/v1/audit/ingest";
 
+/**
+ * Strip control chars (CR/LF/tab/escape/DEL) and cap to `maxBytes` bytes so
+ * gateway-controlled response bodies can't forge log lines or blow the log
+ * budget with multi-byte content. Multi-byte chars at the boundary are
+ * truncated cleanly rather than producing a partial code unit.
+ */
+function sanitizeForLog(raw: string, maxBytes: number): string {
+  const stripped = raw.replace(/[\x00-\x1f\x7f]/g, " ");
+  const buf = Buffer.from(stripped, "utf8");
+  if (buf.byteLength <= maxBytes) return stripped;
+  return buf.subarray(0, maxBytes).toString("utf8");
+}
+
 type SendResult =
   | { kind: "ok"; accepted: number; duplicateCount: number; highestSequence?: number }
   | { kind: "rateLimited"; retryAfterMs: number }
@@ -69,13 +82,28 @@ class NoOpGatewayPublisher implements GatewayPublisher {
 
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
 
+/** DNS root-form trailing dot ("127.0.0.1." == "127.0.0.1"). Strip before matching. */
+function normalizeHost(host: string): string {
+  const trimmed = host.endsWith(".") ? host.slice(0, -1) : host;
+  return trimmed.toLowerCase();
+}
+
 function isLoopbackHost(host: string): boolean {
-  if (host === "localhost" || host === "::1" || host === "[::1]") return true;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  const h = normalizeHost(host);
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  // IPv4-mapped IPv6 loopback: ::ffff:127.x.x.x
+  if (/^\[?::ffff:127(\.\d{1,3}){3}\]?$/.test(h)) return true;
+  return false;
 }
 
 function isPrivateOrLinkLocalIp(host: string): boolean {
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  const h = normalizeHost(host);
+  // 0.0.0.0/8 — "unspecified" / wildcard; on most OSes binds to all
+  // interfaces including loopback, so treat as private to avoid leaking
+  // outbound POSTs to whichever interface the OS picks.
+  if (/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  const ipv4 = h.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
   if (ipv4) {
     const a = Number(ipv4[1]);
     const b = Number(ipv4[2]);
@@ -86,9 +114,35 @@ function isPrivateOrLinkLocalIp(host: string): boolean {
     if (a === 100 && b >= 64 && b <= 127) return true;
     return false;
   }
-  const lower = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (lower.startsWith("fe80:") || lower.startsWith("fe80::")) return true;
-  if (/^f[cd][0-9a-f]{2}(:|::)/.test(lower)) return true;
+  const v6 = h.replace(/^\[|\]$/g, "");
+  if (v6.startsWith("fe80:") || v6.startsWith("fe80::")) return true;
+  if (/^f[cd][0-9a-f]{2}(:|::)/.test(v6)) return true;
+  // IPv4-mapped IPv6 to private/link-local addresses (::ffff:10.x, etc.)
+  const mapped = v6.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (mapped) {
+    const a = Number(mapped[1]);
+    const b = Number(mapped[2]);
+    if (a === 0) return true;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return false;
+}
+
+/**
+ * Reject ambiguous numeric-encoded IPv4 (decimal "2130706433", hex
+ * "0x7f000001", octal "0177.0.0.1"). Some resolvers decode these to
+ * loopback/private addresses; we don't want to play whack-a-mole, so we
+ * just refuse non-dotted-quad numeric hosts up-front.
+ */
+function isNumericIpEncoding(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "");
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return false;
+  // Pure decimal/hex integer, or dotted parts with hex/octal segments
+  if (/^(0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(h)) return true;
+  if (/\.0x[0-9a-f]+/i.test(h)) return true;
   return false;
 }
 
@@ -110,6 +164,9 @@ export function validateGatewayUrl(raw: string, opts: { allowPrivateHost?: boole
     return { ok: false, reason: `disallowed protocol ${url.protocol}` };
   }
   const host = url.hostname;
+  if (isNumericIpEncoding(host)) {
+    return { ok: false, reason: `numeric IP encoding ${host} (use dotted-quad form)` };
+  }
   const loopback = isLoopbackHost(host);
   if (url.protocol === "http:" && !loopback) {
     return { ok: false, reason: "http:// requires loopback host (localhost, 127.0.0.1, [::1])" };
@@ -128,9 +185,77 @@ export function validateGatewayApiKey(key: string): ValidationResult {
 }
 
 /**
- * Optional dependencies for the active publisher. Wired by the plugin entry
- * point so the publisher can record buffer-full drops as local audit events
- * without owning a reference to the store/SMT.
+ * SMT-anchored checkpoint payload mirrored from the plugin's local
+ * `audit_checkpoint` rows. Sent as the optional `smtCheckpoint` envelope
+ * field — gateway upserts it into `plugin_audit_checkpoints` and links
+ * every covered event row.
+ */
+export interface SmtCheckpointPayload {
+  smtRoot: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  deTxHash: string;
+  createdAt: string;
+}
+
+/** Stateless function producing the SMT-leaf hashes the gateway expects per event. */
+export type ComputeHashesFn = (event: AuditEvent) => { rawHash: string; censoredHash: string };
+
+/**
+ * Returns the most recent DE-anchored checkpoint whose range covers the
+ * batch's highest sequence, or null when no anchor covers it yet.
+ */
+export type LatestAnchoredCheckpointFn = (maxSequence: number) => SmtCheckpointPayload | null;
+
+/**
+ * Structural input for `selectAnchorCovering` — kept generic so the helper
+ * doesn't pull `CheckpointRecord` into the publisher's import graph.
+ */
+interface AnchorCandidate {
+  smtRoot: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  deTxHash: string | null;
+  createdAt: string;
+}
+
+/**
+ * Picks the most recent DE-anchored checkpoint whose `sequenceStart` is on
+ * or before `maxSequence`. Full coverage (`sequenceEnd >= maxSequence`) is
+ * *not* required: in steady state new events accumulate past the latest
+ * anchor, so a strict coverage check would mean the envelope's
+ * `smtCheckpoint` almost never ships. The gateway's controller does its
+ * own per-event coverage filter (see `audit-ingest.controller.ts`:
+ * `event.sequence >= smtCheckpoint.sequenceStart && <= sequenceEnd`), so
+ * events past the anchor's `sequenceEnd` land gateway-side as
+ * anchor-pending regardless of what the plugin attaches. Returns null
+ * when no anchored checkpoint exists yet at all.
+ */
+export function selectAnchorCovering(
+  checkpoints: readonly AnchorCandidate[],
+  maxSequence: number,
+): SmtCheckpointPayload | null {
+  let best: SmtCheckpointPayload | null = null;
+  for (const cp of checkpoints) {
+    if (cp.deTxHash === null) continue;
+    if (cp.sequenceStart > maxSequence) continue;
+    if (best && best.sequenceEnd >= cp.sequenceEnd) continue;
+    best = {
+      smtRoot: cp.smtRoot,
+      sequenceStart: cp.sequenceStart,
+      sequenceEnd: cp.sequenceEnd,
+      deTxHash: cp.deTxHash,
+      createdAt: cp.createdAt,
+    };
+  }
+  return best;
+}
+
+/**
+ * Dependencies for the active publisher. Wired by the plugin entry point
+ * so the publisher can compute SMT hashes, look up anchor state, and
+ * record buffer-full drops without owning a direct reference to the
+ * store/SMT.
  */
 export interface GatewayPublisherDeps {
   /**
@@ -140,6 +265,21 @@ export interface GatewayPublisherDeps {
    * detect the gap. Must NOT call back into the publisher (recursion risk).
    */
   onDropMilestone?(cumulativeDropped: number): void;
+  /**
+   * Optional at the type level for ergonomics, but the factory returns a
+   * NoOp publisher when omitted — the gateway's DTO requires both
+   * `rawHash` and `censoredHash` on every event, so a missing producer
+   * would mean sending guaranteed-400 payloads. Production wires this to
+   * `SmtService.computeRawHash` / `computeCensoredHash`.
+   */
+  computeHashes?: ComputeHashesFn;
+  /**
+   * Optional: attaches a DE-anchored `smtCheckpoint` to each batch when
+   * available. Anchor-pending batches simply omit the field; the gateway
+   * persists those rows with `last_checkpoint_id = NULL` and will backfill
+   * them when the matching checkpoint arrives on a later batch.
+   */
+  latestAnchoredCheckpoint?: LatestAnchoredCheckpointFn;
 }
 
 interface ActiveConfig {
@@ -151,6 +291,8 @@ interface ActiveConfig {
   bufferCapacity: number;
   shutdownDeadlineMs: number;
   maxPayloadBytes: number;
+  computeHashes: ComputeHashesFn;
+  latestAnchoredCheckpoint?: LatestAnchoredCheckpointFn;
 }
 
 class ActiveGatewayPublisher implements GatewayPublisher {
@@ -239,11 +381,14 @@ class ActiveGatewayPublisher implements GatewayPublisher {
     if (this.buffer.length === 0) return;
     if (this.isPaused()) return;
 
-    const promise = this.flushOne();
-    this.inFlightPromise = promise;
+    // Marker is assigned in the same synchronous tick the flushOne() call
+    // starts in, so any re-entrant flushNow sees inFlightPromise set before
+    // it can race the buffer splice that runs synchronously inside flushOne.
+    const pending = this.flushOne();
+    this.inFlightPromise = pending;
     let succeeded = false;
     try {
-      succeeded = await promise;
+      succeeded = await pending;
     } finally {
       this.inFlightPromise = undefined;
     }
@@ -262,41 +407,61 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   private async flushOne(): Promise<boolean> {
     const batch = this.buffer.splice(0, this.cfg.batchSize);
-    const succeeded = await this.sendWithSplit(batch);
-    if (!succeeded) {
-      // sendWithSplit already logged the reason and updated rate-limit / circuit
-      // state; we only need to put the batch back so it retries on the next tick.
+    try {
+      const outcome = await this.sendWithSplit(batch);
+      if (outcome.requeue.length > 0) {
+        // sendWithSplit already logged the reason and updated rate-limit / circuit
+        // state; we only need to put the unaccepted suffix back so it retries on
+        // the next tick. `accepted` events are dropped here because the gateway
+        // already received them.
+        this.buffer.unshift(...outcome.requeue);
+      }
+      return outcome.requeue.length === 0;
+    } catch (err) {
+      // computeHashes / latestAnchoredCheckpoint / buildPayload can throw
+      // synchronously. Without this guard the batch is already spliced out of
+      // the buffer and the rejection would unwind into the swallowed
+      // flushNow().catch(() => {}) site, silently dropping outbound audit events.
+      const message = err instanceof Error ? err.message : "Unknown error";
+      this.recordFailure();
+      gatewayPublisherLog.error(
+        `Publish pipeline threw (${batch.length} events requeued): ${message}`,
+      );
       this.buffer.unshift(...batch);
+      return false;
     }
-    return succeeded;
   }
 
   /**
    * Send one batch, recursively halving on 413 (PAYLOAD_TOO_LARGE) or on a
-   * local maxPayloadBytes overflow. Returns true on successful delivery (or
-   * unrecoverable drop of a single oversized event); false on transient
-   * failure or rate-limit pause — caller requeues.
-   *
-   * Splits accept duplicate-id POSTs gracefully: the gateway dedupes on
-   * `(orgId, plugin_event_id)`, so a partial-success/partial-failure outcome
-   * just means the next retry sends the same events again with no harm.
+   * local maxPayloadBytes overflow. Returns the unaccepted suffix in
+   * `outcome.requeue`; an empty `requeue` means the entire batch was
+   * delivered (or unrecoverably dropped because a single event was oversized).
+   * The caller only requeues the suffix so successfully-delivered halves
+   * aren't re-sent on a transient failure of a later half.
    */
-  private async sendWithSplit(batch: AuditEvent[]): Promise<boolean> {
-    if (batch.length === 0) return true;
+  private async sendWithSplit(batch: AuditEvent[]): Promise<{ requeue: AuditEvent[] }> {
+    if (batch.length === 0) return { requeue: [] };
 
     const payload = this.buildPayload(batch);
-    if (payload === undefined) {
+    if (payload.kind === "drop") {
+      gatewayPublisherLog.error(
+        `dropping batch of ${batch.length}: ${payload.reason}`,
+      );
+      return { requeue: [] };
+    }
+    if (payload.kind === "oversize") {
       // Local cap exceeded BEFORE we even try the network. Split if possible.
       if (batch.length === 1) {
-          gatewayPublisherLog.error(
-          `[audit-plugin:gateway-publisher] WARN dropping single event ${batch[0].id}: serialized size exceeds local maxPayloadBytes (${this.cfg.maxPayloadBytes})`,
+        gatewayPublisherLog.error(
+          `dropping single event ${batch[0].id}: serialized size exceeds local maxPayloadBytes (${this.cfg.maxPayloadBytes})`,
         );
-        return true;
+        return { requeue: [] };
       }
       return this.splitAndSend(batch);
     }
 
-    const result = await this.send(payload);
+    const result = await this.send(payload.body);
     switch (result.kind) {
       case "ok":
         if (result.highestSequence !== undefined && result.highestSequence > this.highestSequence) {
@@ -304,63 +469,128 @@ class ActiveGatewayPublisher implements GatewayPublisher {
         }
         this.consecutiveFailures = 0;
         this.circuitOpenCount = 0;
-        return true;
+        return { requeue: [] };
       case "payloadTooLarge":
         if (batch.length === 1) {
-          console.error(
-            `[audit-plugin:gateway-publisher] WARN dropping single event ${batch[0].id}: gateway rejected as PAYLOAD_TOO_LARGE`,
+          gatewayPublisherLog.error(
+            `dropping single event ${batch[0].id}: gateway rejected as PAYLOAD_TOO_LARGE`,
           );
-          return true;
+          return { requeue: [] };
         }
-        console.error(
-          `[audit-plugin:gateway-publisher] Gateway returned 413 for batch of ${batch.length}; splitting and retrying`,
+        gatewayPublisherLog.warn(
+          `Gateway returned 413 for batch of ${batch.length}; splitting and retrying`,
         );
         return this.splitAndSend(batch);
       case "rateLimited": {
         const wait = Math.min(Math.max(result.retryAfterMs, 0), RATE_LIMIT_MAX_MS);
         this.rateLimitedUntil = Date.now() + wait;
-        console.error(
-          `[audit-plugin:gateway-publisher] Gateway rate-limited; pausing ${wait}ms (batch of ${batch.length} requeued)`,
+        gatewayPublisherLog.warn(
+          `Gateway rate-limited; pausing ${wait}ms (batch of ${batch.length} requeued)`,
         );
-        return false;
+        return { requeue: batch.slice() };
       }
       case "error":
         this.recordFailure();
-          gatewayPublisherLog.error(
-          `[audit-plugin:gateway-publisher] Publish failed (${batch.length} events requeued): ${result.message}`,
+        gatewayPublisherLog.error(
+          `Publish failed (${batch.length} events requeued): ${result.message}`,
         );
-        return false;
+        return { requeue: batch.slice() };
     }
   }
 
-  private async splitAndSend(batch: AuditEvent[]): Promise<boolean> {
+  private async splitAndSend(batch: AuditEvent[]): Promise<{ requeue: AuditEvent[] }> {
     const half = Math.floor(batch.length / 2);
     const first = batch.slice(0, half);
     const second = batch.slice(half);
-    // Each half is delivered independently. If the second half fails, we
-    // return false; flushOne requeues the WHOLE original batch — the first
-    // half's events were already accepted by the gateway, so the retry just
-    // hits the (org_id, plugin_event_id) dedupe path.
-    const ok1 = await this.sendWithSplit(first);
-    if (!ok1) return false;
-    return this.sendWithSplit(second);
+    // Deliver each half independently and track which one failed. If the
+    // second half is rate-limited or errors, only the second half is
+    // requeued — the first half was already accepted by the gateway, so
+    // re-sending it would needlessly load the dedupe path (and would also
+    // burn a retry slot if the gateway has a transient bug only on the
+    // second half).
+    const first_out = await this.sendWithSplit(first);
+    if (first_out.requeue.length > 0) {
+      // First half didn't fully succeed. Don't even try the second half yet —
+      // the publisher is likely paused / rate-limited / circuit-tripped, so
+      // attempting more sends just races the backoff window. Requeue both.
+      return { requeue: [...first_out.requeue, ...second] };
+    }
+    const second_out = await this.sendWithSplit(second);
+    return { requeue: second_out.requeue };
   }
 
   /**
-   * Build the JSON payload for one POST. Returns `undefined` when the
-   * serialized batch exceeds `maxPayloadBytes`. Events carry their own
-   * `contentHash` (sha256 of content) and `previousHash` (chain) so the
-   * gateway never has to recompute either.
+   * Build the JSON payload for one POST per the SMT-envelope contract.
+   * Each event is projected to the gateway's DTO shape — `orgId` and
+   * `syncedAt` are dropped (gateway `forbidNonWhitelisted` rejects unknown
+   * fields), and the local-only `contentHash`/`previousHash` chain is
+   * replaced with the SMT-leaf `rawHash` + `censoredHash` the gateway
+   * recomputes server-side. When a DE-anchored checkpoint fully covers
+   * the batch's highest sequence, it's attached as the optional
+   * `smtCheckpoint` envelope field.
+   *
+   * Returns a tagged result so the caller can distinguish:
+   *  - `ok` → POST the body
+   *  - `oversize` → serialized batch exceeds maxPayloadBytes; route to splitAndSend
+   *  - `drop` → permanent failure (e.g. machineId mismatch); drop the batch
+   *    without requeue rather than retrying forever.
    */
-  private buildPayload(batch: AuditEvent[]): string | undefined {
-    // Spec §11.3 wraps the batch with a top-level machineId. Every event
-    // already carries machineId (set by the local store from the host's
-    // getMachineId()), so pulling it off the first event is safe — a given
-    // AuditStore instance has exactly one machineId.
-    const machineId = batch[0]?.machineId ?? "";
-    const body = JSON.stringify({ machineId, events: batch });
-    if (Buffer.byteLength(body, "utf8") > this.cfg.maxPayloadBytes) return undefined;
-    return body;
+  private buildPayload(batch: AuditEvent[]):
+    | { kind: "ok"; body: string }
+    | { kind: "oversize" }
+    | { kind: "drop"; reason: string }
+  {
+    const machineId = batch[0].machineId;
+    // Single-machineId-per-batch invariant: an AuditStore instance has one
+    // machineId, and the rate-limiter never intermingles events from
+    // multiple stores. Enforce it explicitly so a future refactor (multi-
+    // tenant test rig, replay tooling) can't silently produce envelopes
+    // whose top-level machineId doesn't match individual events. This is a
+    // permanent invariant violation, not transient — drop rather than retry.
+    for (const event of batch) {
+      if (event.machineId !== machineId) {
+        return {
+          kind: "drop",
+          reason: `batch mixes machineIds (envelope=${machineId}, event=${event.machineId})`,
+        };
+      }
+    }
+    const events = batch.map((event) => {
+      const { rawHash, censoredHash } = this.cfg.computeHashes(event);
+      return {
+        id: event.id,
+        sequence: event.sequence,
+        source: event.source,
+        machineId: event.machineId,
+        sessionId: event.sessionId,
+        userId: event.userId,
+        eventType: event.eventType,
+        category: event.category,
+        description: event.description,
+        metadata: event.metadata,
+        content: event.content,
+        rawHash,
+        censoredHash,
+        createdAt: event.createdAt,
+        receivedAt: event.receivedAt,
+      };
+    });
+
+    let smtCheckpoint: SmtCheckpointPayload | undefined;
+    const lookup = this.cfg.latestAnchoredCheckpoint;
+    if (lookup) {
+      const maxSeq = Math.max(...batch.map((e) => e.sequence));
+      smtCheckpoint = lookup(maxSeq) ?? undefined;
+    }
+
+    const envelope = smtCheckpoint
+      ? { machineId, events, smtCheckpoint }
+      : { machineId, events };
+    const body = JSON.stringify(envelope);
+    if (Buffer.byteLength(body, "utf8") > this.cfg.maxPayloadBytes) {
+      return { kind: "oversize" };
+    }
+    return { kind: "ok", body };
   }
 
   private async send(body: string): Promise<SendResult> {
@@ -406,7 +636,24 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       return { kind: "payloadTooLarge" };
     }
 
-    return { kind: "error", message: `Gateway returned ${response.status} ${response.statusText}` };
+    // Surface the response body in the error so contract drift (400 from a
+    // schema mismatch, 401 from a bad key, etc.) self-explains without a
+    // round-trip through gateway logs. Bounded to keep log lines sane.
+    // Sanitization: a compromised/misbehaving gateway can stuff CR/LF or
+    // ANSI escapes into the body and forge fake log lines downstream — we
+    // strip control chars and slice by *bytes* (not chars) so 4-byte emoji
+    // can't blow the budget.
+    const errBody = await this.readResponseBodySafe(response);
+    const suffix = errBody ? `: ${sanitizeForLog(errBody, 500)}` : "";
+    return { kind: "error", message: `Gateway returned ${response.status} ${response.statusText}${suffix}` };
+  }
+
+  private async readResponseBodySafe(response: Response): Promise<string> {
+    try {
+      return await response.text();
+    } catch {
+      return "";
+    }
   }
 
   private async safeParseJson(response: Response): Promise<Record<string, unknown> | undefined> {
@@ -492,6 +739,12 @@ export function createGatewayPublisher(
     return new NoOpGatewayPublisher(`gatewayApiKey rejected (${keyValidation.reason})`);
   }
 
+  if (typeof deps.computeHashes !== "function") {
+    return new NoOpGatewayPublisher(
+      "computeHashes dep missing — gateway requires rawHash/censoredHash on every event",
+    );
+  }
+
   // Surface http:// (cleartext) misconfiguration loudly even when allowed (loopback dev).
   if (url.toLowerCase().startsWith("http://")) {
     gatewayPublisherLog.warn(
@@ -526,6 +779,8 @@ export function createGatewayPublisher(
     bufferCapacity,
     shutdownDeadlineMs,
     maxPayloadBytes,
+    computeHashes: deps.computeHashes,
+    latestAnchoredCheckpoint: deps.latestAnchoredCheckpoint,
   }, deps);
 }
 

@@ -1,14 +1,54 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server, type IncomingMessage } from "node:http";
-import { createGatewayPublisher, drainForShutdown } from "../../src/services/gateway-publisher.js";
+import {
+  createGatewayPublisher as createPublisherInternal,
+  drainForShutdown,
+  selectAnchorCovering,
+  type GatewayPublisher,
+  type GatewayPublisherDeps,
+  type SmtCheckpointPayload,
+} from "../../src/services/gateway-publisher.js";
+import { gatewayPublisherLog } from "../../src/util/logger.js";
+import { captureLogger } from "../test-utils/capture-logger.js";
 import type { AuditEvent } from "../../src/types/events.js";
 
+// Wire events are not structurally tied to AuditEvent — the envelope-shape
+// test (below) is the authority on which fields cross the boundary. The
+// known fields are listed for ergonomic test access; everything else falls
+// through `[k: string]: unknown` so a typo'd field reference still type-checks.
+type WireEvent = {
+  id: string;
+  sequence: number;
+  content?: string;
+  rawHash: string;
+  censoredHash: string;
+  [k: string]: unknown;
+};
 interface ReceivedRequest {
   url: string;
   method: string;
   headers: NodeJS.Dict<string | string[]>;
-  body: { machineId?: string; events: AuditEvent[] };
+  body: { machineId?: string; events: WireEvent[]; smtCheckpoint?: SmtCheckpointPayload };
+}
+
+const RAW_HASH = "a".repeat(64);
+const CENSORED_HASH = "b".repeat(64);
+
+/**
+ * Thin wrapper around `createGatewayPublisher` that auto-supplies the
+ * `computeHashes` dep so every active-path test gets a publisher whose
+ * payloads satisfy the gateway's required fields. Callers can still
+ * override deps (e.g. `onDropMilestone`, `latestAnchoredCheckpoint`).
+ */
+function createPub(
+  config: Record<string, unknown>,
+  deps: GatewayPublisherDeps = {},
+): GatewayPublisher {
+  return createPublisherInternal(config, {
+    computeHashes: () => ({ rawHash: RAW_HASH, censoredHash: CENSORED_HASH }),
+    ...deps,
+  });
 }
 
 function makeEvent(seq: number, overrides: Partial<AuditEvent> = {}): AuditEvent {
@@ -68,17 +108,17 @@ describe("GatewayPublisher", () => {
   });
 
   it("returns no-op when gatewayUrl is missing", () => {
-    const pub = createGatewayPublisher({});
+    const pub = createPub({});
     assert.equal(pub.isActive(), false);
   });
 
   it("returns no-op when gatewayApiKey is missing", () => {
-    const pub = createGatewayPublisher({ gatewayUrl: `http://localhost:${port}` });
+    const pub = createPub({ gatewayUrl: `http://localhost:${port}` });
     assert.equal(pub.isActive(), false);
   });
 
   it("returns no-op when gatewayEnabled=false even if url+key are set", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayEnabled: false,
@@ -87,7 +127,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("returns no-op when gatewayUrl protocol is unsafe", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "file:///etc/passwd",
       gatewayApiKey: "sk-gw-test",
     });
@@ -95,7 +135,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects http:// to non-loopback host", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "http://gateway.example.com",
       gatewayApiKey: "sk-gw-test",
     });
@@ -103,7 +143,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects http:// to AWS metadata service", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "http://169.254.169.254/latest/meta-data/",
       gatewayApiKey: "sk-gw-test",
     });
@@ -112,13 +152,13 @@ describe("GatewayPublisher", () => {
 
   it("accepts http:// to loopback (localhost / 127.0.0.1 / [::1])", () => {
     for (const host of ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]) {
-      const pub = createGatewayPublisher({ gatewayUrl: host, gatewayApiKey: "sk-gw-test" });
+      const pub = createPub({ gatewayUrl: host, gatewayApiKey: "sk-gw-test" });
       assert.equal(pub.isActive(), true, `expected ${host} to be accepted`);
     }
   });
 
   it("rejects https:// to private RFC1918 IP without allow opt-in", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "https://10.0.0.5",
       gatewayApiKey: "sk-gw-test",
     });
@@ -126,7 +166,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("accepts https:// to private IP when gatewayAllowPrivateHost=true", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "https://10.0.0.5",
       gatewayApiKey: "sk-gw-test",
       gatewayAllowPrivateHost: true,
@@ -135,7 +175,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects malformed URL", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: "not a url",
       gatewayApiKey: "sk-gw-test",
     });
@@ -143,7 +183,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects API key containing CR/LF (header injection footgun)", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-bad\r\nX-Injected: 1",
     });
@@ -151,7 +191,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects API key containing whitespace", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw bad",
     });
@@ -159,7 +199,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("rejects empty API key", () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "",
     });
@@ -167,7 +207,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("clamps batchSize/intervalMs/timeoutMs to safe minima (no infinite-loop on 0/0.5)", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 0.5,        // floor=0, but clamp pushes to >= 1
@@ -177,7 +217,11 @@ describe("GatewayPublisher", () => {
     assert.equal(pub.isActive(), true);
 
     pub.notifyAppend(makeEvent(1));
-    await new Promise((r) => setTimeout(r, 80));
+    // notifyAppend kicks off a fire-and-forget flush (batchSize=1 crossed).
+    // Awaiting flushNow returns when the in-flight POST completes — avoids
+    // a hard sleep that flakes on slower VMs where the round-trip exceeds
+    // an arbitrary timeout.
+    await pub.flushNow();
     // batchSize clamped to 1 — single event flushes successfully (POST landed,
     // not an empty body re-firing endlessly).
     assert.equal(received.length, 1);
@@ -185,7 +229,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("forwards event.content to the gateway", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -198,7 +242,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("drops oversized batches rather than requeueing them forever", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -214,7 +258,7 @@ describe("GatewayPublisher", () => {
 
   it("records a drop milestone via callback when buffer is full", async () => {
     const milestones: number[] = [];
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 100,
@@ -234,7 +278,7 @@ describe("GatewayPublisher", () => {
 
   it("re-opens the circuit after half-open retry fails", async () => {
     respond = () => ({ status: 500, body: "still down" });
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 10,
@@ -253,7 +297,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("POSTs batch with X-Gateway-Api-Key header to /api/v1/audit/ingest", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 2,
@@ -279,7 +323,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("strips trailing slash on gatewayUrl when building ingest URL", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}/`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -300,7 +344,7 @@ describe("GatewayPublisher", () => {
       return { status: 202, body: '{"accepted":1}' };
     };
 
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -321,7 +365,7 @@ describe("GatewayPublisher", () => {
   it("opens circuit breaker after 5 consecutive failures", async () => {
     respond = () => ({ status: 500, body: "boom" });
 
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       // Larger than 1 so notifyAppend doesn't auto-flush — the test drives flushes itself.
@@ -349,7 +393,7 @@ describe("GatewayPublisher", () => {
       }, 3_000);
     });
 
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 10,
@@ -367,7 +411,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("does not flush when buffer is empty", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 5,
@@ -378,7 +422,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("exposes bufferedCount and isCircuitOpen on the interface", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 100,
@@ -392,7 +436,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("auto-chains to drain full batches when buffer >= batchSize after a successful flush", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 5,
@@ -415,7 +459,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("does not auto-chain a partial residue batch — that waits for the timer", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 5,
@@ -440,7 +484,7 @@ describe("GatewayPublisher", () => {
       return originalSetInterval(...args);
     }) as typeof setInterval;
     try {
-      const pub = createGatewayPublisher({
+      const pub = createPub({
         gatewayUrl: `http://localhost:${port}`,
         gatewayApiKey: "sk-gw-test",
         gatewayBatchSize: 100,
@@ -457,7 +501,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("drainForShutdown drains buffered events on shutdown", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 5,
@@ -480,7 +524,7 @@ describe("GatewayPublisher", () => {
         res.end('{"accepted":1}');
       }, 600);
     });
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -502,7 +546,7 @@ describe("GatewayPublisher", () => {
 
   it("drainForShutdown exits early when the circuit is open", async () => {
     respond = () => ({ status: 500, body: "down" });
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -521,7 +565,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("stop() stops the interval timer", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 100,
@@ -544,7 +588,7 @@ describe("GatewayPublisher", () => {
   // --- Spec §11.3 wire-contract coverage ---
 
   it("wraps the batch with top-level machineId per spec §11.3", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 2,
@@ -561,7 +605,7 @@ describe("GatewayPublisher", () => {
   });
 
   it("clamps gatewayBatchSize > 100 down to the spec cap (100)", async () => {
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 500,
@@ -586,7 +630,7 @@ describe("GatewayPublisher", () => {
       return { status: 200, body: '{"accepted":1,"duplicateCount":0,"highestSequence":1}' };
     };
 
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -623,7 +667,7 @@ describe("GatewayPublisher", () => {
       return { status: 200, body: '{"accepted":' + parsed.events.length + '}' };
     };
 
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 4,
@@ -639,7 +683,7 @@ describe("GatewayPublisher", () => {
 
   it("drops a single oversized event on 413 rather than spinning", async () => {
     respond = () => ({ status: 413, body: '{"error":"PAYLOAD_TOO_LARGE"}' });
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -653,7 +697,7 @@ describe("GatewayPublisher", () => {
 
   it("treats spec 200 response as success and accepts {duplicateCount, highestSequence} body", async () => {
     respond = () => ({ status: 200, body: '{"accepted":1,"duplicateCount":0,"highestSequence":42}' });
-    const pub = createGatewayPublisher({
+    const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
       gatewayBatchSize: 1,
@@ -665,5 +709,260 @@ describe("GatewayPublisher", () => {
     assert.equal(pub.bufferedCount(), 0);
     assert.equal(pub.isCircuitOpen(), false);
     assert.equal(pub.isPaused(), false);
+  });
+
+  // ── SMT envelope wire-format contract ──────────────────────────────
+
+  it("returns no-op when computeHashes is missing — gateway requires hashes on every event", () => {
+    // Bypass the test helper to exercise the missing-dep branch directly.
+    const pub = createPublisherInternal({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+    });
+    assert.equal(pub.isActive(), false);
+  });
+
+  it("envelope shape: top-level machineId, per-event rawHash + censoredHash, no orgId/syncedAt/contentHash/previousHash", async () => {
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(7, {
+      content: "the prompt",
+      // Local-only fields that must NOT appear on the wire:
+      orgId: "org-local",
+      syncedAt: "2026-01-01T00:00:00Z",
+      contentHash: "deadbeef",
+      previousHash: "feedface",
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    const body = received[0].body;
+    assert.equal(body.machineId, "test-machine");
+    assert.equal(body.events.length, 1);
+    const event = body.events[0] as unknown as Record<string, unknown>;
+    assert.equal(event.rawHash, RAW_HASH);
+    assert.equal(event.censoredHash, CENSORED_HASH);
+    assert.equal(event.content, "the prompt");
+    assert.equal("orgId" in event, false, "must not forward orgId");
+    assert.equal("syncedAt" in event, false, "must not forward syncedAt");
+    assert.equal("contentHash" in event, false, "must not forward legacy contentHash");
+    assert.equal("previousHash" in event, false, "must not forward legacy previousHash");
+  });
+
+  it("attaches smtCheckpoint when the lookup callback returns one for the batch's max sequence", async () => {
+    const lookupCalls: number[] = [];
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 2,
+      gatewayIntervalMs: 60_000,
+    }, {
+      latestAnchoredCheckpoint: (maxSeq) => {
+        lookupCalls.push(maxSeq);
+        return {
+          smtRoot: "deadbeef".repeat(8),
+          sequenceStart: 1,
+          sequenceEnd: 5,
+          deTxHash: "0xanchor",
+          createdAt: "2026-04-28T12:30:00.000Z",
+        };
+      },
+    });
+    pub.notifyAppend(makeEvent(4));
+    pub.notifyAppend(makeEvent(5));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(lookupCalls, [5], "callback receives batch's max sequence");
+    assert.ok(received[0].body.smtCheckpoint);
+    assert.equal(received[0].body.smtCheckpoint?.deTxHash, "0xanchor");
+    assert.equal(received[0].body.smtCheckpoint?.sequenceEnd, 5);
+  });
+
+  it("omits smtCheckpoint when the lookup callback returns null", async () => {
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    }, {
+      latestAnchoredCheckpoint: () => null,
+    });
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal("smtCheckpoint" in received[0].body, false);
+  });
+
+  it("omits smtCheckpoint when no latestAnchoredCheckpoint callback is wired", async () => {
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal("smtCheckpoint" in received[0].body, false);
+  });
+
+  it("includes the response body in the error message on 4xx so contract drift self-explains", async () => {
+    respond = () => ({ status: 400, body: '{"error":"rawHash mismatch for event evt-1"}' });
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      assert.ok(pub.bufferedCount() >= 1, "failed batch should be requeued");
+      const errLine = captured.messages.find((m) => m.includes("Publish failed"));
+      assert.ok(errLine, `expected a Publish failed log line; saw: ${captured.messages.join(" | ")}`);
+      assert.ok(
+        errLine.includes("rawHash mismatch for event evt-1"),
+        `expected gateway response body in error message; got: ${errLine}`,
+      );
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("sanitizes CR/LF in 4xx response body so a hostile gateway can't forge log lines", async () => {
+    respond = () => ({
+      status: 400,
+      body: "evil\r\n[audit-plugin] CRITICAL fake forged line\r\nrest",
+    });
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      const errLine = captured.messages.find((m) => m.includes("Publish failed"));
+      assert.ok(errLine, "expected a Publish failed log line");
+      assert.equal(errLine.includes("\r"), false, "carriage return must be stripped");
+      assert.equal(errLine.includes("\n"), false, "newline must be stripped");
+      assert.ok(errLine.includes("fake forged line"), "sanitized body is still present (just with spaces)");
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("does not increment circuit breaker on 429 — rate-limit is not a transport failure", async () => {
+    respond = () => ({ status: 429, body: '{"error":"RATE_LIMITED","retryAfterMs":50}' });
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    });
+    pub.notifyAppend(makeEvent(1));
+    // Drive enough flush attempts to trip the breaker if 429 counted as a failure.
+    for (let i = 0; i < 6; i++) {
+      await pub.flushNow();
+      // Wait out the (50ms) rate-limit window between attempts.
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    assert.equal(pub.isCircuitOpen(), false, "429 must not trip the circuit breaker");
+  });
+
+  it("requeues the batch when computeHashes throws — events are not silently lost", async () => {
+    const pub = createPublisherInternal({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 1,
+      gatewayIntervalMs: 60_000,
+    }, {
+      computeHashes: () => { throw new Error("simulated SDK crash"); },
+    });
+    pub.notifyAppend(makeEvent(1));
+    await pub.flushNow();
+    assert.equal(pub.bufferedCount(), 1, "thrown computeHashes must not drop the event");
+  });
+
+  it("refuses to send a batch whose machineIds disagree (and drops it without requeue)", async () => {
+    const captured = captureLogger(gatewayPublisherLog);
+    try {
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 2,
+        gatewayIntervalMs: 60_000,
+      });
+      pub.notifyAppend(makeEvent(1, { machineId: "machine-A" }));
+      pub.notifyAppend(makeEvent(2, { machineId: "machine-B" }));
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(received.length, 0, "mixed-machineId batch must not POST");
+      assert.equal(pub.bufferedCount(), 0, "permanent invariant violation: drop, do not requeue");
+      const errLine = captured.messages.find((m) => m.includes("mixes machineIds"));
+      assert.ok(errLine, `expected a mixes-machineIds log line; saw: ${captured.messages.join(" | ")}`);
+    } finally {
+      captured.restore();
+    }
+  });
+
+  it("selectAnchorCovering returns the latest anchored checkpoint even when sequenceEnd < maxSequence", () => {
+    // In steady state the buffer's maxSequence is always past the last
+    // anchor's sequenceEnd (new events accumulate after the anchor). The
+    // helper must still return the anchor so the envelope ships it; the
+    // gateway controller does its own per-event coverage filter to decide
+    // which rows link to the checkpoint vs. land as anchor-pending.
+    const checkpoints = [
+      { smtRoot: "r1", sequenceStart: 1, sequenceEnd: 5, deTxHash: "tx-1", createdAt: "2026-05-15T12:32:33Z" },
+      // anchor-pending — must be skipped
+      { smtRoot: "r2", sequenceStart: 6, sequenceEnd: 7, deTxHash: null,   createdAt: "2026-05-15T12:32:48Z" },
+    ];
+    const result = selectAnchorCovering(checkpoints, 7);
+    assert.ok(result, "anchored checkpoint must be returned even though sequenceEnd=5 < maxSequence=7");
+    assert.equal(result.smtRoot, "r1");
+    assert.equal(result.deTxHash, "tx-1");
+  });
+
+  it("selectAnchorCovering skips checkpoints whose sequenceStart is past maxSequence", () => {
+    // A future-anchored range starting after the batch tail can't possibly
+    // cover any event in the batch; skip it. (Pathological in practice
+    // because anchors are always over already-published roots, but the
+    // helper should defensively skip rather than return a hint that can't
+    // link any event.)
+    const checkpoints = [
+      { smtRoot: "r1", sequenceStart: 100, sequenceEnd: 110, deTxHash: "tx", createdAt: "2026-05-15T12:32:33Z" },
+    ];
+    assert.equal(selectAnchorCovering(checkpoints, 5), null);
+  });
+
+  it("requeues only the failing half on partial split failure (gateway dedupe not relied on)", async () => {
+    let callCount = 0;
+    const seenBatchSizes: number[] = [];
+    respond = (_req, raw) => {
+      callCount++;
+      const parsed = JSON.parse(raw) as { events: AuditEvent[] };
+      seenBatchSizes.push(parsed.events.length);
+      // First POST (4) → 413; first half (2) → 200; second half (2) → 500.
+      if (callCount === 1) return { status: 413, body: '{"error":"PAYLOAD_TOO_LARGE"}' };
+      if (callCount === 2) return { status: 200, body: '{"accepted":2}' };
+      return { status: 500, body: "transient" };
+    };
+    const pub = createPub({
+      gatewayUrl: `http://localhost:${port}`,
+      gatewayApiKey: "sk-gw-test",
+      gatewayBatchSize: 4,
+      gatewayIntervalMs: 60_000,
+    });
+    for (let i = 1; i <= 4; i++) pub.notifyAppend(makeEvent(i));
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.deepEqual(seenBatchSizes, [4, 2, 2]);
+    // The accepted first half (sequences 1-2) must NOT be requeued. Only the
+    // failing second half (sequences 3-4) returns to the buffer.
+    assert.equal(pub.bufferedCount(), 2, "only the failing second half should be requeued");
   });
 });
