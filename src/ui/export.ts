@@ -205,6 +205,8 @@ export interface StreamExportArgs {
   store: AuditStore;
   filters: ExportFilters;
   format: ExportFormat;
+  /** Optional cap on rows written. Cuts the stream short once reached. */
+  limitRows?: number;
   /** Write callback. Resolves when the chunk is queued (back-pressure aware via caller). */
   write: (chunk: string) => boolean;
   /** Called once the writer signals "drain" — caller resolves the next write. */
@@ -218,10 +220,11 @@ export interface StreamExportArgs {
  * batch.
  */
 export async function streamExport(args: StreamExportArgs): Promise<{ rowsWritten: number }> {
-  const { store, filters, format, write, waitForDrain } = args;
+  const { store, filters, format, write, waitForDrain, limitRows } = args;
   const queryBase = buildQueryOptions(filters);
   const anchors = indexAnchors(store);
   const includeContent = filters.includeContent === true;
+  const cap = limitRows !== undefined && limitRows > 0 ? limitRows : Infinity;
 
   if (format === "csv") {
     if (!write(csvHeaderLine(includeContent))) await waitForDrain();
@@ -229,17 +232,20 @@ export async function streamExport(args: StreamExportArgs): Promise<{ rowsWritte
 
   let offset = 0;
   let rowsWritten = 0;
-  while (true) {
-    const batch = store.query({ ...queryBase, limit: BATCH_SIZE, offset });
+  while (rowsWritten < cap) {
+    const remaining = cap - rowsWritten;
+    const pageSize = Math.min(BATCH_SIZE, remaining);
+    const batch = store.query({ ...queryBase, limit: pageSize, offset });
     if (batch.length === 0) break;
     for (const event of batch) {
       const enriched: ExportedEvent = { ...event, anchor: anchorRefFor(event, anchors) };
       const line = format === "csv" ? csvLineFor(enriched, includeContent) : ndjsonLineFor(enriched);
       if (!write(line)) await waitForDrain();
       rowsWritten++;
+      if (rowsWritten >= cap) break;
     }
     offset += batch.length;
-    if (batch.length < BATCH_SIZE) break;
+    if (batch.length < pageSize) break;
   }
 
   return { rowsWritten };

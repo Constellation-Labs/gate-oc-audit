@@ -420,10 +420,15 @@ Exits with code `0` if all proofs and checkpoints are valid, `1` if any verifica
 ### Export
 
 ```bash
-openclaw audit export          # JSON Lines (default)
-openclaw audit export csv      # CSV format
-openclaw audit export --type tool.invoked --limit 100
+openclaw audit export                                    # JSON Lines (default, streamed)
+openclaw audit export csv                                # CSV (streamed, stable column order)
+openclaw audit export --type tool.invoked --limit 100    # cap rows
+openclaw audit export --from 2025-01-01T00:00:00Z --to 2025-02-01T00:00:00Z
+openclaw audit export --security-only                    # security / config / system categories
+openclaw audit export --include-content                  # include decompressed content column / field
 ```
+
+Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, `anchor.sequenceStart`, `anchor.sequenceEnd`, `anchor.createdAt`) for the checkpoint covering its sequence, or `null` when no DE-anchored checkpoint covers it yet. Output is streamed in fixed-size batches, so large exports don't materialise in memory. The same shape is available over HTTP at `GET /plugins/audit/api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=`.
 
 ### SMT operations
 

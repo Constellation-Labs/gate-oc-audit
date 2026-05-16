@@ -106,11 +106,14 @@ export default (() => {
 
                 audit
                     .command("export [format]")
-                    .description("Export audit logs as JSON or CSV")
+                    .description("Export audit logs as JSON (NDJSON) or CSV. Each row includes the DE anchor reference for the covering checkpoint when one exists.")
                     .option("--type <type>", "Filter by event type")
                     .option("--category <category>", "Filter by category")
                     .option("--session <id>", "Filter by session ID")
-                    .option("--limit <n>", "Max events to export")
+                    .option("--from <iso>", "Lower bound on createdAt (ISO 8601, inclusive)")
+                    .option("--to <iso>", "Upper bound on createdAt (ISO 8601, inclusive)")
+                    .option("--security-only", "Restrict to security/config/system categories")
+                    .option("--limit <n>", "Cap the number of rows emitted")
                     .option("--include-content", "Include full decompressed content in output")
                     .action((format: string | undefined, opts: AuditExportOptions) =>
                         cliExportHandler(getStore(), format, opts),

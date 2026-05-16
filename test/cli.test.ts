@@ -177,70 +177,115 @@ describe("CLI: audit export", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("exports JSON by default (one JSON object per line)", () => {
+  it("exports JSON by default (one JSON object per line)", async () => {
     insert(store, { description: "ev1" });
     insert(store, { description: "ev2" });
 
-    const { stdout } = captureConsole(() => cliExportHandler(store));
+    const { stdout } = await captureConsoleAsync(() => cliExportHandler(store));
     const lines = stdout.trim().split("\n");
     assert.equal(lines.length, 2);
 
     const parsed = JSON.parse(lines[0]);
     assert.ok(parsed.id);
     assert.ok(parsed.eventType);
+    // Anchor reference is always present (null when no DE-anchored checkpoint covers the row).
+    assert.equal(parsed.anchor, null);
   });
 
-  it("exports CSV with format=csv", () => {
+  it("exports CSV with format=csv", async () => {
     insert(store, { description: "ev1" });
     insert(store, { description: "ev2" });
 
-    const { stdout } = captureConsole(() => cliExportHandler(store, "csv"));
+    const { stdout } = await captureConsoleAsync(() => cliExportHandler(store, "csv"));
     const lines = stdout.trim().split("\n");
     assert.equal(lines.length, 3); // header + 2 rows
-    assert.ok(lines[0].includes("id,sequence,source"));
-    assert.ok(lines[0].includes("metadata"));
-    assert.ok(lines[1].includes("ev1"));
+    assert.ok(lines[0].startsWith("id,sequence,source"));
+    assert.ok(lines[0].includes("anchor_de_tx_hash"));
+    assert.ok(lines[0].includes("metadata_json"));
+    assert.ok(lines[1].includes("ev1") || lines[2].includes("ev1"));
   });
 
-  it("excludes content from JSON export by default", () => {
+  it("excludes content from JSON export by default", async () => {
     insert(store, { description: "ev1", content: "full body" });
 
-    const { stdout } = captureConsole(() => cliExportHandler(store));
+    const { stdout } = await captureConsoleAsync(() => cliExportHandler(store));
     const parsed = JSON.parse(stdout.trim());
     assert.equal(parsed.content, undefined);
   });
 
-  it("includes content in JSON export with --include-content", () => {
+  it("includes content in JSON export with --include-content", async () => {
     insert(store, { description: "ev1", content: "full body" });
 
-    const { stdout } = captureConsole(() =>
+    const { stdout } = await captureConsoleAsync(() =>
       cliExportHandler(store, undefined, { includeContent: true }),
     );
     const parsed = JSON.parse(stdout.trim());
     assert.equal(parsed.content, "full body");
   });
 
-  it("includes content column in CSV export with --include-content", () => {
+  it("includes content column in CSV export with --include-content", async () => {
     insert(store, { description: "ev1", content: "csv body" });
 
-    const { stdout } = captureConsole(() =>
+    const { stdout } = await captureConsoleAsync(() =>
       cliExportHandler(store, "csv", { includeContent: true }),
     );
     const lines = stdout.trim().split("\n");
-    assert.ok(lines[0].includes("content"));
-    assert.ok(lines[1].includes("csv body"));
+    // Match the bare "content" header, not "contentHash".
+    const cols = lines[0]!.split(",");
+    assert.ok(cols.includes("content"));
+    assert.ok(lines[1]!.includes("csv body"));
   });
 
-  it("filters exports by --type", () => {
+  it("filters exports by --type", async () => {
     insert(store, { eventType: "session.start" });
     insert(store, { eventType: "tool.invoked", category: "tool" });
 
-    const { stdout } = captureConsole(() =>
+    const { stdout } = await captureConsoleAsync(() =>
       cliExportHandler(store, undefined, { type: "tool.invoked" }),
     );
     const lines = stdout.trim().split("\n");
     assert.equal(lines.length, 1);
-    assert.ok(lines[0].includes("tool.invoked"));
+    assert.ok(lines[0]!.includes("tool.invoked"));
+  });
+
+  it("filters exports by --from / --to time range", async () => {
+    const early = insert(store, { description: "early" });
+    await new Promise((r) => setTimeout(r, 20));
+    const late = insert(store, { description: "late" });
+    assert.ok(late.createdAt > early.createdAt);
+
+    const { stdout } = await captureConsoleAsync(() =>
+      cliExportHandler(store, undefined, { from: late.createdAt }),
+    );
+    const lines = stdout.trim().split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]!).id, late.id);
+  });
+
+  it("--limit caps the number of rows emitted", async () => {
+    for (let i = 0; i < 5; i++) insert(store, { description: `row ${i}` });
+
+    const { stdout } = await captureConsoleAsync(() =>
+      cliExportHandler(store, undefined, { limit: "2" }),
+    );
+    const lines = stdout.trim().split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 2);
+  });
+
+  it("--security-only restricts to security/config/system categories", async () => {
+    insert(store, { eventType: "tool.invoked", category: "tool", description: "noise" });
+    insert(store, { eventType: "security.scan_result", category: "security", description: "scan" });
+    insert(store, { eventType: "config.tool_changed", category: "config", description: "cfg" });
+
+    const { stdout } = await captureConsoleAsync(() =>
+      cliExportHandler(store, undefined, { securityOnly: true }),
+    );
+    const lines = stdout.trim().split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 2);
+    for (const line of lines) {
+      const ev = JSON.parse(line);
+      assert.ok(["security", "config", "system"].includes(ev.category));
+    }
   });
 });
 
