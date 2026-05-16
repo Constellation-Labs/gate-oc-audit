@@ -45,7 +45,11 @@ interface UiRig {
   destroy: () => Promise<void>;
 }
 
-async function createUiRig(opts: { deBaseUrl?: string } = {}): Promise<UiRig> {
+async function createUiRig(opts: {
+  deBaseUrl?: string;
+  isNonLoopback?: () => boolean;
+  allowExportOnNonLoopback?: boolean;
+} = {}): Promise<UiRig> {
   const dir = mkdtempSync(join(tmpdir(), "audit-ui-test-"));
   const dbPath = join(dir, "audit.db");
   const config = {
@@ -60,7 +64,11 @@ async function createUiRig(opts: { deBaseUrl?: string } = {}): Promise<UiRig> {
 
   const routes: RouteEntry[] = [];
   const api = { registerHttpRoute: (r: RouteEntry) => { routes.push(r); } };
-  registerAuditUiRoutes(api as never, store, smt, verifier, opts.deBaseUrl);
+  registerAuditUiRoutes(api as never, store, smt, verifier, {
+    deBaseUrl: opts.deBaseUrl,
+    isNonLoopback: opts.isNonLoopback,
+    allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
+  });
 
   // Longest path wins so /plugins/audit/api/ matches before /plugins/audit/.
   routes.sort((a, b) => b.path.length - a.path.length);
@@ -612,6 +620,146 @@ describe("ui: export endpoint", () => {
       assert.equal(res.status, 200);
       const rows = parseNdjson(await res.text());
       assert.equal(rows.length, 1500);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("neutralises CSV-formula payloads (=, +, -, @) by prefixing a single quote", async () => {
+    const local = await createUiRig();
+    try {
+      local.appendTracked(sampleInsert({ description: '=cmd|"/c calc"!A1' }));
+      local.appendTracked(sampleInsert({ description: "+1+1" }));
+      local.appendTracked(sampleInsert({ description: "-1234" }));
+      local.appendTracked(sampleInsert({ description: "@SUM(A1:A9)" }));
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=csv`);
+      const { headers, rows } = parseCsv(await res.text());
+      const descIdx = headers.indexOf("description");
+      assert.ok(descIdx >= 0);
+      assert.equal(rows.length, 4);
+      // parseCsv strips the RFC-4180 outer quotes, so the leading `'` we
+      // injected survives as the first character of the unquoted value.
+      for (const row of rows) {
+        assert.ok(row[descIdx]!.startsWith("'"), `expected leading apostrophe, got: ${row[descIdx]}`);
+      }
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("returns 403 when the gateway is non-loopback and no opt-in is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true });
+    try {
+      local.appendTracked(sampleInsert({ description: "secret" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 403);
+      const body = await res.json();
+      assert.match(body.error, /allowExportOnNonLoopback/);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the export when allowExportOnNonLoopback opts in even on a non-loopback bind", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      local.appendTracked(sampleInsert({ description: "shared" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("400s on non-ISO from/to (Date.parse-tolerated strings rejected)", async () => {
+    // `2020-1-1` (no zero-padding, no time, no TZ) is happily accepted by
+    // Date.parse but doesn't match the stored ISO timestamps lexicographically.
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&from=2020-1-1`);
+    assert.equal(res.status, 400);
+
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&to=Jan%201%202020`);
+    assert.equal(res2.status, 400);
+  });
+
+  it("HTTP limit query param caps the row count", async () => {
+    const local = await createUiRig();
+    try {
+      for (let i = 0; i < 25; i++) local.appendTracked(sampleInsert({ description: `r${i}` }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json&limit=7`);
+      const rows = parseNdjson(await res.text());
+      assert.equal(rows.length, 7);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("rejects non-integer / non-positive limit values", async () => {
+    const res1 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=0`);
+    assert.equal(res1.status, 400);
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=abc`);
+    assert.equal(res2.status, 400);
+    const res3 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=-5`);
+    assert.equal(res3.status, 400);
+  });
+
+  it("rows for events without a covering DE-anchored checkpoint emit anchor: null", async () => {
+    const local = await createUiRig();
+    try {
+      const ev = local.appendTracked(sampleInsert({ description: "anchor-pending" }));
+      // Insert a checkpoint without a DE tx hash — it must NOT appear as an anchor.
+      const root = local.smt.getRoot()?.root ?? "";
+      local.store.insertCheckpoint("cp-no-detx", ev.sequence, ev.sequence, root, 1, null);
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      const rows = parseNdjson<{ id: string; anchor: unknown }>(await res.text());
+      const found = rows.find((r) => r.id === ev.id)!;
+      assert.equal(found.anchor, null);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("category= and session= filters compose on the HTTP export", async () => {
+    const local = await createUiRig();
+    try {
+      const wantedSession = "sess-target";
+      const wanted = local.appendTracked(sampleInsert({
+        eventType: "tool.invoked", category: "tool", sessionId: wantedSession, description: "want",
+      }));
+      local.appendTracked(sampleInsert({ eventType: "tool.invoked", category: "tool", sessionId: "other", description: "wrong session" }));
+      local.appendTracked(sampleInsert({ eventType: "session.start", category: "agent", sessionId: wantedSession, description: "wrong category" }));
+
+      const res = await fetch(
+        `${local.baseUrl}/plugins/audit/api/export?format=json&category=tool&session=${wantedSession}`,
+      );
+      const rows = parseNdjson<{ id: string }>(await res.text());
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.id, wanted.id);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("findAnchor returns an earlier wider anchor when a later narrow anchor doesn't cover the row", async () => {
+    // Simulate the overlap shape the de-anchor allocator doesn't produce
+    // today but a future backfill could. cp-wide covers 1..100; cp-narrow
+    // re-anchors row 50 only. Row 75 must still resolve to cp-wide.
+    const local = await createUiRig();
+    try {
+      // Append 100 rows so sequences 1..100 exist.
+      const evs = Array.from({ length: 100 }, (_, i) => local.appendTracked(sampleInsert({ description: `r${i}` })));
+      const root = local.smt.getRoot()?.root ?? "";
+      local.store.insertCheckpoint("cp-wide", 1, 100, root, 100, "0xwide");
+      local.store.insertCheckpoint("cp-narrow", 50, 50, root, 1, "0xnarrow");
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      const rows = parseNdjson<{ id: string; anchor: { checkpointId: string } | null }>(await res.text());
+      const row75 = rows.find((r) => r.id === evs[74]!.id)!;
+      assert.equal(row75.anchor?.checkpointId, "cp-wide");
+      const row50 = rows.find((r) => r.id === evs[49]!.id)!;
+      // cp-narrow is the rightmost candidate AND it covers row 50, so it wins.
+      assert.equal(row50.anchor?.checkpointId, "cp-narrow");
     } finally {
       await local.destroy();
     }

@@ -428,7 +428,21 @@ openclaw audit export --security-only                    # security / config / s
 openclaw audit export --include-content                  # include decompressed content column / field
 ```
 
-Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, `anchor.sequenceStart`, `anchor.sequenceEnd`, `anchor.createdAt`) for the checkpoint covering its sequence, or `null` when no DE-anchored checkpoint covers it yet. Output is streamed in fixed-size batches, so large exports don't materialise in memory. The same shape is available over HTTP at `GET /plugins/audit/api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=`.
+Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, `anchor.sequenceStart`, `anchor.sequenceEnd`, `anchor.createdAt`) for the checkpoint covering its sequence, or `null` when no DE-anchored checkpoint covers it yet. Output is streamed in fixed-size batches via a sequence cursor, so retention pruning during the export can't shift the window and silently drop rows. The same shape is available over HTTP at `GET /plugins/audit/api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=`.
+
+> **`--include-content` and redaction.** `redactPromptText` rewrites prompt / message content to `sha256:<hex>` before insert, and `redactToolArgs` does the same for tool-call arguments. Neither switch covers `tool.result` content (tool stdout / stderr / output bodies). If you set both flags and run `audit export --include-content`, the prompt and message bodies are hashed but tool outputs are still emitted verbatim. Operators that need a fully redacted export should either (a) skip `--include-content`, or (b) filter `--category` away from `tool` events.
+
+> **HTTP endpoint and loopback.** `GET /plugins/audit/api/export` is unauthenticated; the plugin relies on the gateway being bound to loopback (`gateway.bind: "loopback"`, the default) for safety. When the gateway binds beyond loopback the export route returns `403` unless you explicitly opt in:
+>
+> ```bash
+> openclaw config set plugins.entries.constellation-audit-plugin.config.allowExportOnNonLoopback true
+> ```
+>
+> ```json
+> { "config": { "allowExportOnNonLoopback": true } }
+> ```
+>
+> The CLI (`openclaw audit export …`) is unaffected — it reads the local DB directly and doesn't traverse the HTTP gate.
 
 ### SMT operations
 

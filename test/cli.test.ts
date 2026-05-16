@@ -272,6 +272,18 @@ describe("CLI: audit export", () => {
     assert.equal(lines.length, 2);
   });
 
+  it("rejects --limit 0 and non-numeric --limit", async () => {
+    insert(store, { description: "ev1" });
+    await assert.rejects(
+      () => cliExportHandler(store, undefined, { limit: "0" }),
+      /positive integer/,
+    );
+    await assert.rejects(
+      () => cliExportHandler(store, undefined, { limit: "abc" }),
+      /positive integer/,
+    );
+  });
+
   it("--security-only restricts to security/config/system categories", async () => {
     insert(store, { eventType: "tool.invoked", category: "tool", description: "noise" });
     insert(store, { eventType: "security.scan_result", category: "security", description: "scan" });

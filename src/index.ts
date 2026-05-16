@@ -539,7 +539,11 @@ export default (() => {
                     : "mainnet";
                 return resolveExplorerBaseUrl(env);
             })();
-            registerAuditUiRoutes(api, activeStore, activeSmt, verifier, deExplorerBaseUrl);
+            registerAuditUiRoutes(api, activeStore, activeSmt, verifier, {
+                deBaseUrl: deExplorerBaseUrl,
+                isNonLoopback: () => resolveGatewayBaseUrl().nonLoopback,
+                allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
+            });
 
             api.registerService({
                 id: "constellation-audit-plugin:ui-server",

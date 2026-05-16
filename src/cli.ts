@@ -171,7 +171,16 @@ export async function cliVerifyHandler(
 
 export async function cliExportHandler(store: AuditStore, format?: string, opts: AuditExportOptions = {}): Promise<void> {
   const fmt: ExportFormat = format === "csv" ? "csv" : "json";
-  const limitRows = opts.limit ? parseInt(opts.limit, 10) || undefined : undefined;
+  // `parseInt(...) || undefined` would collapse a legitimate `--limit 0`
+  // (and `--limit abc`) into "no cap". Be strict instead.
+  let limitRows: number | undefined;
+  if (opts.limit !== undefined) {
+    const n = Number(opts.limit);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`--limit must be a positive integer (got "${opts.limit}")`);
+    }
+    limitRows = n;
+  }
 
   // process.stdout in a TTY is line-buffered and synchronous; piped to a file
   // it can return false. The drain await handles both cases uniformly.
