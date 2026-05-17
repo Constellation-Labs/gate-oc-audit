@@ -831,8 +831,8 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.ok(none.stdout.includes("No audit events"));
   });
 
-  it("audit export — emits JSON lines and CSV", () => {
-    const json = captureConsole(() => cliExportHandler(rig.store, "json", {}));
+  it("audit export — emits JSON lines and CSV", async () => {
+    const json = await captureConsoleAsync(() => cliExportHandler(rig.store, "json", {}));
     const lines = json.stdout.split("\n").filter(Boolean);
     assert.equal(lines.length, 5);
     for (const line of lines) {
@@ -842,12 +842,12 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
       assert.equal(parsed.sessionId, sessionId);
     }
 
-    const csv = captureConsole(() => cliExportHandler(rig.store, "csv", {}));
+    const csv = await captureConsoleAsync(() => cliExportHandler(rig.store, "csv", {}));
     const [header, ...rows] = csv.stdout.split("\n");
     assert.ok(header.split(",").includes("eventType"));
     assert.equal(rows.length, 5);
 
-    const withContent = captureConsole(() =>
+    const withContent = await captureConsoleAsync(() =>
       cliExportHandler(rig.store, "json", { includeContent: true }),
     );
     const received = withContent.stdout

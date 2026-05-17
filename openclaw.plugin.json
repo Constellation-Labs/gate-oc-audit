@@ -139,6 +139,10 @@
       "gatewayEnabled": {
         "type": "boolean",
         "description": "Explicit on/off switch for gateway publishing. Defaults to true when gatewayUrl + gatewayApiKey are both set; the only way to disable when both are present is gatewayEnabled: false (literal boolean — string \"false\" is ignored with a warning)."
+      },
+      "allowExportOnNonLoopback": {
+        "type": "boolean",
+        "description": "Opt-in to keep GET /plugins/audit/api/export available when the gateway binds beyond loopback. Default false. The export streams raw audit events (with content when ?includeContent=true) and is unauthenticated; on a non-loopback bind it would be reachable by anything that can reach the gateway port."
       }
     },
     "additionalProperties": false

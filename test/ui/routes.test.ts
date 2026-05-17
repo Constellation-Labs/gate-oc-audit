@@ -45,7 +45,11 @@ interface UiRig {
   destroy: () => Promise<void>;
 }
 
-async function createUiRig(opts: { deBaseUrl?: string } = {}): Promise<UiRig> {
+async function createUiRig(opts: {
+  deBaseUrl?: string;
+  isNonLoopback?: () => boolean;
+  allowExportOnNonLoopback?: boolean;
+} = {}): Promise<UiRig> {
   const dir = mkdtempSync(join(tmpdir(), "audit-ui-test-"));
   const dbPath = join(dir, "audit.db");
   const config = {
@@ -60,7 +64,11 @@ async function createUiRig(opts: { deBaseUrl?: string } = {}): Promise<UiRig> {
 
   const routes: RouteEntry[] = [];
   const api = { registerHttpRoute: (r: RouteEntry) => { routes.push(r); } };
-  registerAuditUiRoutes(api as never, store, smt, verifier, opts.deBaseUrl);
+  registerAuditUiRoutes(api as never, store, smt, verifier, {
+    deBaseUrl: opts.deBaseUrl,
+    isNonLoopback: opts.isNonLoopback,
+    allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
+  });
 
   // Longest path wins so /plugins/audit/api/ matches before /plugins/audit/.
   routes.sort((a, b) => b.path.length - a.path.length);
@@ -423,6 +431,337 @@ describe("verifier: chain replay result states", () => {
     assert.equal(result.status, "mismatch-at-interval");
     if (result.status === "mismatch-at-interval") {
       assert.equal(result.mismatchAt.reason, "root-mismatch");
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tier 3 — export endpoint (AG-102)
+// ───────────────────────────────────────────────────────────────────────────
+
+function parseNdjson<T = unknown>(body: string): T[] {
+  return body
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as T);
+}
+
+function parseCsv(body: string): { headers: string[]; rows: string[][] } {
+  const out: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (inQuotes) {
+      if (c === '"' && body[i + 1] === '"') { field += '"'; i++; continue; }
+      if (c === '"') { inQuotes = false; continue; }
+      field += c;
+      continue;
+    }
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { row.push(field); field = ""; continue; }
+    if (c === "\n") { row.push(field); out.push(row); row = []; field = ""; continue; }
+    field += c;
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); out.push(row); }
+  const headers = out[0] ?? [];
+  return { headers, rows: out.slice(1) };
+}
+
+describe("ui: export endpoint", () => {
+  let rig: UiRig;
+  before(async () => { rig = await createUiRig(); });
+  after(async () => { await rig.destroy(); });
+
+  it("rejects invalid format", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=xml`);
+    assert.equal(res.status, 400);
+  });
+
+  it("rejects non-ISO 8601 from/to", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?from=yesterday`);
+    assert.equal(res.status, 400);
+  });
+
+  it("JSON format streams NDJSON with one event per line plus an anchor field", async () => {
+    const a = rig.appendTracked(sampleInsert({ description: "first" }));
+    const b = rig.appendTracked(sampleInsert({ description: "second" }));
+    // Anchor the first event only.
+    const root = rig.smt.getRoot()?.root ?? "";
+    rig.store.insertCheckpoint("cp-export-1", a.sequence, a.sequence, root, 1, "0xanchor-a");
+
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /application\/x-ndjson/);
+    assert.match(res.headers.get("content-disposition") ?? "", /attachment; filename="audit-export-.+\.ndjson"/);
+
+    const rows = parseNdjson<{ id: string; anchor: unknown }>(await res.text());
+    assert.equal(rows.length, 2);
+    const rowA = rows.find((r) => r.id === a.id)!;
+    const rowB = rows.find((r) => r.id === b.id)!;
+    assert.ok(rowA.anchor, "anchored event should carry an anchor object");
+    assert.equal((rowA.anchor as { deTxHash: string }).deTxHash, "0xanchor-a");
+    assert.equal(rowB.anchor, null, "unanchored event should have anchor: null");
+  });
+
+  it("CSV format has a stable header row and the same row count as NDJSON", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=csv`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/csv/);
+    assert.match(res.headers.get("content-disposition") ?? "", /attachment; filename="audit-export-.+\.csv"/);
+
+    const { headers, rows } = parseCsv(await res.text());
+    // Stable prefix the dashboard / spreadsheet template depends on.
+    assert.deepEqual(headers.slice(0, 6), ["id", "sequence", "source", "machineId", "sessionId", "orgId"]);
+    assert.ok(headers.includes("anchor_de_tx_hash"));
+    assert.ok(headers.includes("metadata_json"));
+    // Header column ordering is the same in every export.
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=csv`);
+    const second = parseCsv(await res2.text());
+    assert.deepEqual(second.headers, headers);
+    assert.equal(rows.length, 2);
+  });
+
+  it("escapes CSV fields containing commas / quotes / newlines", async () => {
+    // Build a fresh rig so the escape-prone row is the only row in the export.
+    const local = await createUiRig();
+    try {
+      local.appendTracked(sampleInsert({
+        description: 'has, "commas" and\nnewline',
+      }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=csv`);
+      const body = await res.text();
+      const { headers, rows } = parseCsv(body);
+      const descIdx = headers.indexOf("description");
+      assert.ok(descIdx >= 0);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]![descIdx], 'has, "commas" and\nnewline');
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("time-range filter limits the export to events in [from, to]", async () => {
+    const local = await createUiRig();
+    try {
+      const beforeCutoff = local.appendTracked(sampleInsert({ description: "early" }));
+      // SQLite's createdAt has millisecond resolution but inserts in the same
+      // tick can land on the same ms. Wait a beat so `afterCutoff` has a
+      // strictly-greater timestamp than `beforeCutoff`.
+      await new Promise((r) => setTimeout(r, 20));
+      const afterCutoff = local.appendTracked(sampleInsert({ description: "late" }));
+      assert.ok(afterCutoff.createdAt > beforeCutoff.createdAt, "afterCutoff must have a later timestamp");
+
+      // from is inclusive: at the second event's exact timestamp, only the
+      // second event should be in range.
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json&from=${encodeURIComponent(afterCutoff.createdAt)}`);
+      const rows = parseNdjson<{ id: string }>(await res.text());
+      const ids = rows.map((r) => r.id);
+      assert.ok(!ids.includes(beforeCutoff.id), "early event should be excluded by from filter");
+      assert.ok(ids.includes(afterCutoff.id), "late event should be included");
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("securityOnly=true restricts to security/config/system categories", async () => {
+    const local = await createUiRig();
+    try {
+      const securityEv = local.appendTracked(sampleInsert({ eventType: "security.scan_result", category: "security", description: "scan" }));
+      const configEv = local.appendTracked(sampleInsert({ eventType: "config.tool_changed", category: "config", description: "config touch" }));
+      const systemEv = local.appendTracked(sampleInsert({ eventType: "system.install", category: "system", description: "install" }));
+      const noiseEv = local.appendTracked(sampleInsert({ eventType: "tool.invoked", category: "tool", description: "noise" }));
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json&securityOnly=true`);
+      const rows = parseNdjson<{ id: string; category: string }>(await res.text());
+      const ids = new Set(rows.map((r) => r.id));
+      assert.ok(ids.has(securityEv.id));
+      assert.ok(ids.has(configEv.id));
+      assert.ok(ids.has(systemEv.id));
+      assert.ok(!ids.has(noiseEv.id), "tool-category events excluded under securityOnly");
+      for (const r of rows) {
+        assert.ok(["security", "config", "system"].includes(r.category));
+      }
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("includeContent=true emits a content column / field; default omits it", async () => {
+    const local = await createUiRig();
+    try {
+      local.appendTracked(sampleInsert({ description: "with content", content: "secret payload" }));
+
+      const without = await (await fetch(`${local.baseUrl}/plugins/audit/api/export?format=csv`)).text();
+      const { headers: h1 } = parseCsv(without);
+      assert.ok(!h1.includes("content"), "content column omitted by default");
+
+      const withContent = await (await fetch(`${local.baseUrl}/plugins/audit/api/export?format=csv&includeContent=true`)).text();
+      const { headers: h2, rows } = parseCsv(withContent);
+      assert.ok(h2.includes("content"));
+      const idx = h2.indexOf("content");
+      assert.equal(rows[0]![idx], "secret payload");
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("streams a larger batch beyond a single page without crashing", async () => {
+    // Two batches' worth (BATCH_SIZE=1000 in export.ts). Smoke test that the
+    // pagination loop terminates and the wire format stays well-formed for
+    // exports that don't fit in a single store.query page.
+    const local = await createUiRig();
+    try {
+      for (let i = 0; i < 1500; i++) {
+        local.appendTracked(sampleInsert({ description: `row ${i}` }));
+      }
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 200);
+      const rows = parseNdjson(await res.text());
+      assert.equal(rows.length, 1500);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("neutralises CSV-formula payloads (=, +, -, @) by prefixing a single quote", async () => {
+    const local = await createUiRig();
+    try {
+      local.appendTracked(sampleInsert({ description: '=cmd|"/c calc"!A1' }));
+      local.appendTracked(sampleInsert({ description: "+1+1" }));
+      local.appendTracked(sampleInsert({ description: "-1234" }));
+      local.appendTracked(sampleInsert({ description: "@SUM(A1:A9)" }));
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=csv`);
+      const { headers, rows } = parseCsv(await res.text());
+      const descIdx = headers.indexOf("description");
+      assert.ok(descIdx >= 0);
+      assert.equal(rows.length, 4);
+      // parseCsv strips the RFC-4180 outer quotes, so the leading `'` we
+      // injected survives as the first character of the unquoted value.
+      for (const row of rows) {
+        assert.ok(row[descIdx]!.startsWith("'"), `expected leading apostrophe, got: ${row[descIdx]}`);
+      }
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("returns 403 when the gateway is non-loopback and no opt-in is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true });
+    try {
+      local.appendTracked(sampleInsert({ description: "secret" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 403);
+      const body = await res.json();
+      assert.match(body.error, /allowExportOnNonLoopback/);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the export when allowExportOnNonLoopback opts in even on a non-loopback bind", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      local.appendTracked(sampleInsert({ description: "shared" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("400s on non-ISO from/to (Date.parse-tolerated strings rejected)", async () => {
+    // `2020-1-1` (no zero-padding, no time, no TZ) is happily accepted by
+    // Date.parse but doesn't match the stored ISO timestamps lexicographically.
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&from=2020-1-1`);
+    assert.equal(res.status, 400);
+
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&to=Jan%201%202020`);
+    assert.equal(res2.status, 400);
+  });
+
+  it("HTTP limit query param caps the row count", async () => {
+    const local = await createUiRig();
+    try {
+      for (let i = 0; i < 25; i++) local.appendTracked(sampleInsert({ description: `r${i}` }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json&limit=7`);
+      const rows = parseNdjson(await res.text());
+      assert.equal(rows.length, 7);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("rejects non-integer / non-positive limit values", async () => {
+    const res1 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=0`);
+    assert.equal(res1.status, 400);
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=abc`);
+    assert.equal(res2.status, 400);
+    const res3 = await fetch(`${rig.baseUrl}/plugins/audit/api/export?format=json&limit=-5`);
+    assert.equal(res3.status, 400);
+  });
+
+  it("rows for events without a covering DE-anchored checkpoint emit anchor: null", async () => {
+    const local = await createUiRig();
+    try {
+      const ev = local.appendTracked(sampleInsert({ description: "anchor-pending" }));
+      // Insert a checkpoint without a DE tx hash — it must NOT appear as an anchor.
+      const root = local.smt.getRoot()?.root ?? "";
+      local.store.insertCheckpoint("cp-no-detx", ev.sequence, ev.sequence, root, 1, null);
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      const rows = parseNdjson<{ id: string; anchor: unknown }>(await res.text());
+      const found = rows.find((r) => r.id === ev.id)!;
+      assert.equal(found.anchor, null);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("category= and session= filters compose on the HTTP export", async () => {
+    const local = await createUiRig();
+    try {
+      const wantedSession = "sess-target";
+      const wanted = local.appendTracked(sampleInsert({
+        eventType: "tool.invoked", category: "tool", sessionId: wantedSession, description: "want",
+      }));
+      local.appendTracked(sampleInsert({ eventType: "tool.invoked", category: "tool", sessionId: "other", description: "wrong session" }));
+      local.appendTracked(sampleInsert({ eventType: "session.start", category: "agent", sessionId: wantedSession, description: "wrong category" }));
+
+      const res = await fetch(
+        `${local.baseUrl}/plugins/audit/api/export?format=json&category=tool&session=${wantedSession}`,
+      );
+      const rows = parseNdjson<{ id: string }>(await res.text());
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.id, wanted.id);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("findAnchor returns an earlier wider anchor when a later narrow anchor doesn't cover the row", async () => {
+    // Simulate the overlap shape the de-anchor allocator doesn't produce
+    // today but a future backfill could. cp-wide covers 1..100; cp-narrow
+    // re-anchors row 50 only. Row 75 must still resolve to cp-wide.
+    const local = await createUiRig();
+    try {
+      // Append 100 rows so sequences 1..100 exist.
+      const evs = Array.from({ length: 100 }, (_, i) => local.appendTracked(sampleInsert({ description: `r${i}` })));
+      const root = local.smt.getRoot()?.root ?? "";
+      local.store.insertCheckpoint("cp-wide", 1, 100, root, 100, "0xwide");
+      local.store.insertCheckpoint("cp-narrow", 50, 50, root, 1, "0xnarrow");
+
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      const rows = parseNdjson<{ id: string; anchor: { checkpointId: string } | null }>(await res.text());
+      const row75 = rows.find((r) => r.id === evs[74]!.id)!;
+      assert.equal(row75.anchor?.checkpointId, "cp-wide");
+      const row50 = rows.find((r) => r.id === evs[49]!.id)!;
+      // cp-narrow is the rightmost candidate AND it covers row 50, so it wins.
+      assert.equal(row50.anchor?.checkpointId, "cp-narrow");
+    } finally {
+      await local.destroy();
     }
   });
 });

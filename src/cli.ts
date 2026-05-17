@@ -3,6 +3,7 @@ import type { AuditEvent } from "./types/events.js";
 import type { NotificationService } from "./services/notifications.js";
 import type { SmtService } from "./services/smt-service.js";
 import { resolveAuditUiUrl } from "./util/gateway-url.js";
+import { streamExport, type ExportFormat } from "./ui/export.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -28,6 +29,9 @@ export interface AuditExportOptions {
   category?: string;
   session?: string;
   limit?: string;
+  from?: string;
+  to?: string;
+  securityOnly?: boolean;
   includeContent?: boolean;
 }
 
@@ -36,37 +40,6 @@ function formatEvent(event: AuditEvent): string {
   const session = event.sessionId ? ` [${event.sessionId.slice(0, 8)}]` : "";
   const preview = event.content ? `\n    ${event.content.slice(0, CONTENT_PREVIEW_LENGTH)}` : "";
   return `#${event.sequence} ${time}${session} ${event.eventType} — ${event.description}${preview}`;
-}
-
-function toJsonLines(events: AuditEvent[]): string {
-  return events.map((e) => JSON.stringify(e)).join("\n");
-}
-
-function toCsv(events: AuditEvent[], includeContent?: boolean): string {
-  const headers = [
-    "id",
-    "sequence",
-    "source",
-    "machineId",
-    "sessionId",
-    "eventType",
-    "category",
-    "description",
-    "metadata",
-    "createdAt",
-    ...(includeContent ? ["content"] as const : []),
-  ];
-  const rows = events.map((e) =>
-    headers.map((h) => {
-      let val = e[h as keyof AuditEvent];
-      if (h === "metadata") val = JSON.stringify(val);
-      const str = val === undefined || val === null ? "" : String(val);
-      return str.includes(",") || str.includes('"') || str.includes("\n")
-        ? `"${str.replace(/"/g, '""')}"`
-        : str;
-    }).join(","),
-  );
-  return [headers.join(","), ...rows].join("\n");
 }
 
 function buildQueryOpts(opts: { type?: string; category?: string; session?: string; limit?: string }): QueryOptions {
@@ -196,19 +169,37 @@ export async function cliVerifyHandler(
   }
 }
 
-export function cliExportHandler(store: AuditStore, format?: string, opts: AuditExportOptions = {}): void {
-  const q = buildQueryOpts(opts);
-  if (!q.limit) q.limit = 10_000;
-  if (opts.includeContent) q.includeContent = true;
-
-  const events = store.query(q).reverse();
-  const fmt = format ?? "json";
-
-  if (fmt === "csv") {
-    outLine(toCsv(events, opts.includeContent));
-  } else {
-    outLine(toJsonLines(events));
+export async function cliExportHandler(store: AuditStore, format?: string, opts: AuditExportOptions = {}): Promise<void> {
+  const fmt: ExportFormat = format === "csv" ? "csv" : "json";
+  // `parseInt(...) || undefined` would collapse a legitimate `--limit 0`
+  // (and `--limit abc`) into "no cap". Be strict instead.
+  let limitRows: number | undefined;
+  if (opts.limit !== undefined) {
+    const n = Number(opts.limit);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`--limit must be a positive integer (got "${opts.limit}")`);
+    }
+    limitRows = n;
   }
+
+  // process.stdout in a TTY is line-buffered and synchronous; piped to a file
+  // it can return false. The drain await handles both cases uniformly.
+  await streamExport({
+    store,
+    format: fmt,
+    limitRows,
+    filters: {
+      from: opts.from,
+      to: opts.to,
+      eventType: opts.type,
+      category: opts.category,
+      sessionId: opts.session,
+      securityOnly: opts.securityOnly === true,
+      includeContent: opts.includeContent === true,
+    },
+    write: (chunk) => process.stdout.write(chunk),
+    waitForDrain: () => new Promise<void>((resolve) => process.stdout.once("drain", resolve)),
+  });
 }
 
 export function cliAuditUiHandler(): void {

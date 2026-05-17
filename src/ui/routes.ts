@@ -14,6 +14,7 @@ import type { Verifier } from "../services/verifier.js";
 import type { SmtProof } from "../store/smt-store.js";
 import type { AuditEvent } from "../types/events.js";
 import { serveStaticFile } from "../util/asset-server.js";
+import { pipeExportToResponse, type ExportFilters, type ExportFormat } from "./export.js";
 import { log } from "../util/logger.js";
 
 const ROUTE_BASE = "/plugins/audit";
@@ -31,7 +32,37 @@ interface AuditUiContext {
   smtService: SmtService;
   verifier: Verifier;
   deBaseUrl?: string;
+  /**
+   * Predicate evaluated at request time so the gate reflects the live
+   * gateway bind setting, not the value at plugin-registration time.
+   */
+  isNonLoopback: () => boolean;
+  /**
+   * Operator opt-in to keep /api/export enabled when the gateway binds
+   * beyond loopback. Off by default — the export is the highest-blast-
+   * radius endpoint in this plugin (raw conversation content) and the
+   * existing UI routes are documented as relying on loopback for safety.
+   */
+  allowExportOnNonLoopback: boolean;
 }
+
+/**
+ * Strict ISO 8601 — `2026-05-16T12:34:56(.789)?(Z|±HH:MM|±HHMM)`. Reject
+ * anything Date.parse would silently accept (`"2020-1-1"`, `"Jan 1 2020"`,
+ * `"01/01/2020"`) so a malformed input produces a 400 instead of a
+ * silently wrong-range export.
+ */
+const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * Bound the number of /api/export requests in flight. A single export
+ * holds a SQLite reader (preventing WAL checkpoint truncation) plus
+ * gunzip + serialisation on the event loop, so a handful of parallel
+ * exports can DoS the plugin even on loopback.
+ */
+const MAX_CONCURRENT_EXPORTS = 2;
+const EXPORT_LIMIT_HARD_CAP = 10_000_000;
+let inFlightExports = 0;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
@@ -297,12 +328,70 @@ async function handleApi(
       sendError(res, 400, "from and to (ISO 8601) are required");
       return true;
     }
-    if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) {
+    if (!ISO_8601_RE.test(from) || !ISO_8601_RE.test(to)) {
       sendError(res, 400, "from and to must be ISO 8601 timestamps");
       return true;
     }
     const result = ctx.verifier.verifyRange({ from, to });
     sendJson(res, 200, result);
+    return true;
+  }
+
+  // GET /api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=
+  if (apiPath === "export" && req.method === "GET") {
+    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit export is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    if (inFlightExports >= MAX_CONCURRENT_EXPORTS) {
+      res.setHeader("retry-after", "10");
+      sendError(res, 503, `at most ${MAX_CONCURRENT_EXPORTS} concurrent exports allowed`);
+      return true;
+    }
+    const formatParam = (url.searchParams.get("format") ?? "json").toLowerCase();
+    if (formatParam !== "json" && formatParam !== "csv") {
+      sendError(res, 400, "format must be 'json' or 'csv'");
+      return true;
+    }
+    const format: ExportFormat = formatParam;
+    const from = url.searchParams.get("from") ?? undefined;
+    const to = url.searchParams.get("to") ?? undefined;
+    for (const [name, value] of [["from", from], ["to", to]] as const) {
+      if (value !== undefined && !ISO_8601_RE.test(value)) {
+        sendError(res, 400, `${name} must be an ISO 8601 timestamp`);
+        return true;
+      }
+    }
+    const limitParam = url.searchParams.get("limit");
+    let limitRows: number | undefined;
+    if (limitParam !== null) {
+      const n = Number(limitParam);
+      if (!Number.isInteger(n) || n <= 0) {
+        sendError(res, 400, "limit must be a positive integer");
+        return true;
+      }
+      limitRows = Math.min(n, EXPORT_LIMIT_HARD_CAP);
+    }
+    const filters: ExportFilters = {
+      from,
+      to,
+      eventType: url.searchParams.get("type") ?? undefined,
+      category: url.searchParams.get("category") ?? undefined,
+      sessionId: url.searchParams.get("session") ?? undefined,
+      securityOnly: url.searchParams.get("securityOnly") === "true",
+      includeContent: url.searchParams.get("includeContent") === "true",
+    };
+    inFlightExports++;
+    try {
+      await pipeExportToResponse(res, { store: ctx.store, filters, format, limitRows });
+    } finally {
+      inFlightExports--;
+    }
     return true;
   }
 
@@ -346,14 +435,31 @@ interface RegisterArgs {
   }) => void;
 }
 
+export interface AuditUiOptions {
+  deBaseUrl?: string;
+  /** Resolves the live non-loopback bind status. Evaluated at request time. */
+  isNonLoopback?: () => boolean;
+  /** Operator opt-in to keep /api/export available when bound beyond loopback. */
+  allowExportOnNonLoopback?: boolean;
+}
+
 export function registerAuditUiRoutes(
   api: RegisterArgs,
   store: AuditStore,
   smtService: SmtService,
   verifier: Verifier,
-  deBaseUrl?: string,
+  options: AuditUiOptions | string = {},
 ): void {
-  const ctx: AuditUiContext = { store, smtService, verifier, deBaseUrl };
+  // Back-compat overload: the previous signature took deBaseUrl as a string.
+  const opts: AuditUiOptions = typeof options === "string" ? { deBaseUrl: options } : options;
+  const ctx: AuditUiContext = {
+    store,
+    smtService,
+    verifier,
+    deBaseUrl: opts.deBaseUrl,
+    isNonLoopback: opts.isNonLoopback ?? (() => false),
+    allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
+  };
 
   api.registerHttpRoute({
     path: API_BASE,

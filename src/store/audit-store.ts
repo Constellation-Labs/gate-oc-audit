@@ -30,9 +30,14 @@ export interface QueryOptions {
   offset?: number;
   eventType?: string;
   category?: string;
+  categoryIn?: ReadonlyArray<string>;
   sessionId?: string;
   /** Only return events with sequence > this value. */
   afterSequence?: number;
+  /** ISO 8601 lower bound (inclusive) compared against created_at. */
+  createdAfter?: string;
+  /** ISO 8601 upper bound (inclusive) compared against created_at. */
+  createdBefore?: string;
   order?: "asc" | "desc";
   /** When true, decompress content_gz and populate event.content. Default: false. */
   includeContent?: boolean;
@@ -460,6 +465,27 @@ export class AuditStore {
     if (opts.afterSequence !== undefined) {
       conditions.push("sequence > @afterSequence");
       params.afterSequence = opts.afterSequence;
+    }
+    if (opts.createdAfter !== undefined) {
+      conditions.push("created_at >= @createdAfter");
+      params.createdAfter = opts.createdAfter;
+    }
+    if (opts.createdBefore !== undefined) {
+      conditions.push("created_at <= @createdBefore");
+      params.createdBefore = opts.createdBefore;
+    }
+    // IN filters: bind each value to a numbered param so prepared statements
+    // stay parameterised. Empty arrays produce a non-matching `1 = 0` so the
+    // caller's "filter to nothing" intent is preserved (rather than silently
+    // dropping the constraint).
+    if (opts.categoryIn) {
+      if (opts.categoryIn.length === 0) {
+        conditions.push("1 = 0");
+      } else {
+        const placeholders = opts.categoryIn.map((_, i) => `@categoryIn${i}`);
+        conditions.push(`category IN (${placeholders.join(", ")})`);
+        opts.categoryIn.forEach((v, i) => { params[`categoryIn${i}`] = v; });
+      }
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
