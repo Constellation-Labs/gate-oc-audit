@@ -7,7 +7,7 @@ import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
-import {createGatewayPublisher, drainForShutdown, selectAnchorCovering} from "./services/gateway-publisher.js";
+import {createGatewayPublisher, drainForShutdown, selectAnchorCovering, GATEWAY_HEALTH_NAME} from "./services/gateway-publisher.js";
 import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
@@ -446,6 +446,14 @@ export default (() => {
                 }),
                 latestAnchoredCheckpoint: (maxSequence) =>
                     selectAnchorCovering(activeStore.getCheckpoints(), maxSequence),
+                onHealthUpdate: (h) => {
+                    try {
+                        activeStore.upsertServiceHealth(GATEWAY_HEALTH_NAME, h);
+                    } catch (err) {
+                        const msg = err instanceof Error ? err.message : "Unknown error";
+                        log.warn(`gateway service_health upsert failed: ${msg}`);
+                    }
+                },
             });
             limiter.setGatewayPublisher(gatewayPublisher);
 

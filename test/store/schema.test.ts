@@ -95,7 +95,13 @@ describe("initializeSchema", () => {
       .all() as { name: string }[];
 
     const names = tables.map((t) => t.name);
-    for (const expected of ["audit_events", "config_manifests", "integrity_checkpoints", "checkpoint_archive"]) {
+    for (const expected of [
+      "audit_events",
+      "config_manifests",
+      "integrity_checkpoints",
+      "checkpoint_archive",
+      "service_health",
+    ]) {
       assert.ok(names.includes(expected), `Missing table: ${expected}`);
     }
   });
@@ -118,6 +124,8 @@ describe("initializeSchema", () => {
       "idx_events_machine",
       "idx_events_user",
       "idx_events_org",
+      "idx_events_type_created",
+      "idx_events_category_created",
     ]) {
       assert.ok(names.includes(expected), `Missing index: ${expected}`);
     }
@@ -203,9 +211,9 @@ describe("migrateAuditEventsToV4", () => {
     const newRow = db.prepare("SELECT sequence FROM audit_events WHERE id = 'id-4'").get() as { sequence: number };
     assert.equal(newRow.sequence, 4);
 
-    // schema_version is bumped to 4.
+    // schema_version is bumped to the current version.
     const versionRow = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number };
-    assert.equal(versionRow.v, 4);
+    assert.equal(versionRow.v, 5);
   });
 
   it("substitutes NULL for missing nullable columns (pre-v3 DB)", () => {
@@ -230,11 +238,11 @@ describe("migrateAuditEventsToV4", () => {
     db = new DatabaseSync(":memory:");
     initializeSchema(db);
 
-    // Re-initialization is a no-op — schema_version stays at 4 with exactly one row.
+    // Re-initialization is a no-op — schema_version stays at the current version with exactly one row.
     initializeSchema(db);
 
     const rows = db.prepare("SELECT version FROM schema_version ORDER BY version").all() as { version: number }[];
-    assert.deepEqual(rows.map((r) => r.version), [4]);
+    assert.deepEqual(rows.map((r) => r.version), [5]);
   });
 
   it("recreates indexes that were dropped with the old table", () => {
@@ -256,9 +264,39 @@ describe("migrateAuditEventsToV4", () => {
       "idx_events_machine",
       "idx_events_user",
       "idx_events_org",
+      "idx_events_type_created",
+      "idx_events_category_created",
     ]) {
       assert.ok(names.has(expected), `Missing index after migration: ${expected}`);
     }
+  });
+
+  it("migrates a v4 DB to v5 (adds compound indexes and service_health table)", () => {
+    db = new DatabaseSync(":memory:");
+    // Seed a v4 DB by running the v3→v4 migration then stamping schema_version.
+    seedLegacyDb(db, V3_AUDIT_EVENTS_DDL, 4, [{ id: "v4-1", sequence: 1, description: "v4 row" }]);
+
+    initializeSchema(db);
+
+    // v5 records exists alongside the prior v4 row.
+    const versions = db
+      .prepare("SELECT version FROM schema_version ORDER BY version")
+      .all() as { version: number }[];
+    assert.deepEqual(versions.map((r) => r.version), [4, 5]);
+
+    // Compound indexes present.
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='audit_events' AND name LIKE 'idx_%'")
+      .all() as { name: string }[];
+    const indexNames = new Set(indexes.map((i) => i.name));
+    assert.ok(indexNames.has("idx_events_type_created"));
+    assert.ok(indexNames.has("idx_events_category_created"));
+
+    // service_health table present.
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='service_health'")
+      .all() as { name: string }[];
+    assert.equal(tables.length, 1);
   });
 });
 

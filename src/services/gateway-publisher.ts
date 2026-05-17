@@ -20,6 +20,13 @@ const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_BASE_MS = 30 * 1000;
 const CIRCUIT_BREAKER_MAX_MS = 5 * 60 * 1000;
 const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
+/**
+ * Min interval between drop-path service_health emissions. A drop storm at
+ * thousands of events/sec must not translate into thousands of upserts/sec
+ * — the persisted snapshot can lag by up to this interval; the next flush
+ * success/failure (which are unthrottled) will refresh it sooner if active.
+ */
+const DROP_HEALTH_EMIT_MIN_MS = 1000;
 
 const INGEST_PATH = "/api/v1/audit/ingest";
 
@@ -49,6 +56,22 @@ type SendResult =
 const API_KEY_RE = /^[A-Za-z0-9!#$%&'*+\-./:=?^_`|~]+$/;
 const API_KEY_MAX_LEN = 1024;
 
+export interface GatewayHealth {
+  isActive: boolean;
+  /** Number of events currently buffered in memory awaiting POST. */
+  buffered: number;
+  /** Events dropped (buffer full) since the start of the current UTC day. */
+  droppedToday: number;
+  /** True when the breaker is currently open (failures threshold tripped and cooldown not elapsed). */
+  circuitOpen: boolean;
+  /** ISO timestamp of the most recent successful flush, or undefined if none this process. */
+  lastSuccessAt: string | undefined;
+  /** ISO timestamp of the most recent flush failure, or undefined if none this process. */
+  lastErrorAt: string | undefined;
+}
+
+export const GATEWAY_HEALTH_NAME = "gateway";
+
 export interface GatewayPublisher {
   isActive(): boolean;
   start(): Promise<void>;
@@ -63,6 +86,15 @@ export interface GatewayPublisher {
   isPaused(): boolean;
   /** Wall-clock deadline (ms) for the shutdown drain. */
   shutdownDeadlineMs(): number;
+  /**
+   * Runtime health snapshot for the local reporting layer (Local Reporting PRD R6).
+   */
+  health(): GatewayHealth;
+}
+
+/** UTC YYYY-MM-DD string, used as a daily-reset key for droppedToday. */
+function utcDayKey(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
 }
 
 class NoOpGatewayPublisher implements GatewayPublisher {
@@ -78,6 +110,16 @@ class NoOpGatewayPublisher implements GatewayPublisher {
   isCircuitOpen(): boolean { return false; }
   isPaused(): boolean { return false; }
   shutdownDeadlineMs(): number { return 0; }
+  health(): GatewayHealth {
+    return {
+      isActive: false,
+      buffered: 0,
+      droppedToday: 0,
+      circuitOpen: false,
+      lastSuccessAt: undefined,
+      lastErrorAt: undefined,
+    };
+  }
 }
 
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
@@ -280,6 +322,14 @@ export interface GatewayPublisherDeps {
    * them when the matching checkpoint arrives on a later batch.
    */
   latestAnchoredCheckpoint?: LatestAnchoredCheckpointFn;
+  /**
+   * Invoked after each transition that mutates the health snapshot (flush
+   * success/failure, drop, circuit open, rate-limit). Wired by index.ts to
+   * persist the snapshot to the audit store's `service_health` table so the
+   * out-of-process CLI can read it via its read-only DB handle.
+   * Must not throw; failures inside the callback are caller responsibility.
+   */
+  onHealthUpdate?(health: GatewayHealth): void;
 }
 
 interface ActiveConfig {
@@ -314,6 +364,18 @@ class ActiveGatewayPublisher implements GatewayPublisher {
   private rateLimitedUntil = 0;
   private dropped = 0;
   private nextDropMilestone = 1;
+  private lastSuccessAt: string | undefined;
+  private lastErrorAt: string | undefined;
+  private droppedToday = 0;
+  private droppedTodayDate: string = utcDayKey();
+  /**
+   * Wall-clock (ms) of the last drop-path health emission. Drop emissions are
+   * throttled to one per DROP_HEALTH_EMIT_MIN_MS so a sustained buffer-full
+   * incident doesn't translate into one service_health upsert per dropped
+   * event. Flush success/failure emit paths are naturally bounded by request
+   * cadence and bypass this throttle.
+   */
+  private lastDropHealthEmitMs = 0;
 
   constructor(cfg: ActiveConfig, deps: GatewayPublisherDeps = {}) {
     this.cfg = cfg;
@@ -331,6 +393,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       this.flushNow().catch(() => { /* errors logged inside */ });
     }, this.cfg.intervalMs);
     this.timer.unref();
+    this.emitHealth();
   }
 
   stop(): void {
@@ -343,6 +406,12 @@ class ActiveGatewayPublisher implements GatewayPublisher {
   notifyAppend(event: AuditEvent): void {
     if (this.buffer.length >= this.cfg.bufferCapacity) {
       this.dropped++;
+      this.bumpDroppedToday();
+      const now = Date.now();
+      if (now - this.lastDropHealthEmitMs >= DROP_HEALTH_EMIT_MIN_MS) {
+        this.lastDropHealthEmitMs = now;
+        this.emitHealth();
+      }
       if (this.dropped >= this.nextDropMilestone) {
         gatewayPublisherLog.warn(
           `Buffer full (${this.cfg.bufferCapacity}), dropped ${this.dropped} event(s) cumulatively`,
@@ -469,6 +538,8 @@ class ActiveGatewayPublisher implements GatewayPublisher {
         }
         this.consecutiveFailures = 0;
         this.circuitOpenCount = 0;
+        this.lastSuccessAt = new Date().toISOString();
+        this.emitHealth();
         return { requeue: [] };
       case "payloadTooLarge":
         if (batch.length === 1) {
@@ -691,6 +762,7 @@ class ActiveGatewayPublisher implements GatewayPublisher {
 
   private recordFailure(): void {
     this.consecutiveFailures++;
+    this.lastErrorAt = new Date().toISOString();
     if (this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
       const delayMs = Math.min(CIRCUIT_BREAKER_BASE_MS * 2 ** this.circuitOpenCount, CIRCUIT_BREAKER_MAX_MS);
       this.circuitOpenCount++;
@@ -698,6 +770,48 @@ class ActiveGatewayPublisher implements GatewayPublisher {
       gatewayPublisherLog.warn(
         `Circuit breaker open — will retry after ${delayMs / 1000}s`,
       );
+    }
+    this.emitHealth();
+  }
+
+  /**
+   * Reset droppedToday to 0 if the UTC date has rolled over since the counter
+   * was last touched. Called from both the drop path and from health()-on-read
+   * so an idle process across midnight still reports today's value.
+   */
+  private rolloverDroppedTodayIfNeeded(): void {
+    const today = utcDayKey();
+    if (today !== this.droppedTodayDate) {
+      this.droppedTodayDate = today;
+      this.droppedToday = 0;
+    }
+  }
+
+  private bumpDroppedToday(): void {
+    this.rolloverDroppedTodayIfNeeded();
+    this.droppedToday++;
+  }
+
+  health(): GatewayHealth {
+    this.rolloverDroppedTodayIfNeeded();
+    return {
+      isActive: true,
+      buffered: this.buffer.length,
+      droppedToday: this.droppedToday,
+      circuitOpen: this.isCircuitOpen(),
+      lastSuccessAt: this.lastSuccessAt,
+      lastErrorAt: this.lastErrorAt,
+    };
+  }
+
+  private emitHealth(): void {
+    const cb = this.deps.onHealthUpdate;
+    if (!cb) return;
+    try {
+      cb(this.health());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      gatewayPublisherLog.warn(`onHealthUpdate callback threw: ${msg}`);
     }
   }
 

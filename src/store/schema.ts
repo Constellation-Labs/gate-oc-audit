@@ -44,6 +44,8 @@ const DDL = [
   "CREATE INDEX IF NOT EXISTS idx_events_machine ON audit_events(machine_id)",
   "CREATE INDEX IF NOT EXISTS idx_events_user ON audit_events(user_id)",
   "CREATE INDEX IF NOT EXISTS idx_events_org ON audit_events(org_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_events_type_created ON audit_events(event_type, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_events_category_created ON audit_events(category, created_at)",
 
   `CREATE TABLE IF NOT EXISTS config_manifests (
     id            TEXT PRIMARY KEY,
@@ -78,9 +80,15 @@ const DDL = [
     version     INTEGER NOT NULL,
     applied_at  TEXT NOT NULL
   )`,
+
+  `CREATE TABLE IF NOT EXISTS service_health (
+    name        TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+  )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -187,6 +195,13 @@ export function initializeSchema(db: DatabaseSync): void {
         }
         backfillHashChain(db);
       }
+
+      // v5: Purely additive — two compound indexes on audit_events for daily
+      //     aggregates by event_type/category over a time window, plus a
+      //     service_health snapshot table so cross-process CLI readers can see
+      //     in-memory state of long-lived services (anchor, gateway, retention).
+      //     All CREATE … IF NOT EXISTS in the DDL above; no procedural body
+      //     needed beyond the version record.
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

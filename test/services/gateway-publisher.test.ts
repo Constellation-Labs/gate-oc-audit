@@ -965,4 +965,58 @@ describe("GatewayPublisher", () => {
     // failing second half (sequences 3-4) returns to the buffer.
     assert.equal(pub.bufferedCount(), 2, "only the failing second half should be requeued");
   });
+
+  describe("health() (R6)", () => {
+    it("NoOp publisher returns isActive=false with zeroed counters", () => {
+      const pub = createPub({});
+      assert.deepEqual(pub.health(), {
+        isActive: false,
+        buffered: 0,
+        droppedToday: 0,
+        circuitOpen: false,
+        lastSuccessAt: undefined,
+        lastErrorAt: undefined,
+      });
+    });
+
+    it("active publisher reports buffered+lastSuccessAt after a successful flush", async () => {
+      const updates: { isActive: boolean; lastSuccessAt: string | undefined }[] = [];
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayIntervalMs: 60_000,
+      }, {
+        onHealthUpdate: (h) => updates.push({ isActive: h.isActive, lastSuccessAt: h.lastSuccessAt }),
+      });
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      const h = pub.health();
+      assert.equal(h.isActive, true);
+      assert.equal(h.buffered, 0);
+      assert.equal(h.circuitOpen, false);
+      assert.ok(h.lastSuccessAt, "expected lastSuccessAt to be set after a successful flush");
+      // At least one health update fired with a populated lastSuccessAt.
+      assert.ok(updates.some((u) => u.lastSuccessAt));
+    });
+
+    it("active publisher reports droppedToday and lastErrorAt on failure", async () => {
+      respond = () => ({ status: 500, body: "down" });
+      const pub = createPub({
+        gatewayUrl: `http://localhost:${port}`,
+        gatewayApiKey: "sk-gw-test",
+        gatewayBatchSize: 1,
+        gatewayBufferCapacity: 1,
+        gatewayIntervalMs: 60_000,
+      });
+      // First event fits in the buffer; flush fails (500), event requeued.
+      pub.notifyAppend(makeEvent(1));
+      await pub.flushNow();
+      // Buffer now has the requeued event; capacity=1 so the next append drops.
+      pub.notifyAppend(makeEvent(2));
+      const h = pub.health();
+      assert.equal(h.droppedToday, 1, `expected droppedToday=1, got ${h.droppedToday}`);
+      assert.ok(h.lastErrorAt, "lastErrorAt should be populated after a 500");
+    });
+  });
 });

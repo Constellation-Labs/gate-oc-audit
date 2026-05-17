@@ -406,4 +406,63 @@ describe("DeAnchorService", () => {
             }
         });
     });
+
+    describe("health() (R6)", () => {
+        it("NoOp anchor returns isActive=false with zeroed counters", () => {
+            const service = createDeAnchorService(store, {});
+            assert.deepEqual(service.health(), {
+                isActive: false,
+                consecutiveFailures: 0,
+                circuitOpenUntil: 0,
+                lastAnchorAt: undefined,
+                lastTxHash: undefined,
+                anchoredToday: 0,
+                pendingSinceLastCheckpoint: 0,
+            });
+        });
+
+        it("active anchor reflects lastAnchorAt + anchoredToday after a successful anchor", async () => {
+            const server = createServer((_req, res) => {
+                res.writeHead(200, {"Content-Type": "application/json"});
+                res.end(JSON.stringify([{accepted: true, hash: "de-tx-h", eventId: "evt-x", errors: []}]));
+            });
+            await new Promise<void>((r) => server.listen(0, r));
+            const port = (server.address() as { port: number }).port;
+
+            try {
+                for (let i = 0; i < 6; i++) insert(store, {metadata: {i}});
+
+                process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
+                const service = new ApiKeyAnchorService(store, {
+                    deApiKey: "test-key",
+                    deEnv: "test",
+                    deOrgId: "11111111-1111-1111-1111-111111111111",
+                    deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    deEventThreshold: 5,
+                });
+                const mockSmtService = {getCurrentSmtRoot: () => "a".repeat(64)} as any;
+                service.setSmtService(mockSmtService);
+
+                // Append more events before anchoring so pendingSinceLastCheckpoint is non-zero post-anchor.
+                await service.anchorIfNeeded();
+                for (let i = 0; i < 2; i++) insert(store, {metadata: {pendingI: i}});
+
+                const h = service.health();
+                assert.equal(h.isActive, true);
+                assert.equal(h.consecutiveFailures, 0);
+                assert.equal(h.lastTxHash, "de-tx-h");
+                assert.ok(h.lastAnchorAt, "lastAnchorAt should be populated from the checkpoint");
+                assert.equal(h.anchoredToday, 1);
+                assert.equal(h.pendingSinceLastCheckpoint, 2);
+
+                // Persistence: service_health row written on success.
+                const persisted = store.getServiceHealth("anchor");
+                assert.ok(persisted, "service_health row should exist after a successful anchor");
+                const payload = persisted.payload as { lastTxHash: string };
+                assert.equal(payload.lastTxHash, "de-tx-h");
+            } finally {
+                await new Promise<void>((r) => server.close(() => r()));
+            }
+        });
+    });
 });

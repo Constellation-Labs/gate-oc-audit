@@ -480,4 +480,72 @@ describe("AuditStore", () => {
     });
   });
 
+  describe("local-reporting health getters (R6)", () => {
+    it("getDbSizeMb returns a positive number for a non-empty DB", () => {
+      store.append(sampleInsert());
+      const size = store.getDbSizeMb();
+      assert.ok(size > 0, `Expected a positive size; got ${size}`);
+    });
+
+    it("getOldestCreatedAt returns undefined when no events exist", () => {
+      assert.equal(store.getOldestCreatedAt(), undefined);
+    });
+
+    it("getOldestCreatedAt returns the earliest created_at across inserts", () => {
+      store.append(sampleInsert({ description: "first" }));
+      store.append(sampleInsert({ description: "second" }));
+      const oldest = store.getOldestCreatedAt();
+      assert.ok(oldest);
+      // The earliest event is the first one appended. created_at is generated
+      // server-side, so just verify it's a valid ISO string <= any other row.
+      const all = store.query({ order: "asc" }).map((e) => e.createdAt);
+      assert.equal(oldest, all[0]);
+    });
+
+    it("service_health upsert + get round-trips a JSON payload", () => {
+      store.upsertServiceHealth("anchor", { isActive: true, consecutiveFailures: 2 });
+      const got = store.getServiceHealth("anchor");
+      assert.ok(got);
+      assert.deepEqual(got.payload, { isActive: true, consecutiveFailures: 2 });
+      assert.ok(got.updatedAt);
+    });
+
+    it("service_health upsert replaces an existing row for the same name", () => {
+      store.upsertServiceHealth("gateway", { buffered: 5 });
+      store.upsertServiceHealth("gateway", { buffered: 0 });
+      const got = store.getServiceHealth("gateway");
+      assert.deepEqual(got?.payload, { buffered: 0 });
+    });
+
+    it("read-only store can read but not write service_health", () => {
+      store.upsertServiceHealth("retention", { nextPruneAt: "2026-05-16T00:00:00.000Z" });
+      const reader = new AuditStore(dbPath, { readOnly: true });
+      try {
+        const got = reader.getServiceHealth("retention");
+        assert.deepEqual(got?.payload, { nextPruneAt: "2026-05-16T00:00:00.000Z" });
+        // Upsert on a read-only store is a silent no-op.
+        reader.upsertServiceHealth("retention", { nextPruneAt: "tampered" });
+        const reread = reader.getServiceHealth("retention");
+        assert.deepEqual(reread?.payload, { nextPruneAt: "2026-05-16T00:00:00.000Z" });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it("countCheckpointsSince counts only rows created at or after the given time", async () => {
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      store.insertCheckpoint("cp-1", 1, 10, "root-a", 10, "tx-a");
+      // ISO timestamps are millisecond-precision; sleep around the cutoff so
+      // it lands strictly between the two inserts and the filter excludes cp-1.
+      await sleep(10);
+      const cutoff = new Date().toISOString();
+      await sleep(10);
+      store.insertCheckpoint("cp-2", 11, 20, "root-b", 10, "tx-b");
+      const sinceCutoff = store.countCheckpointsSince(cutoff);
+      const sinceEpoch = store.countCheckpointsSince("1970-01-01T00:00:00.000Z");
+      assert.equal(sinceCutoff, 1, "only the second checkpoint should be counted");
+      assert.equal(sinceEpoch, 2);
+    });
+  });
+
 });
