@@ -5,7 +5,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { AuditStore } from "../../src/store/audit-store.js";
-import { RetentionService } from "../../src/services/retention.js";
+import { RetentionService, RETENTION_HEALTH_NAME } from "../../src/services/retention.js";
 import type { AuditEventInsert } from "../../src/types/events.js";
 
 function makeTempDb(): string {
@@ -85,5 +85,36 @@ describe("RetentionService", () => {
     service.start();
     service.stop();
     service.stop(); // should not throw
+  });
+
+  describe("nextPruneAt + persistence (R6)", () => {
+    it("nextPruneAt is undefined before start", () => {
+      const service = new RetentionService(store);
+      assert.equal(service.nextPruneAt(), undefined);
+    });
+
+    it("nextPruneAt is set after start and reflects an hourly cadence", () => {
+      const service = new RetentionService(store);
+      const before = Date.now();
+      service.start();
+      service.stop();
+      const next = service.nextPruneAt();
+      assert.ok(next, "expected nextPruneAt to be set after start");
+      const nextMs = Date.parse(next);
+      const delta = nextMs - before;
+      // PRUNE_INTERVAL_MS is one hour; allow some slack for test timing.
+      assert.ok(delta >= 60 * 60 * 1000 - 1000, `expected ~1h ahead, got ${delta}ms`);
+      assert.ok(delta <= 60 * 60 * 1000 + 5000, `expected ~1h ahead, got ${delta}ms`);
+    });
+
+    it("persists health to service_health on each prune tick", () => {
+      const service = new RetentionService(store);
+      service.start();
+      service.stop();
+      const persisted = store.getServiceHealth(RETENTION_HEALTH_NAME);
+      assert.ok(persisted, "service_health row should exist after start");
+      const payload = persisted.payload as { nextPruneAt: string };
+      assert.equal(payload.nextPruneAt, service.nextPruneAt());
+    });
   });
 });

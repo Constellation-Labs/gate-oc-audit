@@ -90,6 +90,21 @@ type VerifyFn = (hash: string) => Promise<unknown>;
 // Public interface — used by rate-limiter and index.ts
 // ---------------------------------------------------------------------------
 
+export interface AnchorHealth {
+    isActive: boolean;
+    consecutiveFailures: number;
+    /** Wall-clock deadline (ms epoch) until which the circuit breaker is open. 0 if never tripped. */
+    circuitOpenUntil: number;
+    /** ISO timestamp of the most recently committed checkpoint, or undefined if none. */
+    lastAnchorAt: string | undefined;
+    /** DE tx hash for the most recent checkpoint, or null when DE accepted with no hash, or undefined if no checkpoint yet. */
+    lastTxHash: string | null | undefined;
+    /** Count of checkpoints created since the start of the current UTC day. */
+    anchoredToday: number;
+    /** Count of audit events with sequence > lastCheckpoint.sequenceEnd (i.e. waiting to be anchored). */
+    pendingSinceLastCheckpoint: number;
+}
+
 export interface AnchorService {
     isActive(): boolean;
     setSmtService(smt: SmtService): void;
@@ -104,7 +119,20 @@ export interface AnchorService {
      *   smaller batches on a schedule.
      */
     anchorIfNeeded(minEvents?: number): Promise<void>;
+    /**
+     * Runtime health snapshot for the local reporting layer (Local Reporting PRD R6).
+     * Combines in-memory state (consecutiveFailures, circuitOpenUntil) with DB-derived
+     * facts (last checkpoint, anchored-today count, pending events).
+     */
+    health(): AnchorHealth;
 }
+
+/** ISO timestamp at the start of today's UTC day (00:00:00Z). */
+function startOfUtcDayIso(now: Date = new Date()): string {
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+}
+
+export const ANCHOR_HEALTH_NAME = "anchor";
 
 // ---------------------------------------------------------------------------
 // No-op implementation — logs a warning, every method is a stub
@@ -128,6 +156,18 @@ export class NoOpAnchorService implements AnchorService {
     notifyAppend(): void { /* no-op */ }
 
     async anchorIfNeeded(_minEvents?: number): Promise<void> { /* no-op */ }
+
+    health(): AnchorHealth {
+        return {
+            isActive: false,
+            consecutiveFailures: 0,
+            circuitOpenUntil: 0,
+            lastAnchorAt: undefined,
+            lastTxHash: undefined,
+            anchoredToday: 0,
+            pendingSinceLastCheckpoint: 0,
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +244,7 @@ class ActiveAnchorService implements AnchorService {
 
         await this.verifyCheckpoints();
         await this.anchorIfNeeded(this.timerMinEvents);
+        this.persistHealth();
         this.timer = setInterval(() => {
             this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
         }, this.intervalMs);
@@ -272,6 +313,7 @@ class ActiveAnchorService implements AnchorService {
                     `DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
                 );
             }
+            this.persistHealth();
         } catch (err) {
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
@@ -366,6 +408,33 @@ class ActiveAnchorService implements AnchorService {
             deAnchorLog.warn(
                 `Circuit breaker open — will retry after ${delayMs / 1000}s`,
             );
+        }
+        this.persistHealth();
+    }
+
+    health(): AnchorHealth {
+        const lastCheckpoint = this.store.getLastCheckpoint();
+        const startOfDay = startOfUtcDayIso();
+        const anchoredToday = this.store.countCheckpointsSince(startOfDay);
+        const pending = lastCheckpoint ? this.store.countSince(lastCheckpoint.sequenceEnd + 1) : 0;
+
+        return {
+            isActive: true,
+            consecutiveFailures: this.consecutiveFailures,
+            circuitOpenUntil: this.circuitOpenUntil,
+            lastAnchorAt: lastCheckpoint?.createdAt,
+            lastTxHash: lastCheckpoint ? lastCheckpoint.deTxHash : undefined,
+            anchoredToday,
+            pendingSinceLastCheckpoint: pending,
+        };
+    }
+
+    private persistHealth(): void {
+        try {
+            this.store.upsertServiceHealth(ANCHOR_HEALTH_NAME, this.health());
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            deAnchorLog.warn(`failed to persist service_health: ${msg}`);
         }
     }
 }

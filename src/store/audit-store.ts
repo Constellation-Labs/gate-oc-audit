@@ -183,6 +183,10 @@ export class AuditStore {
     insertCheckpoint: StatementSync;
     countSince: StatementSync;
     maxSequenceSince: StatementSync;
+    getOldestCreatedAt: StatementSync;
+    getServiceHealth: StatementSync;
+    upsertServiceHealth: StatementSync;
+    countCheckpointsSince: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -249,6 +253,19 @@ export class AuditStore {
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
+      getOldestCreatedAt: this.db.prepare("SELECT MIN(created_at) AS t FROM audit_events"),
+      getServiceHealth: this.db.prepare("SELECT payload, updated_at FROM service_health WHERE name = ?"),
+      // Upsert is unused in read-only mode but the prepared statement is a
+      // property; bind it to a no-op SELECT so the type stays satisfied
+      // without opening write capabilities.
+      upsertServiceHealth: this.readOnly
+        ? this.db.prepare("SELECT 1 WHERE 0")
+        : this.db.prepare(
+            `INSERT INTO service_health (name, payload, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(name) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+          ),
+      countCheckpointsSince: this.db.prepare("SELECT COUNT(*) AS c FROM integrity_checkpoints WHERE created_at >= ?"),
     };
   }
 
@@ -606,10 +623,38 @@ export class AuditStore {
     return totalDeleted;
   }
 
-  private getDbSizeMb(): number {
+  getDbSizeMb(): number {
     const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
     const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
     return (pageSize * pageCount) / (1024 * 1024);
+  }
+
+  getOldestCreatedAt(): string | undefined {
+    const row = this.stmts.getOldestCreatedAt.get() as { t: string | null } | undefined;
+    return row?.t ?? undefined;
+  }
+
+  upsertServiceHealth(name: string, payload: unknown): void {
+    if (this.readOnly) return;
+    this.stmts.upsertServiceHealth.run(name, JSON.stringify(payload), new Date().toISOString());
+  }
+
+  getServiceHealth(name: string): { payload: unknown; updatedAt: string } | undefined {
+    const row = this.stmts.getServiceHealth.get(name) as { payload: string; updated_at: string } | undefined;
+    if (!row) return undefined;
+    // Defensive parse: a corrupt or tampered service_health row must not
+    // crash the read-only CLI reader. Treat parse failure as "no snapshot."
+    try {
+      return { payload: JSON.parse(row.payload), updatedAt: row.updated_at };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      log.warn(`service_health payload parse failed for '${name}': ${msg}`);
+      return undefined;
+    }
+  }
+
+  countCheckpointsSince(isoTime: string): number {
+    return (this.stmts.countCheckpointsSince.get(isoTime) as { c: number }).c;
   }
 
   // --- Config manifest operations (used by ConfigWatcher and FileWatcher) ---
