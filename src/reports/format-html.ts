@@ -1,4 +1,5 @@
 import type { AuditProjection } from "./projection.js";
+import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
 
 /**
  * Self-contained HTML rendering — no external assets, no scripts. The
@@ -11,34 +12,19 @@ import type { AuditProjection } from "./projection.js";
  * the document (the projection doesn't pre-escape).
  */
 export function formatProjectionHtml(p: AuditProjection): string {
-  const title = `Audit report — ${escape(p.period.label)}`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>${title}</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; color: #222; }
-  h1 { font-size: 1.4em; margin-bottom: 0.2em; }
-  h2 { font-size: 1.1em; margin-top: 1.6em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
-  .meta { color: #666; font-size: 0.9em; margin-bottom: 1em; }
-  table { border-collapse: collapse; margin: 0.4em 0 1em 0; min-width: 50%; }
-  th, td { text-align: left; padding: 0.2em 0.8em 0.2em 0; font-size: 0.95em; vertical-align: top; }
-  th { color: #555; font-weight: 600; border-bottom: 1px solid #ccc; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .empty { color: #888; font-style: italic; }
-  .hash { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; color: #444; }
-  .anomaly { background: #fff7e6; border-left: 3px solid #f5a623; padding: 0.6em 0.8em; margin: 0.5em 0; }
-  .anomaly-head { font-weight: 600; }
-  .anomaly-event { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; color: #555; padding-left: 1em; }
+<title>Audit report — ${escape(p.period.label)}</title>
+<style>${REPORT_BASE_CSS}
   .footer { margin-top: 2em; padding-top: 0.6em; border-top: 1px solid #ddd; font-size: 0.85em; color: #555; }
   .footer dt { font-weight: 600; }
   .footer dd { margin: 0 0 0.4em 0; }
-  @media print { body { margin: 0.5em; max-width: 100%; } }
 </style>
 </head>
 <body>
-<h1>${title}</h1>
+<h1>Audit report — ${escape(p.period.label)}</h1>
 <div class="meta">
   Window: <code>${escape(p.period.fromIso)}</code> → <code>${escape(p.period.toIso)}</code><br />
   Generated: <code>${escape(p.generatedAt)}</code>
@@ -174,15 +160,6 @@ function integritySection(p: AuditProjection): string {
     }
   </dl>
 </div>`;
-}
-
-function escape(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function fmtUsd(n: number): string {

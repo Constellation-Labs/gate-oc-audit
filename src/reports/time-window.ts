@@ -8,6 +8,11 @@
 export type TimeZoneMode = "local" | "utc";
 export type PeriodKind = "daily" | "weekly" | "since";
 
+/** Narrow aliases so callers like `buildProjection` can reject "since" windows at compile time. */
+export type DailyWindow = TimeWindow & { kind: "daily" };
+export type WeeklyWindow = TimeWindow & { kind: "weekly" };
+export type SinceWindow = TimeWindow & { kind: "since" };
+
 export interface TimeWindow {
   /** "daily", "weekly", or "since" — passed through so callers don't need to re-decide. */
   kind: PeriodKind;
@@ -30,7 +35,7 @@ const WEEK_RE = /^(\d{4})-W(\d{2})$/;
  * machine's local midnight, so a 25-hour DST fall-back day produces a
  * 25-hour window (and conversely a 23-hour spring-forward day produces 23).
  */
-export function parseDate(dateStr: string, tz: TimeZoneMode): TimeWindow {
+export function parseDate(dateStr: string, tz: TimeZoneMode): DailyWindow {
   const m = DATE_RE.exec(dateStr);
   if (!m) throw new Error(`--date must be YYYY-MM-DD (got "${dateStr}")`);
   const year = Number(m[1]);
@@ -68,7 +73,7 @@ export function parseDate(dateStr: string, tz: TimeZoneMode): TimeWindow {
  * Parse ISO 8601 week notation `YYYY-Www` (week 1 = the week containing Jan
  * 4 = the first week with a Thursday). Returns [Mon 00:00, next Mon 00:00).
  */
-export function parseWeek(weekStr: string, tz: TimeZoneMode): TimeWindow {
+export function parseWeek(weekStr: string, tz: TimeZoneMode): WeeklyWindow {
   const m = WEEK_RE.exec(weekStr);
   if (!m) throw new Error(`--week must be YYYY-Www (got "${weekStr}")`);
   const year = Number(m[1]);
@@ -181,6 +186,10 @@ function pad2(n: number): string {
 }
 
 const DURATION_RE = /^(\d+)(m|h|d)$/;
+// Catches `1z`, `7w`, etc. — anything that *looks* like a duration but uses
+// an unsupported unit suffix, so we can give a targeted error instead of
+// punting the user to the offset-shaped ISO branch.
+const DURATION_LIKE_RE = /^\d+[a-zA-Z]+$/;
 
 /**
  * Parse a "moment" — either a duration suffix relative to `now` (`15m`,
@@ -207,6 +216,9 @@ export function parseInstant(input: string, now: Date = new Date()): string {
     }
     return new Date(now.getTime() - totalMs).toISOString();
   }
+  if (DURATION_LIKE_RE.test(input)) {
+    throw new Error(`duration suffix must be m, h, or d (got "${input}")`);
+  }
   if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(input)) {
     throw new Error(
       `instant must be a duration (Nm|Nh|Nd) or ISO 8601 with explicit offset (got "${input}")`,
@@ -229,7 +241,7 @@ export function parseSince(
   until: string | undefined,
   tz: TimeZoneMode,
   now: Date = new Date(),
-): TimeWindow {
+): SinceWindow {
   const fromIso = parseInstant(since, now);
   const toIso = until === undefined ? now.toISOString() : parseInstant(until, now);
   if (toIso <= fromIso) {

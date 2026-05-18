@@ -25,16 +25,17 @@ export function formatAnomalyViewText(v: AnomalyView): string {
     a.installEvents.length > 0 ||
     a.integrityViolations.unverifiedAnchored.length > 0 ||
     a.integrityViolations.tamperedEvents.length > 0 ||
-    a.duplicateOutboundTruncated;
+    a.integrityViolations.note !== null ||
+    v.counts.capped;
 
   if (!anyFinding) {
     lines.push("No anomalies detected.");
     return lines.join("\n") + "\n";
   }
 
-  if (a.duplicateOutboundTruncated) {
+  if (v.counts.capped) {
     lines.push(
-      "WARNING: event fetch hit its cap — duplicate-outbound detector may miss some duplicates.",
+      "WARNING: event fetch hit its cap — every detector below is operating on a truncated view.",
     );
     lines.push("");
   }
@@ -108,8 +109,11 @@ export function formatAnomalyViewText(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0) {
+  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
     lines.push("=== Integrity violations ===");
+    if (iv.note !== null) {
+      lines.push(`  NOTE: ${iv.note}`);
+    }
     if (iv.unverifiedAnchored.length > 0) {
       lines.push(`  Unverified anchored checkpoints (${iv.unverifiedAnchored.length}):`);
       for (const c of iv.unverifiedAnchored) {

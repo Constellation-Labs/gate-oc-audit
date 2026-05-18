@@ -1,4 +1,5 @@
 import type { AnomalyView } from "./anomalies-view.js";
+import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
 
 /**
  * Self-contained HTML rendering of an AnomalyView. Same visual conventions
@@ -6,28 +7,15 @@ import type { AnomalyView } from "./anomalies-view.js";
  * one already know how to read the other.
  */
 export function formatAnomalyViewHtml(v: AnomalyView): string {
-  const title = `Audit anomalies — ${escape(v.period.label)}`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>${title}</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; color: #222; }
-  h1 { font-size: 1.4em; margin-bottom: 0.2em; }
-  h2 { font-size: 1.1em; margin-top: 1.6em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
-  .meta { color: #666; font-size: 0.9em; margin-bottom: 1em; }
-  .empty { color: #888; font-style: italic; }
-  .hash { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; color: #444; }
-  .anomaly { background: #fff7e6; border-left: 3px solid #f5a623; padding: 0.6em 0.8em; margin: 0.5em 0; }
-  .anomaly.bad { background: #fdecea; border-left-color: #d93025; }
-  .anomaly-head { font-weight: 600; }
-  .anomaly-event { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; color: #555; padding-left: 1em; }
-  @media print { body { margin: 0.5em; max-width: 100%; } }
-</style>
+<title>Audit anomalies — ${escape(v.period.label)}</title>
+<style>${REPORT_BASE_CSS}</style>
 </head>
 <body>
-<h1>${title}</h1>
+<h1>Audit anomalies — ${escape(v.period.label)}</h1>
 <div class="meta">
   Window: <code>${escape(v.period.fromIso)}</code> → <code>${escape(v.period.toIso)}</code><br />
   Generated: <code>${escape(v.generatedAt)}</code><br />
@@ -44,9 +32,9 @@ function renderBody(v: AnomalyView): string {
   const cfg = v.detectorConfig;
   const sections: string[] = [];
 
-  if (a.duplicateOutboundTruncated) {
+  if (v.counts.capped) {
     sections.push(
-      `<div class="anomaly bad"><div class="anomaly-head">Detector capped</div>event fetch hit its cap; duplicate-outbound results may be incomplete.</div>`,
+      `<div class="anomaly bad"><div class="anomaly-head">Detector capped</div>event fetch hit its cap; every detector below is operating on a truncated view.</div>`,
     );
   }
 
@@ -138,8 +126,11 @@ function renderBody(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0) {
+  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
     sections.push(`<h2>Integrity violations</h2>`);
+    if (iv.note !== null) {
+      sections.push(`<p class="empty">${escape(iv.note)}</p>`);
+    }
     if (iv.unverifiedAnchored.length > 0) {
       sections.push(`<p><strong>Unverified anchored checkpoints (${iv.unverifiedAnchored.length}):</strong></p>`);
       for (const c of iv.unverifiedAnchored) {
@@ -166,13 +157,4 @@ function renderBody(v: AnomalyView): string {
     return `<p class="empty">No anomalies detected.</p>`;
   }
   return sections.join("\n");
-}
-
-function escape(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }

@@ -1,5 +1,5 @@
 import type { AuditStore } from "../store/audit-store.js";
-import { subtractCalendarDays, type TimeWindow } from "./time-window.js";
+import { subtractCalendarDays, type DailyWindow, type WeeklyWindow } from "./time-window.js";
 import { detectDuplicateOutbound, detectFirstSeenTools, type DuplicateOutboundFinding, type MessageSentRow } from "./detectors.js";
 
 /**
@@ -119,7 +119,7 @@ export interface BuildProjectionOptions {
 
 export function buildProjection(
   store: AuditStore,
-  window: TimeWindow,
+  window: DailyWindow | WeeklyWindow,
   opts: BuildProjectionOptions = {},
 ): AuditProjection {
   const dupWindowSec = opts.duplicateOutboundWindowSec ?? DEFAULT_DUP_OUTBOUND_WINDOW_SEC;
@@ -216,11 +216,7 @@ export function buildProjection(
     schemaVersion: PROJECTION_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     period: {
-      // buildProjection is only ever called with a daily/weekly window from
-      // cliReportHandler. TimeWindow.kind was widened for the "since" view;
-      // narrow back here so ProjectionPeriod stays restricted to the report's
-      // two kinds.
-      kind: window.kind === "weekly" ? "weekly" : "daily",
+      kind: window.kind,
       fromIso: window.fromIso,
       toIso: window.toIso,
       label: window.label,

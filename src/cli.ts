@@ -398,12 +398,12 @@ export function cliAnomaliesHandler(
   const window = parseSince(opts.since ?? "24h", opts.until, tz);
 
   const view = buildAnomalyView(store, smtService, window, {
-    duplicateOutboundWindowSec: parsePositiveInt(opts.dupWindowSec, "--dup-window-sec", 86_400),
-    firstSeenLookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
+    dupWindowSec: parsePositiveInt(opts.dupWindowSec, "--dup-window-sec", 86_400),
+    lookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
     denialWindowSec: parsePositiveInt(opts.denialWindowSec, "--denial-window-sec", 86_400),
-    denialThreshold: parsePositiveInt(opts.denialThreshold, "--denial-threshold", 10_000),
+    denialThreshold: parsePositiveInt(opts.denialThreshold, "--denial-threshold", 1_000_000),
     dropWindowSec: parsePositiveInt(opts.dropWindowSec, "--drop-window-sec", 86_400),
-    dropThreshold: parsePositiveInt(opts.dropThreshold, "--drop-threshold", 10_000),
+    dropThreshold: parsePositiveInt(opts.dropThreshold, "--drop-threshold", 1_000_000),
   });
 
   if (opts.json === true) {

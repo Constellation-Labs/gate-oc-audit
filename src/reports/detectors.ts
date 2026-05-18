@@ -171,46 +171,17 @@ export function detectGatewayDropSpike(
   windowSec: number,
   threshold: number,
 ): GatewayDropSpikeFinding[] {
-  if (events.length === 0 || threshold < 1 || windowSec <= 0) return [];
-  const sorted = [...events]
-    .filter((e) => e.eventType === "gateway.dropped")
-    .sort(byCreatedAt);
-  if (sorted.length < threshold) return [];
-
-  const windowMs = windowSec * 1000;
-  const findings: GatewayDropSpikeFinding[] = [];
-  let i = 0;
-  while (i < sorted.length) {
-    // Bound the cluster by both the gap to the next event AND the total span
-    // from the cluster's first event. Without the span check, a slow drip of
-    // events spaced just-under-windowSec apart collapses into one cluster
-    // labelled "N drops in windowSec" that actually spans many windowSecs —
-    // misleading the operator about the burst rate.
-    const startMs = Date.parse(sorted[i].createdAt);
-    let j = i + 1;
-    while (
-      j < sorted.length &&
-      Date.parse(sorted[j].createdAt) - Date.parse(sorted[j - 1].createdAt) <= windowMs &&
-      Date.parse(sorted[j].createdAt) - startMs <= windowMs
-    ) {
-      j++;
-    }
-    const count = j - i;
-    if (count >= threshold) {
-      const cluster = sorted.slice(i, j);
-      const firstDropped = cumulativeDropped(cluster[0]);
-      const lastDropped = cumulativeDropped(cluster[cluster.length - 1]);
-      findings.push({
-        firstAt: cluster[0].createdAt,
-        lastAt: cluster[cluster.length - 1].createdAt,
-        count,
-        droppedDelta: Math.max(0, lastDropped - firstDropped),
-        events: cluster.map(toRef),
-      });
-    }
-    i = j;
-  }
-  return findings;
+  return walkClusters(events, "gateway.dropped", windowSec, threshold, (cluster) => {
+    const first = cumulativeDropped(cluster[0]);
+    const last = cumulativeDropped(cluster[cluster.length - 1]);
+    return {
+      firstAt: cluster[0].createdAt,
+      lastAt: cluster[cluster.length - 1].createdAt,
+      count: cluster.length,
+      droppedDelta: Math.max(0, last - first),
+      events: cluster.map(toRef),
+    };
+  });
 }
 
 function cumulativeDropped(e: DetectorEvent): number {
@@ -240,17 +211,58 @@ export function detectDenialSpike(
   windowSec: number,
   threshold: number,
 ): DenialSpikeFinding[] {
-  if (events.length === 0 || threshold < 1 || windowSec <= 0) return [];
-  const sorted = [...events]
-    .filter((e) => e.eventType === "tool.denied")
-    .sort(byCreatedAt);
-  if (sorted.length < threshold) return [];
+  return walkClusters(events, "tool.denied", windowSec, threshold, (cluster) => {
+    const toolCounts = new Map<string, number>();
+    const reasonCounts = new Map<string, number>();
+    for (const e of cluster) {
+      const toolName = typeof e.metadata?.toolName === "string" ? e.metadata.toolName : "<unknown>";
+      toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
+      const reason = typeof e.metadata?.reason === "string" ? e.metadata.reason : null;
+      if (reason !== null) reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+    }
+    const byTool = [...toolCounts.entries()]
+      .map(([toolName, c]) => ({ toolName, count: c }))
+      .sort((a, b) => b.count - a.count || a.toolName.localeCompare(b.toolName));
+    let topReason: string | null = null;
+    let topCount = 0;
+    for (const [reason, c] of reasonCounts) {
+      if (c > topCount) {
+        topCount = c;
+        topReason = reason;
+      }
+    }
+    return {
+      firstAt: cluster[0].createdAt,
+      lastAt: cluster[cluster.length - 1].createdAt,
+      count: cluster.length,
+      byTool,
+      topReason,
+      events: cluster.map(toRef),
+    };
+  });
+}
 
+/**
+ * Shared cluster walk used by spike detectors. Emits one finding per maximal
+ * non-overlapping cluster where every consecutive pair is within `windowSec`
+ * AND the cluster's total span is within `windowSec` — the dual bound keeps
+ * rendered counts ("N events in windowSec") consistent with actual elapsed
+ * time, which a gap-only walk would not.
+ */
+function walkClusters<T>(
+  events: ReadonlyArray<DetectorEvent>,
+  eventType: string,
+  windowSec: number,
+  threshold: number,
+  summarise: (cluster: DetectorEvent[]) => T,
+): T[] {
+  if (events.length === 0 || threshold < 1 || windowSec <= 0) return [];
+  const sorted = [...events].filter((e) => e.eventType === eventType).sort(byCreatedAt);
+  if (sorted.length < threshold) return [];
   const windowMs = windowSec * 1000;
-  const findings: DenialSpikeFinding[] = [];
+  const findings: T[] = [];
   let i = 0;
   while (i < sorted.length) {
-    // See detectGatewayDropSpike for the dual gap+span bound rationale.
     const startMs = Date.parse(sorted[i].createdAt);
     let j = i + 1;
     while (
@@ -260,37 +272,7 @@ export function detectDenialSpike(
     ) {
       j++;
     }
-    const count = j - i;
-    if (count >= threshold) {
-      const cluster = sorted.slice(i, j);
-      const toolCounts = new Map<string, number>();
-      const reasonCounts = new Map<string, number>();
-      for (const e of cluster) {
-        const toolName = typeof e.metadata?.toolName === "string" ? e.metadata.toolName : "<unknown>";
-        toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
-        const reason = typeof e.metadata?.reason === "string" ? e.metadata.reason : null;
-        if (reason !== null) reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
-      }
-      const byTool = [...toolCounts.entries()]
-        .map(([toolName, c]) => ({ toolName, count: c }))
-        .sort((a, b) => b.count - a.count || a.toolName.localeCompare(b.toolName));
-      let topReason: string | null = null;
-      let topCount = 0;
-      for (const [reason, c] of reasonCounts) {
-        if (c > topCount) {
-          topCount = c;
-          topReason = reason;
-        }
-      }
-      findings.push({
-        firstAt: cluster[0].createdAt,
-        lastAt: cluster[cluster.length - 1].createdAt,
-        count,
-        byTool,
-        topReason,
-        events: cluster.map(toRef),
-      });
-    }
+    if (j - i >= threshold) findings.push(summarise(sorted.slice(i, j)));
     i = j;
   }
   return findings;
@@ -370,26 +352,22 @@ export interface TamperedEventRef extends EventRef {
 export interface IntegrityViolationFinding {
   unverifiedAnchored: UnverifiedAnchoredCheckpoint[];
   tamperedEvents: TamperedEventRef[];
-}
-
-/**
- * Aggregate integrity signals. Both inputs are already filtered to the
- * caller's window — the orchestrator pulls unverified checkpoints whose
- * `createdAt` falls in window, and runs the SMT-leaf check (mirrors
- * `src/ui/routes.ts:classifyEvent`) per event before passing them here.
- *
- * Pure on its inputs so it stays trivially testable.
- */
-export function detectIntegrityViolations(
-  unverifiedAnchored: ReadonlyArray<UnverifiedAnchoredCheckpoint>,
-  tamperedEvents: ReadonlyArray<TamperedEventRef>,
-): IntegrityViolationFinding {
-  return {
-    unverifiedAnchored: [...unverifiedAnchored],
-    tamperedEvents: [...tamperedEvents],
-  };
+  /**
+   * Set when the tamper scan was skipped (e.g. SMT has no checkpointed
+   * leaves yet, so every event would look "untracked" by classifyEvent's
+   * rules). null when the scan ran normally. Surfacing this prevents
+   * "0 tampered events" being read as evidence of integrity when in fact
+   * no check could be performed.
+   */
+  note: string | null;
 }
 
 function byCreatedAt(a: DetectorEvent, b: DetectorEvent): number {
-  return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.sequence - b.sequence;
+  // Parse to ms once so the comparison stays correct even if a future
+  // code path writes createdAt in a non-toISOString() shape (e.g. with an
+  // explicit offset instead of `Z`).
+  const ta = Date.parse(a.createdAt);
+  const tb = Date.parse(b.createdAt);
+  if (ta !== tb) return ta - tb;
+  return a.sequence - b.sequence;
 }

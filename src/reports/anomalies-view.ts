@@ -8,7 +8,6 @@ import {
   detectGatewayDropSpike,
   detectDenialSpike,
   detectInstallEvents,
-  detectIntegrityViolations,
   type DuplicateOutboundFinding,
   type GatewayDropSpikeFinding,
   type DenialSpikeFinding,
@@ -32,13 +31,7 @@ export const DEFAULT_DENIAL_THRESHOLD = 5;
 export const DEFAULT_DROP_WINDOW_SEC = 300;
 export const DEFAULT_DROP_THRESHOLD = 3;
 
-export interface AnomalyViewPeriod {
-  kind: "since" | "daily" | "weekly";
-  fromIso: string;
-  toIso: string;
-  label: string;
-  tz: "local" | "utc";
-}
+export type AnomalyViewPeriod = TimeWindow;
 
 export interface AnomalyDetectorConfig {
   dupWindowSec: number;
@@ -56,11 +49,15 @@ export interface AnomalyView {
   detectorConfig: AnomalyDetectorConfig;
   counts: {
     totalEventsInWindow: number;
+    /**
+     * True when the in-window event fetch hit FETCH_CAP. When this is true,
+     * every detector below is operating on a truncated view — not just
+     * dedup-outbound — so treat any "no findings" answer as inconclusive.
+     */
     capped: boolean;
   };
   anomalies: {
     duplicateOutbound: DuplicateOutboundFinding[];
-    duplicateOutboundTruncated: boolean;
     firstSeenTools: string[];
     gatewayDropSpikes: GatewayDropSpikeFinding[];
     denialSpikes: DenialSpikeFinding[];
@@ -70,8 +67,8 @@ export interface AnomalyView {
 }
 
 export interface BuildAnomalyViewOptions {
-  duplicateOutboundWindowSec?: number;
-  firstSeenLookbackDays?: number;
+  dupWindowSec?: number;
+  lookbackDays?: number;
   denialWindowSec?: number;
   denialThreshold?: number;
   dropWindowSec?: number;
@@ -85,8 +82,8 @@ export function buildAnomalyView(
   opts: BuildAnomalyViewOptions = {},
 ): AnomalyView {
   const detectorConfig: AnomalyDetectorConfig = {
-    dupWindowSec: opts.duplicateOutboundWindowSec ?? DEFAULT_DUP_WINDOW_SEC,
-    lookbackDays: opts.firstSeenLookbackDays ?? DEFAULT_FIRST_SEEN_LOOKBACK_DAYS,
+    dupWindowSec: opts.dupWindowSec ?? DEFAULT_DUP_WINDOW_SEC,
+    lookbackDays: opts.lookbackDays ?? DEFAULT_FIRST_SEEN_LOOKBACK_DAYS,
     denialWindowSec: opts.denialWindowSec ?? DEFAULT_DENIAL_WINDOW_SEC,
     denialThreshold: opts.denialThreshold ?? DEFAULT_DENIAL_THRESHOLD,
     dropWindowSec: opts.dropWindowSec ?? DEFAULT_DROP_WINDOW_SEC,
@@ -95,10 +92,9 @@ export function buildAnomalyView(
 
   const { fromIso, toIso } = window;
 
-  // Pull every event in the window once. We need raw rows for the dedup detector
-  // (which needs decompressed content) plus filtered subsets for the other
-  // detectors. Doing a single ranged scan beats four separate eventType queries
-  // when the window is sparse — and the FETCH_CAP keeps memory bounded.
+  // One ranged scan feeds every detector. `createdBefore` in AuditStore.query
+  // is inclusive on the lower edge but we want a half-open window, so
+  // re-tighten with the post-filter.
   const rawEvents = store
     .query({
       createdAfter: fromIso,
@@ -122,11 +118,9 @@ export function buildAnomalyView(
   }));
   const duplicateOutbound = detectDuplicateOutbound(messageRows, detectorConfig.dupWindowSec);
 
-  // First-seen tools: today's set comes from in-window aggregation (cheap; uses
-  // the same SQL aggregation buildProjection uses), prior set from a
-  // lookback-days window ending at fromIso. tool.invoked emissions in the
-  // current window come from rawEvents but we trust the existing aggregate so
-  // the answer is consistent with `report daily`.
+  // Today vs. prior tool sets use the existing SQL aggregations rather than
+  // counting in-memory so the answer stays consistent with `report daily`
+  // (which also relies on the same json_extract path for tool names).
   const todayTools = store
     .aggregateToolInvocationsInWindow(fromIso, toIso)
     .map((r) => r.toolName);
@@ -147,9 +141,35 @@ export function buildAnomalyView(
   );
   const installEvents = detectInstallEvents(detectorEvents);
 
-  // Integrity: unverified anchored checkpoints whose createdAt falls in window,
-  // plus events whose raw hash is no longer in any SMT tree (the same
-  // "tampered" signal `src/ui/routes.ts:classifyEvent` uses).
+  const integrityViolations = collectIntegrityViolations(store, smtService, window, rawEvents);
+
+  return {
+    schemaVersion: ANOMALY_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    period: window,
+    detectorConfig,
+    counts: {
+      totalEventsInWindow: rawEvents.length,
+      capped,
+    },
+    anomalies: {
+      duplicateOutbound,
+      firstSeenTools,
+      gatewayDropSpikes,
+      denialSpikes,
+      installEvents,
+      integrityViolations,
+    },
+  };
+}
+
+function collectIntegrityViolations(
+  store: AuditStore,
+  smtService: SmtService,
+  window: TimeWindow,
+  rawEvents: ReadonlyArray<AuditEvent>,
+): IntegrityViolationFinding {
+  const { fromIso, toIso } = window;
   const smtLastSeq = smtService.getLastCheckpointedSequence();
   const unverifiedAnchored: UnverifiedAnchoredCheckpoint[] = store
     .getUnverifiedCheckpoints()
@@ -163,48 +183,31 @@ export function buildAnomalyView(
       createdAt: cp.createdAt,
     }));
   const tamperedEvents: TamperedEventRef[] = [];
-  for (const e of rawEvents) {
-    if (e.sequence > smtLastSeq) continue; // not yet replayed into SMT — see classifyEvent
-    const rawHash = smtService.computeRawHash(e);
-    if (smtService.findContainingTreeKey(rawHash) === null) {
-      tamperedEvents.push({
-        id: e.id,
-        sequence: e.sequence,
-        createdAt: e.createdAt,
-        eventType: e.eventType,
-      });
+  // smtLastSeq === 0 means the SMT hasn't checkpointed anything yet — every
+  // event is "untracked" by classifyEvent's rules, so we can't say whether
+  // any leaf was tampered. Surface that as a note instead of silently
+  // returning an empty list.
+  const smtCheckpointed = smtLastSeq > 0;
+  if (smtCheckpointed) {
+    for (const e of rawEvents) {
+      // Events past smtLastSeq are "untracked" (not yet replayed) — not
+      // evidence of tampering. Mirrors src/ui/routes.ts:classifyEvent.
+      if (e.sequence > smtLastSeq) continue;
+      const rawHash = smtService.computeRawHash(e);
+      if (smtService.findContainingTreeKey(rawHash) === null) {
+        tamperedEvents.push({
+          id: e.id,
+          sequence: e.sequence,
+          createdAt: e.createdAt,
+          eventType: e.eventType,
+        });
+      }
     }
   }
-  const integrityViolations = detectIntegrityViolations(unverifiedAnchored, tamperedEvents);
-
   return {
-    schemaVersion: ANOMALY_SCHEMA_VERSION,
-    generatedAt: new Date().toISOString(),
-    period: {
-      kind: window.kind,
-      fromIso: window.fromIso,
-      toIso: window.toIso,
-      label: window.label,
-      tz: window.tz,
-    },
-    detectorConfig,
-    counts: {
-      totalEventsInWindow: rawEvents.length,
-      capped,
-    },
-    anomalies: {
-      duplicateOutbound,
-      // `messages` is a subset of the already-capped `rawEvents`, so a
-      // per-detector cap would only fire when 100% of fetched events are
-      // message.sent. Reuse the global `capped` signal instead so the
-      // truncation warning surfaces under realistic mixed traffic.
-      duplicateOutboundTruncated: capped,
-      firstSeenTools,
-      gatewayDropSpikes,
-      denialSpikes,
-      installEvents,
-      integrityViolations,
-    },
+    unverifiedAnchored,
+    tamperedEvents,
+    note: smtCheckpointed ? null : "SMT has no checkpointed leaves yet — tamper scan skipped.",
   };
 }
 

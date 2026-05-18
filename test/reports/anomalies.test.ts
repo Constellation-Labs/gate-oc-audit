@@ -4,7 +4,6 @@ import {
   detectGatewayDropSpike,
   detectDenialSpike,
   detectInstallEvents,
-  detectIntegrityViolations,
   type DetectorEvent,
 } from "../../src/reports/detectors.js";
 import { parseInstant, parseSince } from "../../src/reports/time-window.js";
@@ -222,16 +221,6 @@ describe("detectInstallEvents", () => {
   });
 });
 
-describe("detectIntegrityViolations", () => {
-  it("passes inputs through into a finding shape", () => {
-    const out = detectIntegrityViolations(
-      [{ checkpointId: "cp1", sequenceStart: 1, sequenceEnd: 10, smtRoot: "abc", deTxHash: "tx1", createdAt: "2026-05-18T00:00:00.000Z" }],
-      [{ id: "e1", sequence: 7, createdAt: "2026-05-18T00:30:00.000Z", eventType: "tool.invoked" }],
-    );
-    assert.equal(out.unverifiedAnchored.length, 1);
-    assert.equal(out.tamperedEvents.length, 1);
-  });
-});
 
 describe("parseInstant", () => {
   const now = new Date("2026-05-18T12:00:00.000Z");
