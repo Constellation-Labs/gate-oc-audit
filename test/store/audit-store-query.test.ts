@@ -89,6 +89,12 @@ describe("AuditStore.query", () => {
     assert.equal(events.length, 2);
   });
 
+  it("filters by afterSequence (strict greater-than)", () => {
+    for (let i = 0; i < 5; i++) insert(store, { description: `e-${i}` });
+    const events = store.query({ afterSequence: 2, order: "asc" });
+    assert.deepEqual(events.map((e) => e.sequence), [3, 4, 5]);
+  });
+
   it("combines multiple filters", () => {
     insert(store, { sessionId: "a", eventType: "session.start", category: "system" });
     insert(store, { sessionId: "a", eventType: "tool.invoked", category: "tool" });
@@ -192,6 +198,21 @@ describe("AuditStore.count", () => {
   it("returns correct count", () => {
     for (let i = 0; i < 5; i++) insert(store);
     assert.equal(store.count(), 5);
+  });
+
+  it("applies the same filters as query()", () => {
+    for (let i = 0; i < 6; i++) insert(store);
+    assert.equal(store.count({ afterSequence: 2 }), 4);
+    assert.equal(store.count({ afterSequence: 5 }), 1);
+    assert.equal(store.count({ afterSequence: 6 }), 0);
+  });
+
+  it("applies category filter", () => {
+    insert(store, { category: "system" });
+    insert(store, { eventType: "tool.invoked", category: "tool" });
+    insert(store, { eventType: "tool.invoked", category: "tool" });
+    assert.equal(store.count({ category: "tool" }), 2);
+    assert.equal(store.count(), 3);
   });
 });
 

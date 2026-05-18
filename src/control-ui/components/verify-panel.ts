@@ -119,10 +119,12 @@ export class VerifyPanel extends LitElement {
     }
   }
 
-  private jumpToInterval(seqStart: number, seqEnd: number) {
-    // Phase 1 event-table doesn't read query params yet, but plant the hash
-    // anyway so a future enhancement / users sharing a link can use it.
-    window.location.hash = `#/events?afterSeq=${seqStart - 1}&beforeSeq=${seqEnd + 1}`;
+  private jumpRange(m: { sequenceStart: number; sequenceEnd: number; tamperedStart?: number; tamperedEnd?: number }) {
+    // Fall back to the checkpoint range when the verifier didn't identify
+    // specific tampered rows (events-missing has nothing to scan).
+    const start = m.tamperedStart ?? m.sequenceStart;
+    const end = m.tamperedEnd ?? m.sequenceEnd;
+    window.location.hash = `#/events?focusSeq=${start}&rangeStart=${start}&rangeEnd=${end}`;
   }
 
   render() {
@@ -197,13 +199,18 @@ export class VerifyPanel extends LitElement {
             </p>
             <div class="row"><span class="k">checkpoint id</span><span class="v">${m.checkpointId}</span></div>
             <div class="row"><span class="k">sequence range</span><span class="v">${m.sequenceStart}–${m.sequenceEnd}</span></div>
+            ${m.tamperedStart !== undefined && m.tamperedEnd !== undefined
+              ? html`<div class="row"><span class="k">tampered range</span><span class="v">${m.tamperedStart}–${m.tamperedEnd}</span></div>`
+              : ""}
             <div class="row"><span class="k">anchored at</span><span class="v">${m.createdAt}</span></div>
             <div class="row"><span class="k">expected root</span><span class="v">${m.expectedRoot}</span></div>
             <div class="row"><span class="k">computed root</span><span class="v">${m.computedRoot}</span></div>
             <div class="row"><span class="k">duration</span><span class="v">${r.durationMs} ms</span></div>
             <p style="margin-top:12px">
-              <button @click=${() => this.jumpToInterval(m.sequenceStart, m.sequenceEnd)}>
-                Jump to interval in event log
+              <button @click=${() => this.jumpRange(m)}>
+                ${m.tamperedStart !== undefined
+                  ? html`Jump to first tampered event (#${m.tamperedStart})`
+                  : html`Jump to interval in event log`}
               </button>
             </p>
           </div>`;

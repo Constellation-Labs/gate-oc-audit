@@ -27,6 +27,11 @@ export interface VerifyMismatch {
   checkpointId: string;
   sequenceStart: number;
   sequenceEnd: number;
+  /** First/last sequences whose current content no longer hashes to a leaf
+   *  in the live SMT. Only set for root-mismatch; events-missing has no rows
+   *  to scan. */
+  tamperedStart?: number;
+  tamperedEnd?: number;
   expectedRoot: string;
   computedRoot: string;
   createdAt: string;
@@ -201,12 +206,15 @@ export class Verifier {
           checkpointsChecked++;
           const computed = store.getRoot();
           if (computed !== cp.smtRoot) {
+            const tampered = this.findTamperedRange();
             return {
               kind: "mismatch",
               mismatch: {
                 checkpointId: cp.id,
                 sequenceStart: cp.sequenceStart,
                 sequenceEnd: cp.sequenceEnd,
+                tamperedStart: tampered?.start,
+                tamperedEnd: tampered?.end,
                 expectedRoot: cp.smtRoot,
                 computedRoot: computed,
                 createdAt: cp.createdAt,
@@ -222,6 +230,43 @@ export class Verifier {
     }
 
     return { kind: "ok", checkpointsChecked };
+  }
+
+  // Scan every event the SMT tracks and bracket the [first, last] sequence
+  // whose current content no longer matches a stored leaf. Mirrors the
+  // per-row rule classifyEvent applies on /api/events.
+  private findTamperedRange(): { start: number; end: number } | undefined {
+    const smtLastSeq = this.smtService.getLastCheckpointedSequence();
+    let min: number | undefined;
+    let max: number | undefined;
+    let afterSeq = 0;
+    while (true) {
+      const batch = this.store.query({
+        afterSequence: afterSeq,
+        limit: BATCH,
+        order: "asc",
+        includeContent: true,
+      });
+      if (batch.length === 0) break;
+      for (const event of batch) {
+        if (event.sequence > smtLastSeq) {
+          // Past the SMT's high-water mark — these are "untracked", not
+          // tampered. Stop here; subsequent events are all beyond smtLastSeq.
+          if (min === undefined || max === undefined) return undefined;
+          return { start: min, end: max };
+        }
+        const rawHash = this.smtService.computeRawHash(event);
+        const found = this.smtService.findContainingTreeKey(rawHash);
+        if (found === null) {
+          if (min === undefined) min = event.sequence;
+          max = event.sequence;
+        }
+        afterSeq = event.sequence;
+      }
+      if (batch.length < BATCH) break;
+    }
+    if (min === undefined || max === undefined) return undefined;
+    return { start: min, end: max };
   }
 
   private applyEvent(

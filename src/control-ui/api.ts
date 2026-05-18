@@ -94,6 +94,8 @@ export interface EventsQuery {
   type?: string;
   category?: string;
   session?: string;
+  /** Land on the page containing this sequence; server overrides `offset`. */
+  focusSeq?: number;
 }
 
 export function listEvents(q: EventsQuery = {}): Promise<EventsResponse> {
@@ -103,6 +105,7 @@ export function listEvents(q: EventsQuery = {}): Promise<EventsResponse> {
   if (q.type) params.set("type", q.type);
   if (q.category) params.set("category", q.category);
   if (q.session) params.set("session", q.session);
+  if (q.focusSeq !== undefined) params.set("focusSeq", String(q.focusSeq));
   const qs = params.toString();
   return fetchJson<EventsResponse>(`events${qs ? "?" + qs : ""}`);
 }
@@ -127,6 +130,8 @@ export interface VerifyMismatch {
   checkpointId: string;
   sequenceStart: number;
   sequenceEnd: number;
+  tamperedStart?: number;
+  tamperedEnd?: number;
   expectedRoot: string;
   computedRoot: string;
   createdAt: string;
