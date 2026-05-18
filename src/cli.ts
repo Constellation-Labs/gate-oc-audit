@@ -6,10 +6,13 @@ import { resolveAuditUiUrl } from "./util/gateway-url.js";
 import { streamExport, type ExportFormat } from "./ui/export.js";
 import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
 import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
-import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
+import { parseDate, parseWeek, parseSince, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
 import { buildProjection } from "./reports/projection.js";
 import { formatProjectionText } from "./reports/format-text.js";
 import { formatProjectionHtml } from "./reports/format-html.js";
+import { buildAnomalyView } from "./reports/anomalies-view.js";
+import { formatAnomalyViewText } from "./reports/format-anomalies-text.js";
+import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -367,4 +370,49 @@ function parsePositiveInt(value: string | undefined, flag: string, max: number):
     throw new Error(`${flag} must not exceed ${max} (got "${value}")`);
   }
   return n;
+}
+
+export interface AuditAnomaliesOptions {
+  since?: string;
+  until?: string;
+  tz?: string;
+  json?: boolean;
+  html?: boolean;
+  dupWindowSec?: string;
+  lookbackDays?: string;
+  denialWindowSec?: string;
+  denialThreshold?: string;
+  dropWindowSec?: string;
+  dropThreshold?: string;
+}
+
+export function cliAnomaliesHandler(
+  store: AuditStore,
+  smtService: SmtService,
+  opts: AuditAnomaliesOptions = {},
+): void {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
+  const window = parseSince(opts.since ?? "24h", opts.until, tz);
+
+  const view = buildAnomalyView(store, smtService, window, {
+    dupWindowSec: parsePositiveInt(opts.dupWindowSec, "--dup-window-sec", 86_400),
+    lookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
+    denialWindowSec: parsePositiveInt(opts.denialWindowSec, "--denial-window-sec", 86_400),
+    denialThreshold: parsePositiveInt(opts.denialThreshold, "--denial-threshold", 1_000_000),
+    dropWindowSec: parsePositiveInt(opts.dropWindowSec, "--drop-window-sec", 86_400),
+    dropThreshold: parsePositiveInt(opts.dropThreshold, "--drop-threshold", 1_000_000),
+  });
+
+  if (opts.json === true) {
+    outLine(JSON.stringify(view));
+    return;
+  }
+  if (opts.html === true) {
+    process.stdout.write(formatAnomalyViewHtml(view));
+    return;
+  }
+  process.stdout.write(formatAnomalyViewText(view));
 }

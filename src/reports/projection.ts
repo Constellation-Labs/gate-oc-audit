@@ -1,5 +1,5 @@
 import type { AuditStore } from "../store/audit-store.js";
-import { subtractCalendarDays, type TimeWindow } from "./time-window.js";
+import { subtractCalendarDays, type DailyWindow, type WeeklyWindow } from "./time-window.js";
 import { detectDuplicateOutbound, detectFirstSeenTools, type DuplicateOutboundFinding, type MessageSentRow } from "./detectors.js";
 
 /**
@@ -119,7 +119,7 @@ export interface BuildProjectionOptions {
 
 export function buildProjection(
   store: AuditStore,
-  window: TimeWindow,
+  window: DailyWindow | WeeklyWindow,
   opts: BuildProjectionOptions = {},
 ): AuditProjection {
   const dupWindowSec = opts.duplicateOutboundWindowSec ?? DEFAULT_DUP_OUTBOUND_WINDOW_SEC;
