@@ -561,9 +561,9 @@ export class AuditStore {
     }
   }
 
-  query(opts: QueryOptions = {}): AuditEvent[] {
+  private buildWhere(opts: QueryOptions): { where: string; params: Record<string, string | number> } {
     const conditions: string[] = [];
-    const params: Record<string, unknown> = {};
+    const params: Record<string, string | number> = {};
 
     if (opts.eventType) {
       conditions.push("event_type = @eventType");
@@ -603,7 +603,14 @@ export class AuditStore {
       }
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    return {
+      where: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
+      params,
+    };
+  }
+
+  query(opts: QueryOptions = {}): AuditEvent[] {
+    const { where, params } = this.buildWhere(opts);
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
     const order = opts.order === "asc" ? "ASC" : "DESC";
@@ -624,8 +631,11 @@ export class AuditStore {
     return rows.map((row) => rowToEvent(row, previewChars));
   }
 
-  count(): number {
-    return (this.db.prepare("SELECT COUNT(*) as c FROM audit_events").get() as { c: number }).c;
+  count(opts: QueryOptions = {}): number {
+    const { where, params } = this.buildWhere(opts);
+    return (this.db
+      .prepare(`SELECT COUNT(*) as c FROM audit_events ${where}`)
+      .get(params) as unknown as { c: number }).c;
   }
 
   getById(id: string, opts: { includeContent?: boolean } = {}): AuditEvent | undefined {

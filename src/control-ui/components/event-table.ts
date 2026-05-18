@@ -7,6 +7,38 @@ import type { FiltersValue } from "./event-filters.ts";
 
 const PAGE_SIZE = 10;
 
+interface FocusInfo {
+  /** The sequence the initial page lands on. */
+  seq: number;
+  /** Optional inclusive range to highlight; defaults to [seq, seq]. */
+  rangeStart: number;
+  rangeEnd: number;
+}
+
+// Sequences are positive int32s; clamp anything else away so a crafted hash
+// can't ferry a giant or negative value into the API call (the server clamps
+// too, but keeping the client honest avoids a confusing empty-page render).
+const MAX_SEQ = 0x7fffffff;
+function parsePositiveInt(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_SEQ ? n : undefined;
+}
+
+function readFocusFromHash(): FocusInfo | undefined {
+  const hash = window.location.hash;
+  const qIdx = hash.indexOf("?");
+  if (qIdx < 0) return undefined;
+  const params = new URLSearchParams(hash.slice(qIdx + 1));
+  const seq = parsePositiveInt(params.get("focusSeq"));
+  if (seq === undefined) return undefined;
+  return {
+    seq,
+    rangeStart: parsePositiveInt(params.get("rangeStart")) ?? seq,
+    rangeEnd: parsePositiveInt(params.get("rangeEnd")) ?? seq,
+  };
+}
+
 @customElement("event-table")
 export class EventTable extends LitElement {
   static styles = css`
@@ -125,6 +157,35 @@ export class EventTable extends LitElement {
       text-align: center;
       color: var(--fg-dim);
     }
+    .seq-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px 6px 12px;
+      margin-bottom: 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg-elev2);
+      font-size: 12px;
+      color: var(--fg);
+    }
+    .seq-chip button {
+      background: transparent;
+      border: 0;
+      color: var(--fg-dim);
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    .seq-chip button:hover { color: var(--fg); background: var(--bg-elev); }
+    tr.row.focused td {
+      background: color-mix(in srgb, var(--err) 12%, transparent);
+    }
+    tr.row.focused:hover td {
+      background: color-mix(in srgb, var(--err) 18%, transparent);
+    }
   `;
 
   @state() private events: ApiEvent[] = [];
@@ -135,10 +196,52 @@ export class EventTable extends LitElement {
   @state() private degraded = false;
   @state() private filters: FiltersValue = { type: "", category: "", session: "" };
   @state() private detailId?: string;
+  /** Sticky informational marker for a jumped-to event/range. Does NOT filter
+   *  the result set — Prev/Next walk the full log. Cleared on dismiss, on a
+   *  filter change, or when the URL hash drops the focusSeq param. */
+  @state() private focus?: FocusInfo;
+  /** Set when the next `load()` should ask the server to snap to the focused
+   *  sequence's page. Cleared after that load; subsequent paginations leave
+   *  the offset under client control. */
+  private pendingFocus = false;
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.syncFromHash();
+    window.addEventListener("hashchange", this.onHashChange);
     void this.load();
+  }
+
+  disconnectedCallback(): void {
+    window.removeEventListener("hashchange", this.onHashChange);
+    super.disconnectedCallback();
+  }
+
+  private onHashChange = (): void => {
+    const before = this.focus;
+    this.syncFromHash();
+    const after = this.focus;
+    const changed = before?.seq !== after?.seq
+      || before?.rangeStart !== after?.rangeStart
+      || before?.rangeEnd !== after?.rangeEnd;
+    if (changed) {
+      void this.load();
+    }
+  };
+
+  private syncFromHash(): void {
+    const info = readFocusFromHash();
+    if (info) {
+      this.focus = info;
+      this.pendingFocus = true;
+      // Clear existing filters so the focused row is guaranteed to be on the
+      // page the server lands on — otherwise filter + focus combinations can
+      // hide the targeted event. The server enforces the same invariant.
+      this.filters = { type: "", category: "", session: "" };
+    } else {
+      this.focus = undefined;
+      this.pendingFocus = false;
+    }
   }
 
   private async load() {
@@ -151,28 +254,53 @@ export class EventTable extends LitElement {
         type: this.filters.type || undefined,
         category: this.filters.category || undefined,
         session: this.filters.session || undefined,
+        focusSeq: this.pendingFocus ? this.focus?.seq : undefined,
       });
       this.events = res.events;
       this.total = res.total;
+      // When focusSeq is set the server computes the offset; adopt it so
+      // Prev/Next continue from that page.
+      this.offset = res.offset;
       this.degraded = res.degraded;
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
     } finally {
       this.loading = false;
+      this.pendingFocus = false;
     }
   }
 
   private onFilters(e: CustomEvent<FiltersValue>) {
     this.filters = e.detail;
     this.offset = 0;
+    // An explicit filter change retires the focus marker; the targeted row
+    // may not even match the new filters.
+    this.clearFocus();
+    void this.load();
+  }
+
+  private clearFocus = (): void => {
+    if (!this.focus) return;
+    this.focus = undefined;
+    // Synchronously cleared before the hash write so the listener's
+    // before/after comparison sees no change and skips a redundant reload.
+    window.location.hash = "#/events";
+  };
+
+  private lastPageOffset(): number {
+    if (this.total <= 0) return 0;
+    return Math.floor((this.total - 1) / PAGE_SIZE) * PAGE_SIZE;
+  }
+
+  private jumpToOffset(target: number) {
+    const next = Math.max(0, Math.min(target, this.lastPageOffset()));
+    if (next === this.offset) return;
+    this.offset = next;
     void this.load();
   }
 
   private page(delta: number) {
-    const next = Math.max(0, Math.min(this.offset + delta * PAGE_SIZE, Math.max(0, this.total - 1)));
-    if (next === this.offset) return;
-    this.offset = next;
-    void this.load();
+    this.jumpToOffset(this.offset + delta * PAGE_SIZE);
   }
 
   private fmtTime(iso: string): string {
@@ -211,7 +339,18 @@ export class EventTable extends LitElement {
   render() {
     const start = this.events.length === 0 ? 0 : this.offset + 1;
     const end = this.offset + this.events.length;
+    const focus = this.focus;
     return html`
+      ${focus
+        ? html`
+            <div class="seq-chip">
+              <span>${focus.rangeStart === focus.rangeEnd
+                ? `Jumped to event #${focus.seq} — Prev/Next walk the full log`
+                : `Jumped to event #${focus.seq} (interval ${focus.rangeStart}–${focus.rangeEnd}) — Prev/Next walk the full log`}</span>
+              <button title="Dismiss marker" aria-label="Dismiss marker" @click=${this.clearFocus}>×</button>
+            </div>
+          `
+        : ""}
       <div class="toolbar">
         <event-filters .value=${this.filters} @filters-change=${this.onFilters}></event-filters>
         <span class="status">
@@ -240,7 +379,7 @@ export class EventTable extends LitElement {
               </thead>
               <tbody>
                 ${this.events.map((ev) => html`
-                  <tr class="row" @click=${() => this.openDetail(ev.id)}>
+                  <tr class="row ${focus && ev.sequence >= focus.rangeStart && ev.sequence <= focus.rangeEnd ? "focused" : ""}" @click=${() => this.openDetail(ev.id)}>
                     <td class="seq">#${ev.sequence}</td>
                     <td class="status">${this.renderBadge(ev)}</td>
                     <td class="time">${this.fmtTime(ev.createdAt)}</td>
@@ -258,8 +397,10 @@ export class EventTable extends LitElement {
 
       <div class="paging">
         <span class="info">page size ${PAGE_SIZE}</span>
+        <button ?disabled=${this.offset === 0 || this.loading} @click=${() => this.jumpToOffset(0)}>First</button>
         <button ?disabled=${this.offset === 0 || this.loading} @click=${() => this.page(-1)}>Prev</button>
         <button ?disabled=${end >= this.total || this.loading} @click=${() => this.page(1)}>Next</button>
+        <button ?disabled=${end >= this.total || this.loading} @click=${() => this.jumpToOffset(this.lastPageOffset())}>Last</button>
       </div>
 
       ${this.detailId

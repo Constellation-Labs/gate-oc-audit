@@ -47,6 +47,13 @@ interface AuditUiContext {
    * existing UI routes are documented as relying on loopback for safety.
    */
   allowExportOnNonLoopback: boolean;
+  /**
+   * Operator opt-in to keep /api/verify enabled when the gateway binds
+   * beyond loopback. Off by default — verification gunzips and rehashes
+   * every event in the audit log, which is the same blast radius as the
+   * export (CPU-bound full-table scan).
+   */
+  allowVerifyOnNonLoopback: boolean;
 }
 
 /**
@@ -66,6 +73,15 @@ const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\
 const MAX_CONCURRENT_EXPORTS = 2;
 const EXPORT_LIMIT_HARD_CAP = 10_000_000;
 let inFlightExports = 0;
+
+/**
+ * Bound /api/verify the same way. A verification walks every event with
+ * `includeContent: true` (gunzip + rehash), and on root mismatch it makes a
+ * second full pass to locate the tampered range — so concurrent verifies
+ * pin the event loop on CPU work.
+ */
+const MAX_CONCURRENT_VERIFIES = 2;
+let inFlightVerifies = 0;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
@@ -158,16 +174,39 @@ function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[
   // Cap at 100 — per-row verification requires gunzipping the full content of
   // every returned event, so unbounded page sizes would blow up.
   const limit = clamp(parseInt32(url.searchParams.get("limit")) ?? 10, 1, 100);
-  const offset = Math.max(0, parseInt32(url.searchParams.get("offset")) ?? 0);
+  // Reject focusSeq < 1: sequences are always ≥ 1, so anything else is a
+  // malformed request (and `count({afterSequence:0})` returns the full
+  // total, which would snap to the last page — surprising and meaningless).
+  const focusSeqRaw = parseInt32(url.searchParams.get("focusSeq"));
+  const focusSeq = focusSeqRaw !== undefined && focusSeqRaw >= 1 ? focusSeqRaw : undefined;
   // Need full content (not just a preview) to recompute rawHash. We trim back
   // to a preview for the wire response so the table payload stays small.
-  const opts: QueryOptions = { limit, offset, order: "desc", includeContent: true };
-  const eventType = url.searchParams.get("type");
-  const category = url.searchParams.get("category");
-  const sessionId = url.searchParams.get("session");
-  if (eventType) opts.eventType = eventType;
-  if (category) opts.category = category;
-  if (sessionId) opts.sessionId = sessionId;
+  const opts: QueryOptions = { limit, order: "desc", includeContent: true };
+  // Filters are dropped when focusSeq is in play: combining them can hide
+  // the focused row from its own page, which defeats the marker. The only
+  // caller (event-table.syncFromHash) already clears its filters in this
+  // case; making the server enforce the same invariant means a hand-crafted
+  // URL behaves like the UI.
+  if (focusSeq === undefined) {
+    const eventType = url.searchParams.get("type");
+    const category = url.searchParams.get("category");
+    const sessionId = url.searchParams.get("session");
+    if (eventType) opts.eventType = eventType;
+    if (category) opts.category = category;
+    if (sessionId) opts.sessionId = sessionId;
+  }
+
+  // When focusSeq is set, override the client's offset to land on the page
+  // that contains the focused sequence. Position in a desc-ordered listing
+  // equals the number of events with a greater sequence.
+  let offset: number;
+  if (focusSeq !== undefined) {
+    const position = ctx.store.count({ afterSequence: focusSeq });
+    offset = Math.floor(position / limit) * limit;
+  } else {
+    offset = Math.max(0, parseInt32(url.searchParams.get("offset")) ?? 0);
+  }
+  opts.offset = offset;
 
   const events = ctx.store.query(opts);
   const anchoredSeq = lastAnchoredSequence(ctx);
@@ -180,7 +219,7 @@ function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[
     return { ...trimmed, verification };
   });
 
-  return { events: enriched, total: ctx.store.count(), limit, offset };
+  return { events: enriched, total: ctx.store.count(opts), limit, offset };
 }
 
 interface VerifyPayload {
@@ -317,6 +356,20 @@ async function handleApi(
 
   // POST /api/verify
   if (apiPath === "verify" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowVerifyOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit verify is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowVerifyOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    if (inFlightVerifies >= MAX_CONCURRENT_VERIFIES) {
+      res.setHeader("retry-after", "10");
+      sendError(res, 503, `at most ${MAX_CONCURRENT_VERIFIES} concurrent verifies allowed`);
+      return true;
+    }
     let body: unknown;
     try {
       body = await readJsonBody(req);
@@ -335,8 +388,13 @@ async function handleApi(
       sendError(res, 400, "from and to must be ISO 8601 timestamps");
       return true;
     }
-    const result = ctx.verifier.verifyRange({ from, to });
-    sendJson(res, 200, result);
+    inFlightVerifies++;
+    try {
+      const result = ctx.verifier.verifyRange({ from, to });
+      sendJson(res, 200, result);
+    } finally {
+      inFlightVerifies--;
+    }
     return true;
   }
 
@@ -523,6 +581,8 @@ export interface AuditUiOptions {
   isNonLoopback?: () => boolean;
   /** Operator opt-in to keep /api/export available when bound beyond loopback. */
   allowExportOnNonLoopback?: boolean;
+  /** Operator opt-in to keep /api/verify available when bound beyond loopback. */
+  allowVerifyOnNonLoopback?: boolean;
 }
 
 export function registerAuditUiRoutes(
@@ -541,6 +601,7 @@ export function registerAuditUiRoutes(
     deBaseUrl: opts.deBaseUrl,
     isNonLoopback: opts.isNonLoopback ?? (() => false),
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
+    allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
   };
 
   api.registerHttpRoute({

@@ -49,6 +49,7 @@ async function createUiRig(opts: {
   deBaseUrl?: string;
   isNonLoopback?: () => boolean;
   allowExportOnNonLoopback?: boolean;
+  allowVerifyOnNonLoopback?: boolean;
 } = {}): Promise<UiRig> {
   const dir = mkdtempSync(join(tmpdir(), "audit-ui-test-"));
   const dbPath = join(dir, "audit.db");
@@ -68,6 +69,7 @@ async function createUiRig(opts: {
     deBaseUrl: opts.deBaseUrl,
     isNonLoopback: opts.isNonLoopback,
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
+    allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback,
   });
 
   // Longest path wins so /plugins/audit/api/ matches before /plugins/audit/.
@@ -184,6 +186,68 @@ describe("ui: events list endpoint", () => {
   });
 });
 
+describe("ui: events list focusSeq offset-snap", () => {
+  let rig: UiRig;
+  let seqs: number[];
+  before(async () => {
+    rig = await createUiRig();
+    // 25 events → with limit=10 that's pages [25..16], [15..6], [5..1].
+    seqs = [];
+    for (let i = 0; i < 25; i++) {
+      seqs.push(rig.appendTracked(sampleInsert({ description: `e-${i}` })).sequence);
+    }
+  });
+  after(async () => { await rig.destroy(); });
+
+  it("snaps offset to the page containing focusSeq (mid-log)", async () => {
+    // seq 15 is at desc-index count(seq>15) = 10 → offset 10, page [15..6].
+    const target = seqs[14];
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/events?focusSeq=${target}&limit=10`);
+    const json = await res.json();
+    assert.equal(json.offset, 10);
+    assert.equal(json.total, 25);
+    assert.ok(json.events.some((e: AuditEvent) => e.sequence === target),
+      "focused row must be on the returned page");
+    assert.equal(json.events[0].sequence, 15);
+  });
+
+  it("snaps to offset 0 when focusSeq is the highest sequence", async () => {
+    const target = seqs[seqs.length - 1];
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/events?focusSeq=${target}&limit=10`);
+    const json = await res.json();
+    assert.equal(json.offset, 0);
+    assert.equal(json.events[0].sequence, target);
+  });
+
+  it("snaps to the last page when focusSeq is the lowest sequence", async () => {
+    const target = seqs[0];
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/events?focusSeq=${target}&limit=10`);
+    const json = await res.json();
+    assert.equal(json.offset, 20);
+    assert.ok(json.events.some((e: AuditEvent) => e.sequence === target));
+  });
+
+  it("rejects focusSeq < 1 by falling back to the client offset", async () => {
+    // focusSeq=0 / focusSeq=-5 must not snap to the last page.
+    for (const bad of ["0", "-5"]) {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/events?focusSeq=${bad}&limit=10&offset=0`);
+      const json = await res.json();
+      assert.equal(json.offset, 0, `focusSeq=${bad} should not override offset`);
+    }
+  });
+
+  it("drops filters when focusSeq is set so the focused row stays on the page", async () => {
+    // Append a tool-category row that doesn't match category=agent and pin
+    // focusSeq to it. The row would be filtered out by category=agent, but
+    // the server must drop filters when focusSeq is in play.
+    const odd = rig.appendTracked(sampleInsert({ category: "tool", eventType: "tool.invoked", description: "tool" }));
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/events?focusSeq=${odd.sequence}&category=agent&limit=10`);
+    const json = await res.json();
+    assert.ok(json.events.some((e: AuditEvent) => e.sequence === odd.sequence),
+      "filter must be ignored when focusSeq is set");
+  });
+});
+
 describe("ui: single event detail endpoint", () => {
   let rig: UiRig;
   before(async () => { rig = await createUiRig(); });
@@ -297,6 +361,36 @@ describe("ui: POST /api/verify endpoint", () => {
     assert.equal(res.status, 200);
     const json = await res.json();
     assert.equal(json.status, "anchor-pending");
+  });
+
+  it("returns 403 when the gateway is non-loopback and no opt-in is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/verify`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" }),
+      });
+      assert.equal(res.status, 403);
+      const body = await res.json();
+      assert.match(body.error, /allowVerifyOnNonLoopback/);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows verify when allowVerifyOnNonLoopback opts in on a non-loopback bind", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowVerifyOnNonLoopback: true });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/verify`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" }),
+      });
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
   });
 });
 
@@ -431,6 +525,113 @@ describe("verifier: chain replay result states", () => {
     assert.equal(result.status, "mismatch-at-interval");
     if (result.status === "mismatch-at-interval") {
       assert.equal(result.mismatchAt.reason, "root-mismatch");
+    }
+  });
+
+  it("leaves tamperedStart/tamperedEnd unset for the events-missing branch", async () => {
+    const localRig = await createUiRig();
+    try {
+      const evs = [
+        localRig.appendTracked(sampleInsert({ description: "a" })),
+        localRig.appendTracked(sampleInsert({ description: "b" })),
+        localRig.appendTracked(sampleInsert({ description: "c" })),
+      ];
+      const root = localRig.smt.getRoot()?.root ?? "";
+      localRig.store.insertCheckpoint("cp-missing", evs[0]!.sequence, evs[2]!.sequence, root, evs.length, "0xanchor");
+      // Drop the rows underneath the anchored checkpoint to force the
+      // events-missing branch in verifyRange.
+      localRig.store["db"].prepare("DELETE FROM audit_events").run();
+
+      const result = localRig.verifier.verifyRange({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" });
+      assert.equal(result.status, "mismatch-at-interval");
+      if (result.status === "mismatch-at-interval") {
+        assert.equal(result.mismatchAt.reason, "events-missing");
+        assert.equal(result.mismatchAt.tamperedStart, undefined);
+        assert.equal(result.mismatchAt.tamperedEnd, undefined);
+      }
+    } finally {
+      await localRig.destroy();
+    }
+  });
+
+  it("excludes events past smtLastSeq from the tampered range (untracked tail)", async () => {
+    const localRig = await createUiRig();
+    try {
+      // Five events go through the SMT.
+      const tracked = [
+        localRig.appendTracked(sampleInsert({ description: "t1" })),
+        localRig.appendTracked(sampleInsert({ description: "t2" })),
+        localRig.appendTracked(sampleInsert({ description: "tamper-me" })),
+        localRig.appendTracked(sampleInsert({ description: "t4" })),
+        localRig.appendTracked(sampleInsert({ description: "t5" })),
+      ];
+      const root = localRig.smt.getRoot()?.root ?? "";
+      localRig.store.insertCheckpoint(
+        "cp-tail",
+        tracked[0]!.sequence,
+        tracked[tracked.length - 1]!.sequence,
+        root,
+        tracked.length,
+        "0xanchor",
+      );
+      // One extra row appended without inserting into the SMT — simulates
+      // the SIGINT-captured gateway.stop path. Its sequence is > smtLastSeq.
+      const untracked = localRig.appendUntracked(sampleInsert({ description: "untracked-tail" }));
+      assert.ok(untracked.sequence > localRig.smt.getLastCheckpointedSequence());
+
+      // Tamper one tracked row so root-mismatch triggers and findTamperedRange runs.
+      const target = tracked[2]!;
+      localRig.store["db"].prepare("UPDATE audit_events SET description = ? WHERE id = ?")
+        .run("MUTATED", target.id);
+
+      const result = localRig.verifier.verifyRange({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" });
+      assert.equal(result.status, "mismatch-at-interval");
+      if (result.status === "mismatch-at-interval") {
+        assert.equal(result.mismatchAt.reason, "root-mismatch");
+        assert.equal(result.mismatchAt.tamperedStart, target.sequence);
+        assert.equal(result.mismatchAt.tamperedEnd, target.sequence,
+          "untracked tail row past smtLastSeq must not extend the tampered range");
+      }
+    } finally {
+      await localRig.destroy();
+    }
+  });
+
+  it("narrows tamperedStart/tamperedEnd to actually-tampered rows inside the checkpoint", async () => {
+    const localRig = await createUiRig();
+    try {
+      const events = [
+        localRig.appendTracked(sampleInsert({ description: "clean 1" })),
+        localRig.appendTracked(sampleInsert({ description: "clean 2" })),
+        localRig.appendTracked(sampleInsert({ description: "to-tamper a" })),
+        localRig.appendTracked(sampleInsert({ description: "clean 3" })),
+        localRig.appendTracked(sampleInsert({ description: "to-tamper b" })),
+        localRig.appendTracked(sampleInsert({ description: "clean 4" })),
+      ];
+      const root = localRig.smt.getRoot()?.root ?? "";
+      const first = events[0]!.sequence;
+      const last = events[events.length - 1]!.sequence;
+      localRig.store.insertCheckpoint("cp-multi", first, last, root, events.length, "0xanchor");
+
+      // Tamper the 3rd and 5th rows — verifier should bracket [#3 .. #5].
+      const tamperedA = events[2]!;
+      const tamperedB = events[4]!;
+      localRig.store["db"].prepare("UPDATE audit_events SET description = ? WHERE id = ?")
+        .run("MUTATED A", tamperedA.id);
+      localRig.store["db"].prepare("UPDATE audit_events SET description = ? WHERE id = ?")
+        .run("MUTATED B", tamperedB.id);
+
+      const result = localRig.verifier.verifyRange({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" });
+      assert.equal(result.status, "mismatch-at-interval");
+      if (result.status === "mismatch-at-interval") {
+        assert.equal(result.mismatchAt.reason, "root-mismatch");
+        assert.equal(result.mismatchAt.sequenceStart, first);
+        assert.equal(result.mismatchAt.sequenceEnd, last);
+        assert.equal(result.mismatchAt.tamperedStart, tamperedA.sequence);
+        assert.equal(result.mismatchAt.tamperedEnd, tamperedB.sequence);
+      }
+    } finally {
+      await localRig.destroy();
     }
   });
 });

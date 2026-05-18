@@ -615,6 +615,7 @@ export default (() => {
                 deBaseUrl: deExplorerBaseUrl,
                 isNonLoopback: () => resolveGatewayBaseUrl().nonLoopback,
                 allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
+                allowVerifyOnNonLoopback: config.allowVerifyOnNonLoopback === true,
             });
 
             api.registerService({
