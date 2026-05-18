@@ -119,9 +119,26 @@ Or directly in the config JSON:
 
 #### Notifications
 
+Two channels, deliberately separate so incident pokes and periodic digests can be routed to different rooms:
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
+openclaw config set plugins.entries.constellation-audit-plugin.config.reportWebhook "https://hooks.slack.com/services/AAA/BBB/DDD"
+```
+
+```json
+{
+  "config": {
+    "notificationWebhook": "https://hooks.slack.com/services/AAA/BBB/CCC",
+    "reportWebhook": "https://hooks.slack.com/services/AAA/BBB/DDD"
+  }
+}
+```
+
 | Option | Default | Description |
 |---|---|---|
-| `notificationWebhook` | — | Webhook URL for alerts (config changes, integrity violations, DE divergence) |
+| `notificationWebhook` | — | Webhook URL for incident alerts (config changes, integrity violations, DE divergence) |
+| `reportWebhook` | — | Webhook URL for daily and weekly audit digests. Fires shortly after local midnight (daily) and local Monday 00:00 (weekly). Payload is Slack-compatible `{text, blocks, projection}` — receivers that ignore extras still get a pretty message; ETL receivers parse the full `projection` (same schema as `audit report`). Cadence resolution is ~5 minutes due to the calendar-poll scheduler; a digest scheduled for 00:00 may arrive anywhere in `[00:00, 00:05)`. |
 
 #### Identity
 
