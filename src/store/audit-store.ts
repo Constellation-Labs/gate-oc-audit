@@ -173,6 +173,7 @@ export class AuditStore {
   private db: DatabaseSync;
   private machineId: string;
   private degraded = false;
+  private closed = false;
   private readOnly: boolean;
   private insertStmt: StatementSync;
   private instanceId: string;
@@ -331,6 +332,10 @@ export class AuditStore {
   append(insert: AuditEventInsert): AuditEvent | undefined {
     if (this.readOnly) {
       log.warn("append() called on a read-only store; dropping event");
+      return undefined;
+    }
+    if (this.closed) {
+      log.warn("append() called on a closed store; dropping event");
       return undefined;
     }
     try {
@@ -730,6 +735,7 @@ export class AuditStore {
   }
 
   close(): void {
+    this.closed = true;
     this.db.close();
   }
 }

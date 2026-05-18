@@ -109,7 +109,7 @@ export interface AnchorService {
     isActive(): boolean;
     setSmtService(smt: SmtService): void;
     start(): Promise<void>;
-    stop(): void;
+    stop(): Promise<void>;
     notifyAppend(): void;
     /**
      * Anchor the current SMT root to DE if enough events have accumulated.
@@ -151,7 +151,7 @@ export class NoOpAnchorService implements AnchorService {
 
     async start(): Promise<void> { /* no-op */ }
 
-    stop(): void { /* no-op */ }
+    async stop(): Promise<void> { /* no-op */ }
 
     notifyAppend(): void { /* no-op */ }
 
@@ -212,7 +212,8 @@ class ActiveAnchorService implements AnchorService {
     private circuitOpenCount = 0;
     private circuitOpenUntil = 0;
     private appendsSinceLastCheckpoint = 0;
-    private anchorInFlight = false;
+    private anchorPromise: Promise<void> | undefined;
+    private stopped = false;
 
     constructor(cfg: ActiveAnchorConfig) {
         this.store = cfg.store;
@@ -252,14 +253,19 @@ class ActiveAnchorService implements AnchorService {
         deAnchorLog.info("Started successfully");
     }
 
-    stop(): void {
+    async stop(): Promise<void> {
+        this.stopped = true;
         if (this.timer) {
             clearInterval(this.timer);
             this.timer = undefined;
         }
+        if (this.anchorPromise) {
+            await this.anchorPromise.catch(() => {});
+        }
     }
 
     notifyAppend(): void {
+        if (this.stopped) return;
         this.appendsSinceLastCheckpoint++;
         if (this.appendsSinceLastCheckpoint >= this.eventThreshold) {
             deAnchorLog.info(`Threshold reached (${this.appendsSinceLastCheckpoint}/${this.eventThreshold}), triggering anchor`);
@@ -268,14 +274,21 @@ class ActiveAnchorService implements AnchorService {
     }
 
     async anchorIfNeeded(minEvents: number = this.eventThreshold): Promise<void> {
-        if (this.anchorInFlight) return;
+        if (this.stopped) return;
+        if (this.anchorPromise) return this.anchorPromise;
         if (this.isCircuitOpen()) {
             const waitMs = this.circuitOpenUntil - Date.now();
             deAnchorLog.warn(`anchor skipped — circuit breaker open (${this.consecutiveFailures} consecutive failures, retry in ${Math.max(0, Math.round(waitMs / 1000))}s)`);
             return;
         }
 
-        this.anchorInFlight = true;
+        this.anchorPromise = this.doAnchor(minEvents).finally(() => {
+            this.anchorPromise = undefined;
+        });
+        return this.anchorPromise;
+    }
+
+    private async doAnchor(minEvents: number): Promise<void> {
         try {
             const lastCheckpoint = this.store.getLastCheckpoint();
             const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
@@ -318,7 +331,6 @@ class ActiveAnchorService implements AnchorService {
             // on failure prevents unbounded growth (which would dispatch on every append
             // while DE is down); the timer with timerMinEvents=1 handles retry cadence.
             this.appendsSinceLastCheckpoint = 0;
-            this.anchorInFlight = false;
         }
     }
 

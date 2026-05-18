@@ -119,10 +119,18 @@ export class ConfigWatcher {
     this.watcher.on("unlink", (filePath: string) => this.handleChange(filePath, "removed"));
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.watcher) {
-      this.watcher.close().catch(() => {});
+      const watcher = this.watcher;
       this.watcher = undefined;
+      // chokidar's close() only awaits fs handle closers, not the event
+      // emission queue. Queued handleChange callbacks can still fire after
+      // this await resolves; they're safe today because the host stops
+      // watchers before retention.stop closes the store.
+      await watcher.close().catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(`config watcher close failed: ${msg}`);
+      });
     }
   }
 
