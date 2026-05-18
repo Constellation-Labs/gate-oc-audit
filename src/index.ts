@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
+import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions, type AuditReportOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -143,6 +143,33 @@ export default (() => {
                             cliInventoryHandler(getStore(), kind, opts, resolveCollectOpts()),
                         );
                 }
+
+                // Report subcommands (daily / weekly digest)
+                const report = audit.command("report").description("Daily / weekly audit digest with anomaly detectors");
+
+                report
+                    .command("daily")
+                    .description("Generate a daily activity digest")
+                    .option("--date <yyyy-mm-dd>", "Date to report on (default: today)")
+                    .option("--tz <local|utc>", "Timezone for the date boundary (default: utc)")
+                    .option("--json", "Emit the projection as JSON (single line)")
+                    .option("--html", "Emit the projection as a self-contained HTML document")
+                    .option("--dup-window-sec <n>", "Duplicate-outbound detector window (default: 60)")
+                    .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
+                    .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
+                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "daily", opts));
+
+                report
+                    .command("weekly")
+                    .description("Generate a weekly activity digest (ISO 8601 week)")
+                    .option("--week <yyyy-Www>", "ISO week to report on (default: this week)")
+                    .option("--tz <local|utc>", "Timezone for the week boundary (default: utc)")
+                    .option("--json", "Emit the projection as JSON (single line)")
+                    .option("--html", "Emit the projection as a self-contained HTML document")
+                    .option("--dup-window-sec <n>", "Duplicate-outbound detector window (default: 60)")
+                    .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
+                    .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
+                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "weekly", opts));
 
                 // SMT subcommands
                 const smt = audit.command("smt").description("Sparse Merkle Tree operations");

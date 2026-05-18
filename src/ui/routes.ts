@@ -16,6 +16,9 @@ import type { AuditEvent } from "../types/events.js";
 import { serveStaticFile } from "../util/asset-server.js";
 import { pipeExportToResponse, type ExportFilters, type ExportFormat } from "./export.js";
 import { log } from "../util/logger.js";
+import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "../reports/time-window.js";
+import { buildProjection } from "../reports/projection.js";
+import { formatProjectionHtml } from "../reports/format-html.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -405,7 +408,86 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/report?period=daily|weekly&date=YYYY-MM-DD&week=YYYY-Www&tz=local|utc&format=json|html
+  if (apiPath === "report" && req.method === "GET") {
+    // Match /api/export's caution: the report surfaces aggregated channel,
+    // recipient, tool, and content-hash metadata. The other /api/* routes
+    // also leak similar metadata without this gate, but those predate the
+    // explicit non-loopback policy switch — new routes opt in to the gate
+    // so the policy can be tightened by default in a later pass.
+    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit report is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    const period = url.searchParams.get("period");
+    if (period !== "daily" && period !== "weekly") {
+      sendError(res, 400, "period must be 'daily' or 'weekly'");
+      return true;
+    }
+    const tzParam = url.searchParams.get("tz");
+    if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
+      sendError(res, 400, "tz must be 'local' or 'utc'");
+      return true;
+    }
+    const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
+    let window;
+    try {
+      if (period === "daily") {
+        window = parseDate(url.searchParams.get("date") ?? todayInTz(tz), tz);
+      } else {
+        window = parseWeek(url.searchParams.get("week") ?? thisWeekInTz(tz), tz);
+      }
+    } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid window");
+      return true;
+    }
+    const dupWindow = parseOptPositiveInt(url.searchParams.get("dupWindowSec"), 3600);
+    const lookback = parseOptPositiveInt(url.searchParams.get("lookbackDays"), 365);
+    const topTools = parseOptPositiveInt(url.searchParams.get("topTools"), 1000);
+    if (dupWindow === "invalid" || lookback === "invalid" || topTools === "invalid") {
+      sendError(
+        res,
+        400,
+        "dupWindowSec (1..3600), lookbackDays (1..365), and topTools (1..1000) must be positive integers within range",
+      );
+      return true;
+    }
+    const projection = buildProjection(ctx.store, window, {
+      duplicateOutboundWindowSec: dupWindow,
+      firstSeenLookbackDays: lookback,
+      topToolsLimit: topTools,
+    });
+    const format = (url.searchParams.get("format") ?? "json").toLowerCase();
+    if (format === "html") {
+      const body = Buffer.from(formatProjectionHtml(projection));
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-length", String(body.length));
+      res.setHeader("cache-control", "no-store");
+      res.end(body);
+      return true;
+    }
+    if (format !== "json") {
+      sendError(res, 400, "format must be 'json' or 'html'");
+      return true;
+    }
+    sendJson(res, 200, projection);
+    return true;
+  }
+
   return false;
+}
+
+function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {
+  if (v === null || v === "") return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0 || n > max) return "invalid";
+  return n;
 }
 
 async function handleStatic(

@@ -192,6 +192,13 @@ export class AuditStore {
     getServiceHealth: StatementSync;
     upsertServiceHealth: StatementSync;
     countCheckpointsSince: StatementSync;
+    aggActivityByCategory: StatementSync;
+    aggCronByEventType: StatementSync;
+    aggToolInvocations: StatementSync;
+    aggLlmUsage: StatementSync;
+    aggMessageSentByChannel: StatementSync;
+    distinctToolNames: StatementSync;
+    reportFooterLastEvent: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -280,6 +287,78 @@ export class AuditStore {
              ON CONFLICT(name) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
           ),
       countCheckpointsSince: this.db.prepare("SELECT COUNT(*) AS c FROM integrity_checkpoints WHERE created_at >= ?"),
+
+      // Report aggregations. All windowed on created_at and grouped on
+      // json_extract paths; the (event_type, created_at) and (category,
+      // created_at) compound indexes (schema v5) keep these as
+      // index-range scans rather than full table scans.
+      aggActivityByCategory: this.db.prepare(`
+        SELECT category, COUNT(*) AS c
+        FROM audit_events
+        WHERE created_at >= @fromIso AND created_at < @toIso
+        GROUP BY category
+        ORDER BY c DESC
+      `),
+      aggCronByEventType: this.db.prepare(`
+        SELECT event_type, COUNT(*) AS c
+        FROM audit_events
+        WHERE category = 'cron'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY event_type
+      `),
+      // Filter NULL tool names to match distinctToolNames below. Without this,
+      // the first-seen-tool detector compares a today-set that contains a
+      // synthetic "<unknown>" bucket against a prior-set that doesn't,
+      // flagging `<unknown>` as first-seen on every report that has even one
+      // tool.invoked event with missing metadata.toolName.
+      aggToolInvocations: this.db.prepare(`
+        SELECT json_extract(metadata, '$.toolName') AS tool_name,
+               COUNT(*) AS invocations
+        FROM audit_events
+        WHERE event_type = 'tool.invoked'
+          AND created_at >= @fromIso AND created_at < @toIso
+          AND json_extract(metadata, '$.toolName') IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY invocations DESC
+      `),
+      aggLlmUsage: this.db.prepare(`
+        SELECT json_extract(metadata, '$.model')    AS model,
+               json_extract(metadata, '$.provider') AS provider,
+               COUNT(*) AS call_count,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.inputTokens')    AS INTEGER)), 0) AS input_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.outputTokens')   AS INTEGER)), 0) AS output_tokens,
+               COALESCE(SUM(CAST(COALESCE(json_extract(metadata, '$.cacheReadTokens'),
+                                          json_extract(metadata, '$.cacheTokens')) AS INTEGER)), 0) AS cache_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.cacheWriteTokens') AS INTEGER)), 0) AS cache_write_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.costUsd') AS REAL)), 0) AS cost_usd
+        FROM audit_events
+        WHERE event_type = 'prompt.response'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY model, provider
+        ORDER BY cost_usd DESC
+      `),
+      aggMessageSentByChannel: this.db.prepare(`
+        SELECT json_extract(metadata, '$.channel') AS channel,
+               COUNT(*) AS c
+        FROM audit_events
+        WHERE event_type = 'message.sent'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY channel
+        ORDER BY c DESC
+      `),
+      distinctToolNames: this.db.prepare(`
+        SELECT DISTINCT json_extract(metadata, '$.toolName') AS tool_name
+        FROM audit_events
+        WHERE event_type = 'tool.invoked'
+          AND created_at >= @fromIso AND created_at < @toIso
+          AND json_extract(metadata, '$.toolName') IS NOT NULL
+      `),
+      reportFooterLastEvent: this.db.prepare(`
+        SELECT id, sequence, content_hash, created_at
+        FROM audit_events
+        ORDER BY sequence DESC
+        LIMIT 1
+      `),
     };
   }
 
@@ -723,6 +802,74 @@ export class AuditStore {
   maxSequenceSince(seqStart: number): number | undefined {
     const row = this.stmts.maxSequenceSince.get(seqStart) as { seq: number | null };
     return row.seq ?? undefined;
+  }
+
+  // --- Report aggregations (used by `audit report daily|weekly`) ---
+
+  aggregateActivityByCategoryInWindow(fromIso: string, toIso: string): Array<{ category: string; count: number }> {
+    const rows = this.stmts.aggActivityByCategory.all({ fromIso, toIso }) as Array<{ category: string; c: number }>;
+    return rows.map((r) => ({ category: r.category, count: r.c }));
+  }
+
+  aggregateCronByEventTypeInWindow(fromIso: string, toIso: string): Array<{ eventType: string; count: number }> {
+    const rows = this.stmts.aggCronByEventType.all({ fromIso, toIso }) as Array<{ event_type: string; c: number }>;
+    return rows.map((r) => ({ eventType: r.event_type, count: r.c }));
+  }
+
+  aggregateToolInvocationsInWindow(fromIso: string, toIso: string): Array<{ toolName: string; invocations: number }> {
+    // SQL filters NULL toolNames; the result rows always have a string name.
+    const rows = this.stmts.aggToolInvocations.all({ fromIso, toIso }) as Array<{ tool_name: string; invocations: number }>;
+    return rows.map((r) => ({ toolName: r.tool_name, invocations: r.invocations }));
+  }
+
+  aggregateLlmUsageInWindow(fromIso: string, toIso: string): Array<{
+    model: string;
+    provider: string | null;
+    callCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheTokens: number;
+    cacheWriteTokens: number;
+    costUsd: number;
+  }> {
+    const rows = this.stmts.aggLlmUsage.all({ fromIso, toIso }) as Array<{
+      model: string | null;
+      provider: string | null;
+      call_count: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_tokens: number;
+      cache_write_tokens: number;
+      cost_usd: number;
+    }>;
+    return rows.map((r) => ({
+      model: r.model ?? "<unknown>",
+      provider: r.provider,
+      callCount: r.call_count,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheTokens: r.cache_tokens,
+      cacheWriteTokens: r.cache_write_tokens,
+      costUsd: r.cost_usd,
+    }));
+  }
+
+  aggregateMessageSentByChannelInWindow(fromIso: string, toIso: string): Array<{ channel: string; count: number }> {
+    const rows = this.stmts.aggMessageSentByChannel.all({ fromIso, toIso }) as Array<{ channel: string | null; c: number }>;
+    return rows.map((r) => ({ channel: r.channel ?? "<unknown>", count: r.c }));
+  }
+
+  distinctToolNamesInWindow(fromIso: string, toIso: string): string[] {
+    const rows = this.stmts.distinctToolNames.all({ fromIso, toIso }) as Array<{ tool_name: string }>;
+    return rows.map((r) => r.tool_name);
+  }
+
+  getReportLastEvent(): { id: string; sequence: number; contentHash: string; createdAt: string } | undefined {
+    const row = this.stmts.reportFooterLastEvent.get() as
+      | { id: string; sequence: number; content_hash: string; created_at: string }
+      | undefined;
+    if (!row) return undefined;
+    return { id: row.id, sequence: row.sequence, contentHash: row.content_hash, createdAt: row.created_at };
   }
 
   isDegraded(): boolean {
