@@ -6,10 +6,10 @@
  */
 
 export type TimeZoneMode = "local" | "utc";
-export type PeriodKind = "daily" | "weekly";
+export type PeriodKind = "daily" | "weekly" | "since";
 
 export interface TimeWindow {
-  /** "daily" or "weekly" — passed through so callers don't need to re-decide. */
+  /** "daily", "weekly", or "since" — passed through so callers don't need to re-decide. */
   kind: PeriodKind;
   /** Inclusive lower bound, ISO 8601 with offset (`...Z` for utc, local-offset for local). */
   fromIso: string;
@@ -178,4 +178,70 @@ export function thisWeekInTz(tz: TimeZoneMode): string {
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
+}
+
+const DURATION_RE = /^(\d+)(m|h|d)$/;
+
+/**
+ * Parse a "moment" — either a duration suffix relative to `now` (`15m`,
+ * `1h`, `24h`, `7d`) or an ISO 8601 instant with explicit offset (`Z` or
+ * `±HH:MM`). Returns an ISO 8601 string in UTC (`...Z`). Local-clock ISO
+ * strings without offset are rejected so window boundaries are unambiguous.
+ */
+// Cap durations at ~1000 years. Above this, n * unitMs overflows safe-integer
+// math and `new Date(...).toISOString()` either returns nonsense or throws
+// `RangeError: Invalid time value` — neither is a useful CLI failure mode.
+const MAX_DURATION_MS = 365_000 * 86_400_000;
+
+export function parseInstant(input: string, now: Date = new Date()): string {
+  const dur = DURATION_RE.exec(input);
+  if (dur) {
+    const n = Number(dur[1]);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error(`duration must be a positive integer (got "${input}")`);
+    }
+    const unitMs = dur[2] === "m" ? 60_000 : dur[2] === "h" ? 3_600_000 : 86_400_000;
+    const totalMs = n * unitMs;
+    if (!Number.isFinite(totalMs) || totalMs > MAX_DURATION_MS) {
+      throw new Error(`duration exceeds maximum supported range (~1000 years; got "${input}")`);
+    }
+    return new Date(now.getTime() - totalMs).toISOString();
+  }
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(input)) {
+    throw new Error(
+      `instant must be a duration (Nm|Nh|Nd) or ISO 8601 with explicit offset (got "${input}")`,
+    );
+  }
+  const t = Date.parse(input);
+  if (!Number.isFinite(t)) {
+    throw new Error(`could not parse ISO 8601 instant "${input}"`);
+  }
+  return new Date(t).toISOString();
+}
+
+/**
+ * Build a "since" window: `[parseInstant(since), parseInstant(until ?? now))`.
+ * The label is the literal pair so the report shows exactly what the operator
+ * asked for, not normalized ISO strings.
+ */
+export function parseSince(
+  since: string,
+  until: string | undefined,
+  tz: TimeZoneMode,
+  now: Date = new Date(),
+): TimeWindow {
+  const fromIso = parseInstant(since, now);
+  const toIso = until === undefined ? now.toISOString() : parseInstant(until, now);
+  if (toIso <= fromIso) {
+    // Echo the original literals alongside the parsed ISOs so a user passing
+    // `--since 1h --until 2h` sees both that the durations were swapped and
+    // what they resolved to. Without the literals the error reads as two
+    // wall-clock instants with no hint that "2h" means "two hours ago".
+    const untilLabel = until === undefined ? "(now)" : until;
+    throw new Error(
+      `--until (${untilLabel} → ${toIso}) must be strictly after --since (${since} → ${fromIso})`,
+    );
+  }
+  const label = `${fromIso} → ${toIso} (${tz})`;
+  return { kind: "since", fromIso, toIso, label, tz };
 }

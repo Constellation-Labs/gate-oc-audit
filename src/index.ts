@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions, type AuditReportOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -174,6 +174,24 @@ export default (() => {
                     .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
                     .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
                     .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "weekly", opts));
+
+                audit
+                    .command("anomalies")
+                    .description("Anomaly surface over an arbitrary time window")
+                    .option("--since <dur|iso>", "Window start: duration (Nm|Nh|Nd) or ISO 8601 instant (default: 24h)")
+                    .option("--until <dur|iso>", "Window end: duration (Nm|Nh|Nd) or ISO 8601 instant (default: now)")
+                    .option("--tz <local|utc>", "Timezone for the period label (default: utc)")
+                    .option("--json", "Emit the view as JSON (single line)")
+                    .option("--html", "Emit the view as a self-contained HTML document")
+                    .option("--dup-window-sec <n>", "Duplicate-outbound detector window (default: 60)")
+                    .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
+                    .option("--denial-window-sec <n>", "Denial-spike cluster window (default: 300)")
+                    .option("--denial-threshold <n>", "Min denials per cluster (default: 5)")
+                    .option("--drop-window-sec <n>", "Gateway-drop-spike cluster window (default: 300)")
+                    .option("--drop-threshold <n>", "Min drop milestones per cluster (default: 3)")
+                    .action((opts: AuditAnomaliesOptions) =>
+                        cliAnomaliesHandler(getStore(), getSmtService(), opts),
+                    );
 
                 // SMT subcommands
                 const smt = audit.command("smt").description("Sparse Merkle Tree operations");

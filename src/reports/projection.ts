@@ -216,7 +216,11 @@ export function buildProjection(
     schemaVersion: PROJECTION_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     period: {
-      kind: window.kind,
+      // buildProjection is only ever called with a daily/weekly window from
+      // cliReportHandler. TimeWindow.kind was widened for the "since" view;
+      // narrow back here so ProjectionPeriod stays restricted to the report's
+      // two kinds.
+      kind: window.kind === "weekly" ? "weekly" : "daily",
       fromIso: window.fromIso,
       toIso: window.toIso,
       label: window.label,

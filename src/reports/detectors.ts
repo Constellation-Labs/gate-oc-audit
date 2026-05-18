@@ -118,3 +118,278 @@ export function detectFirstSeenTools(today: ReadonlyArray<string>, prior: Readon
 function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
+
+/**
+ * Minimal event shape consumed by the new R12 detectors. We only need a few
+ * fields and we want callers (tests, the orchestrator) to be able to pass
+ * synthetic rows without constructing a full AuditEvent.
+ */
+export interface DetectorEvent {
+  id: string;
+  sequence: number;
+  createdAt: string;
+  eventType: string;
+  sessionId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface EventRef {
+  id: string;
+  sequence: number;
+  createdAt: string;
+}
+
+function toRef(e: DetectorEvent): EventRef {
+  return { id: e.id, sequence: e.sequence, createdAt: e.createdAt };
+}
+
+// ---------------------------------------------------------------------------
+// Gateway-drop spike
+// ---------------------------------------------------------------------------
+
+export interface GatewayDropSpikeFinding {
+  /** First event in the cluster. */
+  firstAt: string;
+  /** Last event in the cluster. */
+  lastAt: string;
+  /** Number of `gateway.dropped` milestone events in the cluster. */
+  count: number;
+  /** `cumulativeDropped` delta across the cluster (lastDropped − firstDropped). */
+  droppedDelta: number;
+  events: EventRef[];
+}
+
+/**
+ * Slide over `gateway.dropped` events ordered by createdAt; emit one finding
+ * per maximal run where ≥ `threshold` milestone events fall inside `windowSec`.
+ * Milestones are emitted on exponential thresholds by gateway-publisher, so
+ * even a small count usually signifies a large absolute drop count — the
+ * `droppedDelta` field surfaces the magnitude.
+ */
+export function detectGatewayDropSpike(
+  events: ReadonlyArray<DetectorEvent>,
+  windowSec: number,
+  threshold: number,
+): GatewayDropSpikeFinding[] {
+  if (events.length === 0 || threshold < 1 || windowSec <= 0) return [];
+  const sorted = [...events]
+    .filter((e) => e.eventType === "gateway.dropped")
+    .sort(byCreatedAt);
+  if (sorted.length < threshold) return [];
+
+  const windowMs = windowSec * 1000;
+  const findings: GatewayDropSpikeFinding[] = [];
+  let i = 0;
+  while (i < sorted.length) {
+    // Bound the cluster by both the gap to the next event AND the total span
+    // from the cluster's first event. Without the span check, a slow drip of
+    // events spaced just-under-windowSec apart collapses into one cluster
+    // labelled "N drops in windowSec" that actually spans many windowSecs —
+    // misleading the operator about the burst rate.
+    const startMs = Date.parse(sorted[i].createdAt);
+    let j = i + 1;
+    while (
+      j < sorted.length &&
+      Date.parse(sorted[j].createdAt) - Date.parse(sorted[j - 1].createdAt) <= windowMs &&
+      Date.parse(sorted[j].createdAt) - startMs <= windowMs
+    ) {
+      j++;
+    }
+    const count = j - i;
+    if (count >= threshold) {
+      const cluster = sorted.slice(i, j);
+      const firstDropped = cumulativeDropped(cluster[0]);
+      const lastDropped = cumulativeDropped(cluster[cluster.length - 1]);
+      findings.push({
+        firstAt: cluster[0].createdAt,
+        lastAt: cluster[cluster.length - 1].createdAt,
+        count,
+        droppedDelta: Math.max(0, lastDropped - firstDropped),
+        events: cluster.map(toRef),
+      });
+    }
+    i = j;
+  }
+  return findings;
+}
+
+function cumulativeDropped(e: DetectorEvent): number {
+  const v = e.metadata?.cumulativeDropped;
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Denial spike
+// ---------------------------------------------------------------------------
+
+export interface DenialSpikeFinding {
+  firstAt: string;
+  lastAt: string;
+  count: number;
+  byTool: Array<{ toolName: string; count: number }>;
+  topReason: string | null;
+  events: EventRef[];
+}
+
+/**
+ * Slide over `tool.denied` events ordered by createdAt; emit one finding per
+ * maximal run where ≥ `threshold` denials fall inside `windowSec`.
+ */
+export function detectDenialSpike(
+  events: ReadonlyArray<DetectorEvent>,
+  windowSec: number,
+  threshold: number,
+): DenialSpikeFinding[] {
+  if (events.length === 0 || threshold < 1 || windowSec <= 0) return [];
+  const sorted = [...events]
+    .filter((e) => e.eventType === "tool.denied")
+    .sort(byCreatedAt);
+  if (sorted.length < threshold) return [];
+
+  const windowMs = windowSec * 1000;
+  const findings: DenialSpikeFinding[] = [];
+  let i = 0;
+  while (i < sorted.length) {
+    // See detectGatewayDropSpike for the dual gap+span bound rationale.
+    const startMs = Date.parse(sorted[i].createdAt);
+    let j = i + 1;
+    while (
+      j < sorted.length &&
+      Date.parse(sorted[j].createdAt) - Date.parse(sorted[j - 1].createdAt) <= windowMs &&
+      Date.parse(sorted[j].createdAt) - startMs <= windowMs
+    ) {
+      j++;
+    }
+    const count = j - i;
+    if (count >= threshold) {
+      const cluster = sorted.slice(i, j);
+      const toolCounts = new Map<string, number>();
+      const reasonCounts = new Map<string, number>();
+      for (const e of cluster) {
+        const toolName = typeof e.metadata?.toolName === "string" ? e.metadata.toolName : "<unknown>";
+        toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
+        const reason = typeof e.metadata?.reason === "string" ? e.metadata.reason : null;
+        if (reason !== null) reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+      }
+      const byTool = [...toolCounts.entries()]
+        .map(([toolName, c]) => ({ toolName, count: c }))
+        .sort((a, b) => b.count - a.count || a.toolName.localeCompare(b.toolName));
+      let topReason: string | null = null;
+      let topCount = 0;
+      for (const [reason, c] of reasonCounts) {
+        if (c > topCount) {
+          topCount = c;
+          topReason = reason;
+        }
+      }
+      findings.push({
+        firstAt: cluster[0].createdAt,
+        lastAt: cluster[cluster.length - 1].createdAt,
+        count,
+        byTool,
+        topReason,
+        events: cluster.map(toRef),
+      });
+    }
+    i = j;
+  }
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Install events
+// ---------------------------------------------------------------------------
+
+export interface InstallEventFinding {
+  id: string;
+  sequence: number;
+  createdAt: string;
+  targetType: string;
+  targetName: string;
+  version: string | null;
+  requestMode: string | null;
+  scanStatus: string | null;
+  scanCritical: number;
+  scanWarn: number;
+  /** True if the scan flagged something or the scan didn't pass cleanly. */
+  elevated: boolean;
+}
+
+/**
+ * Pass-through view: every `system.install` in the window surfaces as a
+ * finding. The `elevated` flag is true when the security scan reported any
+ * critical findings or finished in a non-"ok" status — the operator should
+ * eyeball these first.
+ */
+export function detectInstallEvents(events: ReadonlyArray<DetectorEvent>): InstallEventFinding[] {
+  return events
+    .filter((e) => e.eventType === "system.install")
+    .sort(byCreatedAt)
+    .map((e) => {
+      const md = e.metadata ?? {};
+      const scanStatus = typeof md.scanStatus === "string" ? md.scanStatus : null;
+      const scanCritical = numberOr(md.scanCritical, 0);
+      const scanWarn = numberOr(md.scanWarn, 0);
+      return {
+        id: e.id,
+        sequence: e.sequence,
+        createdAt: e.createdAt,
+        targetType: typeof md.targetType === "string" ? md.targetType : "<unknown>",
+        targetName: typeof md.targetName === "string" ? md.targetName : "<unknown>",
+        version: typeof md.version === "string" ? md.version : null,
+        requestMode: typeof md.requestMode === "string" ? md.requestMode : null,
+        scanStatus,
+        scanCritical,
+        scanWarn,
+        elevated: scanCritical > 0 || (scanStatus !== null && scanStatus !== "ok"),
+      };
+    });
+}
+
+function numberOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Integrity violations
+// ---------------------------------------------------------------------------
+
+export interface UnverifiedAnchoredCheckpoint {
+  checkpointId: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  smtRoot: string;
+  deTxHash: string | null;
+  createdAt: string;
+}
+
+export interface TamperedEventRef extends EventRef {
+  eventType: string;
+}
+
+export interface IntegrityViolationFinding {
+  unverifiedAnchored: UnverifiedAnchoredCheckpoint[];
+  tamperedEvents: TamperedEventRef[];
+}
+
+/**
+ * Aggregate integrity signals. Both inputs are already filtered to the
+ * caller's window — the orchestrator pulls unverified checkpoints whose
+ * `createdAt` falls in window, and runs the SMT-leaf check (mirrors
+ * `src/ui/routes.ts:classifyEvent`) per event before passing them here.
+ *
+ * Pure on its inputs so it stays trivially testable.
+ */
+export function detectIntegrityViolations(
+  unverifiedAnchored: ReadonlyArray<UnverifiedAnchoredCheckpoint>,
+  tamperedEvents: ReadonlyArray<TamperedEventRef>,
+): IntegrityViolationFinding {
+  return {
+    unverifiedAnchored: [...unverifiedAnchored],
+    tamperedEvents: [...tamperedEvents],
+  };
+}
+
+function byCreatedAt(a: DetectorEvent, b: DetectorEvent): number {
+  return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.sequence - b.sequence;
+}
