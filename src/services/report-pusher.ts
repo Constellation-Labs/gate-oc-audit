@@ -7,10 +7,12 @@ import {
   todayInTz,
   thisWeekInTz,
 } from "../reports/time-window.js";
+import type { AuditProjection } from "../reports/projection.js";
 import { buildProjection } from "../reports/projection.js";
 import { formatDigestBlocks } from "../reports/format-blocks.js";
 import { isUnsafeWebhookUrl, postJsonWebhook } from "../util/webhook.js";
 import { log } from "../util/logger.js";
+import { createHash } from "node:crypto";
 
 const DEFAULT_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_RETRY_DELAY_MS = 30_000;
@@ -60,7 +62,12 @@ export interface ReportPusherOptions {
  */
 export class ReportPusherService {
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** Recreated in `start()` so a stop/start cycle works (the field-init
+   *  controller is aborted by `stop()` and would otherwise stay aborted). */
   private abortController = new AbortController();
+  /** Re-entrancy guard: setInterval doesn't serialize async handlers, and a
+   *  retry sleep can push a tick past the next interval boundary. */
+  private inFlightTick = false;
   private state: ReportPusherHealth = {
     nextDailyAt: undefined,
     nextWeeklyAt: undefined,
@@ -99,13 +106,16 @@ export class ReportPusherService {
 
   start(): void {
     if (this.disabled) return;
+    if (this.timer) return; // idempotent — second start() is a no-op.
+    // Reset the abort signal so a prior stop()'s abort doesn't bleed into
+    // this run and short-circuit every retry sleep on the first try.
+    this.abortController = new AbortController();
     // Initialise the "last reported" markers to *yesterday/last week* so the
     // first tick doesn't immediately push a stale window. Anything earlier
     // than this is treated as a missed report and only the most recent
     // missed window is pushed (no backfill spam after a long downtime).
     this.state.lastDailyReportedDate = this.dayMostRecentlyCompleted();
     this.state.lastWeeklyReportedWeek = this.weekMostRecentlyCompleted();
-    this.refreshNextFireTimes();
     this.persist();
 
     this.timer = setInterval(() => {
@@ -123,26 +133,51 @@ export class ReportPusherService {
   }
 
   health(): ReportPusherHealth {
-    return { ...this.state };
+    // Computing next-fire times on demand keeps `health()` consistent with
+    // the wall clock even when the last tick was a while ago. The persisted
+    // service_health row is still a snapshot of `state` — that's fine.
+    return {
+      ...this.state,
+      nextDailyAt: this.computeNextDailyAt(),
+      nextWeeklyAt: this.computeNextWeeklyAt(),
+    };
   }
 
   /** Public for tests — runs one tick synchronously. */
   async tick(): Promise<void> {
     if (this.disabled || !this.webhookUrl) return;
     if (this.abortController.signal.aborted) return;
-
+    if (this.inFlightTick) return;
+    this.inFlightTick = true;
     try {
-      const targetDay = this.dayMostRecentlyCompleted();
-      if (this.state.lastDailyReportedDate !== targetDay) {
-        await this.fireDaily(targetDay);
-      }
-      const targetWeek = this.weekMostRecentlyCompleted();
-      if (this.state.lastWeeklyReportedWeek !== targetWeek) {
-        await this.fireWeekly(targetWeek);
-      }
+      // Daily and weekly are independent reports — a failure in one must
+      // not suppress the other. Per-phase try/catch keeps them isolated.
+      await this.runPhase("daily", async () => {
+        const targetDay = this.dayMostRecentlyCompleted();
+        if (this.state.lastDailyReportedDate !== targetDay) {
+          await this.fireDaily(targetDay);
+        }
+      });
+      await this.runPhase("weekly", async () => {
+        const targetWeek = this.weekMostRecentlyCompleted();
+        if (this.state.lastWeeklyReportedWeek !== targetWeek) {
+          await this.fireWeekly(targetWeek);
+        }
+      });
     } finally {
       this.refreshNextFireTimes();
       this.persist();
+      this.inFlightTick = false;
+    }
+  }
+
+  private async runPhase(label: string, fn: () => Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (err) {
+      const msg = sanitizeMessage(err instanceof Error ? err.message : "Unknown error");
+      log.error(`reportWebhook ${label} tick failed: ${msg}`);
+      this.state.lastPushError = msg;
     }
   }
 
@@ -151,7 +186,7 @@ export class ReportPusherService {
     const projection = buildProjection(this.store, window);
     const payload = {
       ...formatDigestBlocks(projection),
-      projection,
+      projection: sanitizeProjectionForWebhook(projection),
     };
     const ok = await this.postWithRetry(payload);
     if (ok) this.state.lastDailyReportedDate = date;
@@ -162,7 +197,7 @@ export class ReportPusherService {
     const projection = buildProjection(this.store, window);
     const payload = {
       ...formatDigestBlocks(projection),
-      projection,
+      projection: sanitizeProjectionForWebhook(projection),
     };
     const ok = await this.postWithRetry(payload);
     if (ok) this.state.lastWeeklyReportedWeek = week;
@@ -218,11 +253,9 @@ export class ReportPusherService {
    * YYYY-MM-DD. At 2026-05-18T08:00 local this is "2026-05-17".
    */
   private dayMostRecentlyCompleted(): string {
-    const todayStr = todayInTz(this.tz, this.now());
-    // Subtract one calendar day from "today 00:00" to land on yesterday.
-    const today = parseDate(todayStr, this.tz);
-    const yesterdayIso = subtractCalendarDays(today.fromIso, 1, this.tz);
-    return formatYmd(new Date(yesterdayIso), this.tz);
+    const todayWindow = parseDate(todayInTz(this.tz, this.now()), this.tz);
+    const yesterdayIso = subtractCalendarDays(todayWindow.fromIso, 1, this.tz);
+    return todayInTz(this.tz, new Date(yesterdayIso));
   }
 
   /**
@@ -230,24 +263,25 @@ export class ReportPusherService {
    * called on Monday 00:30 local, returns last week.
    */
   private weekMostRecentlyCompleted(): string {
-    const thisWeek = thisWeekInTz(this.tz, this.now());
-    const w = parseWeek(thisWeek, this.tz);
-    // Step back one day from this week's start (Mon 00:00) to land in the
-    // previous ISO week, then ask which week that instant is in.
-    const lastWeekInside = new Date(new Date(w.fromIso).getTime() - 86_400_000);
-    return weekStringFor(lastWeekInside, this.tz);
+    const thisWeekWindow = parseWeek(thisWeekInTz(this.tz, this.now()), this.tz);
+    // Step back one calendar day from this week's Mon 00:00 to land inside
+    // the previous ISO week, then ask which week that instant is in.
+    // `subtractCalendarDays` is DST-correct in both tz modes.
+    const lastWeekIso = subtractCalendarDays(thisWeekWindow.fromIso, 1, this.tz);
+    return thisWeekInTz(this.tz, new Date(lastWeekIso));
+  }
+
+  private computeNextDailyAt(): string {
+    return parseDate(todayInTz(this.tz, this.now()), this.tz).toIso;
+  }
+
+  private computeNextWeeklyAt(): string {
+    return parseWeek(thisWeekInTz(this.tz, this.now()), this.tz).toIso;
   }
 
   private refreshNextFireTimes(): void {
-    // Next daily fire = next local 00:00 strictly after now.
-    const todayStr = todayInTz(this.tz, this.now());
-    const todayWindow = parseDate(todayStr, this.tz);
-    this.state.nextDailyAt = todayWindow.toIso;
-
-    // Next weekly fire = next local Monday 00:00 strictly after now.
-    const thisWeek = thisWeekInTz(this.tz, this.now());
-    const thisWeekWindow = parseWeek(thisWeek, this.tz);
-    this.state.nextWeeklyAt = thisWeekWindow.toIso;
+    this.state.nextDailyAt = this.computeNextDailyAt();
+    this.state.nextWeeklyAt = this.computeNextWeeklyAt();
   }
 
   private persist(): void {
@@ -260,27 +294,35 @@ export class ReportPusherService {
   }
 }
 
-function formatYmd(d: Date, tz: TimeZoneMode): string {
-  if (tz === "utc") {
-    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-  }
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+/**
+ * Strip recipient identifiers from the projection before it leaves the
+ * machine. For SMS/email/Telegram channels the raw `recipient` field is PII
+ * (phone numbers, addresses, @handles); the audit DB has them locally for
+ * the CLI `audit report`, but the webhook is a network-trust boundary.
+ *
+ * Hashing — not removing — preserves correlation ("same recipient as last
+ * week") while making the value non-reversible.
+ */
+function sanitizeProjectionForWebhook(p: AuditProjection): AuditProjection {
+  if (p.anomalies.duplicateOutbound.length === 0) return p;
+  return {
+    ...p,
+    anomalies: {
+      ...p.anomalies,
+      duplicateOutbound: p.anomalies.duplicateOutbound.map((d) => ({
+        ...d,
+        recipient: hashRecipient(d.recipient),
+      })),
+    },
+  };
 }
 
-function weekStringFor(d: Date, tz: TimeZoneMode): string {
-  const t = tz === "utc"
-    ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-    : new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const dayNum = (tz === "utc" ? t.getUTCDay() : t.getDay()) || 7;
-  if (tz === "utc") t.setUTCDate(t.getUTCDate() + 4 - dayNum);
-  else t.setDate(t.getDate() + 4 - dayNum);
-  const year = tz === "utc" ? t.getUTCFullYear() : t.getFullYear();
-  const yearStart = tz === "utc" ? new Date(Date.UTC(year, 0, 1)) : new Date(year, 0, 1);
-  const diffMs = t.getTime() - yearStart.getTime();
-  const week = Math.ceil((diffMs / 86_400_000 + 1) / 7);
-  return `${year}-W${pad2(week)}`;
+function hashRecipient(recipient: string): string {
+  return "sha256:" + createHash("sha256").update(recipient).digest("hex").slice(0, 16);
 }
 
-function pad2(n: number): string {
-  return n < 10 ? `0${n}` : String(n);
+/** Strip CR/LF and cap length so a hostile webhook server can't inject
+ *  log/header garbage via response.statusText or error.message. */
+function sanitizeMessage(s: string): string {
+  return s.replace(/[\r\n\t]/g, " ").slice(0, 200);
 }

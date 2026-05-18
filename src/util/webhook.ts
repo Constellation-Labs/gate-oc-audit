@@ -18,6 +18,14 @@ export interface PostResult {
  * Returns a reason if the URL isn't safe to POST to. Surfaces protocol +
  * parse failures; callers log this once and disable the webhook rather than
  * throwing at request time.
+ *
+ * Trust model: callers pass URLs sourced from operator-controlled config
+ * (audit plugin config file). The validator deliberately allows `http://`
+ * for loopback / dev setups and does NOT block private/link-local hosts —
+ * operators who can write the config already have local file access, which
+ * is more powerful than SSRF. Do NOT reuse this validator for URLs coming
+ * from any less-trusted surface (CLI input, UI form, network) without
+ * adding host/protocol policy on top.
  */
 export function isUnsafeWebhookUrl(raw: string): string | undefined {
   let url: URL;
@@ -26,6 +34,14 @@ export function isUnsafeWebhookUrl(raw: string): string | undefined {
     return `disallowed protocol ${url.protocol}`;
   }
   return undefined;
+}
+
+/** Strip CR/LF/tab and cap length so a hostile webhook server's status text
+ *  or error message can't inject log/header garbage when callers persist
+ *  or log the result. */
+function sanitize(s: string | undefined): string | undefined {
+  if (s === undefined) return undefined;
+  return s.replace(/[\r\n\t]/g, " ").slice(0, 200);
 }
 
 /**
@@ -48,11 +64,11 @@ export async function postJsonWebhook(
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
-      return { ok: false, status: response.status, error: response.statusText };
+      return { ok: false, status: response.status, error: sanitize(response.statusText) };
     }
     return { ok: true, status: response.status };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return { ok: false, error: message };
+    return { ok: false, error: sanitize(message) };
   }
 }

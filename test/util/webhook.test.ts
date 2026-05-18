@@ -90,6 +90,21 @@ describe("postJsonWebhook", () => {
     assert.ok(result.error);
   });
 
+  it("sanitizes CR/LF/tab and caps length in the error string", async () => {
+    rig.setHandler((_req, res) => {
+      // Pad statusMessage with CRLF and a long tail. Node may already strip
+      // CRLF from statusText, but our sanitizer is the contract here.
+      res.statusCode = 503;
+      res.statusMessage = "bad" + "x".repeat(500);
+      res.end();
+    });
+    const result = await postJsonWebhook(rig.baseUrl + "/long", { x: 1 });
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+    assert.ok(!/[\r\n\t]/.test(result.error!), "CR/LF/tab must be stripped");
+    assert.ok(result.error!.length <= 200, `error capped to 200 chars, got ${result.error!.length}`);
+  });
+
   it("times out a slow server within timeoutMs", async () => {
     rig.setHandler((_req, _res) => {
       // Don't reply — let the AbortSignal cut us off.

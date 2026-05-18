@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 
 import { AuditStore } from "../../src/store/audit-store.js";
 import { ReportPusherService } from "../../src/services/report-pusher.js";
+import type { AuditEventInsert } from "../../src/types/events.js";
 
 function makeTempDb(): string {
   return join(mkdtempSync(join(tmpdir(), "audit-pusher-")), "test.db");
@@ -196,6 +197,28 @@ describe("ReportPusherService — weekly fire", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
+  it("handles the ISO week-year rollover (2020-W53 → 2021-W01) correctly", async () => {
+    // 2020 has 53 ISO weeks; 2021-W01 starts Mon 2021-01-04. The week
+    // immediately before that is 2020-W53 (NOT 2020-W52). This is the
+    // failure mode the inline weekStringFor copy invited — keep it covered.
+    const startDeepInW53 = new Date("2020-12-30T10:00:00Z");
+    const jumpToNextMon = new Date("2021-01-04T00:01:00Z");
+    const local: { current: Date } = { current: startDeepInW53 };
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => local.current,
+    });
+    svc.start();
+    local.current = jumpToNextMon;
+    await svc.tick();
+    svc.stop();
+
+    const weekly = rig.received
+      .map((r) => JSON.parse(r.body) as { projection: { period: { kind: string; label: string } } })
+      .find((p) => p.projection.period.kind === "weekly");
+    assert.ok(weekly, "expected a weekly push across the year boundary");
+    assert.match(weekly!.projection.period.label, /2020-W53/);
+  });
+
   it("fires a weekly digest when the Monday-midnight boundary crosses", async () => {
     const svc = new ReportPusherService(store, rig.baseUrl, { tz: "utc", now: () => nowRef.current });
     svc.start();
@@ -314,5 +337,179 @@ describe("ReportPusherService.health()", () => {
     assert.equal(h.nextDailyAt, "2026-05-14T00:00:00.000Z");
     // Next weekly fire = next Mon 00:00 UTC = 2026-05-18.
     assert.equal(h.nextWeeklyAt, "2026-05-18T00:00:00.000Z");
+  });
+
+  it("recomputes next fire times on demand (not stuck on the last-tick value)", () => {
+    const nowRef = { current: WED_MORNING_UTC };
+    const svc = new ReportPusherService(store, "http://127.0.0.1:1/", {
+      tz: "utc", now: () => nowRef.current,
+    });
+    svc.start();
+    // Advance the clock past the original `nextDailyAt` without a tick
+    // happening. health() should reflect the new "end of today" instant.
+    nowRef.current = new Date("2026-05-14T12:00:00Z");
+    const h = svc.health();
+    svc.stop();
+    assert.equal(h.nextDailyAt, "2026-05-15T00:00:00.000Z");
+  });
+});
+
+describe("ReportPusherService — re-entrancy + lifecycle", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let rig: WebhookRig;
+  let nowRef: { current: Date };
+
+  before(async () => { rig = await createWebhookRig(); });
+  after(async () => { await rig.destroy(); });
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    rig.received.length = 0;
+    nowRef = { current: WED_MORNING_UTC };
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("does not double-push when a second tick fires while the first is mid-retry", async () => {
+    let calls = 0;
+    rig.setHandler((_req, res) => {
+      calls++;
+      // Both attempts of *each* tick fail-then-succeed: 503, 200, 503, 200…
+      // If re-entrancy is broken we'll see 4 calls (two ticks × two attempts);
+      // with the guard, only one tick runs and we see 2.
+      if (calls % 2 === 1) { res.statusCode = 503; res.end(); }
+      else { res.statusCode = 200; res.end("ok"); }
+    });
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => nowRef.current, retryDelayMs: 50,
+    });
+    svc.start();
+    nowRef.current = THU_JUST_AFTER_MIDNIGHT_UTC;
+
+    // Fire two overlapping ticks. The first one will go: POST (503) → sleep(50ms) → POST (200) → ok.
+    // The second tick, started before the first finishes, must short-circuit on inFlightTick.
+    const tick1 = svc.tick();
+    const tick2 = svc.tick();
+    await Promise.all([tick1, tick2]);
+    svc.stop();
+
+    assert.equal(rig.received.length, 2, "exactly one tick should reach the wire (2 attempts)");
+  });
+
+  it("recovers from a thrown error inside the tick (sets lastPushError, does not crash)", async () => {
+    rig.setHandler((_req, res) => { res.statusCode = 200; res.end("ok"); });
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => nowRef.current,
+    });
+    svc.start();
+    // Force a throw by closing the store underneath the pusher. buildProjection
+    // will hit a finalised prepared statement.
+    store.close();
+    nowRef.current = THU_JUST_AFTER_MIDNIGHT_UTC;
+    // tick() must not reject — it should catch the error and persist
+    // lastPushError. (Persisting service_health may itself fail because the
+    // store is closed; we accept the warning log on that path.)
+    await svc.tick();
+    svc.stop();
+    // We can't read service_health (store is closed), but the absence of an
+    // unhandled rejection is the contract this test enforces.
+    assert.ok(true);
+    // Re-open so afterEach's `store.close()` is idempotent against the
+    // already-closed handle.
+    store = new AuditStore(dbPath);
+  });
+
+  it("supports stop()→start() (AbortController is recreated)", async () => {
+    rig.setHandler((_req, res) => { res.statusCode = 200; res.end("ok"); });
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => nowRef.current,
+    });
+    svc.start();
+    svc.stop();
+    svc.start(); // After stop+start, the controller must NOT be aborted.
+    nowRef.current = THU_JUST_AFTER_MIDNIGHT_UTC;
+    await svc.tick();
+    svc.stop();
+    assert.equal(rig.received.length, 1, "tick after stop()→start() must still push");
+  });
+
+  it("idempotent start() — second call is a no-op", () => {
+    const svc = new ReportPusherService(store, "http://127.0.0.1:1/", {
+      tz: "utc", now: () => WED_MORNING_UTC, tickIntervalMs: 100_000,
+    });
+    svc.start();
+    // Calling start() again must not throw or leak a second interval.
+    // We can't directly observe the timer, but the contract is "calling
+    // twice is safe" — the assertion is the absence of a throw.
+    assert.doesNotThrow(() => svc.start());
+    svc.stop();
+  });
+});
+
+describe("ReportPusherService — payload sanitization (F1)", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let rig: WebhookRig;
+  let nowRef: { current: Date };
+
+  before(async () => { rig = await createWebhookRig(); });
+  after(async () => { await rig.destroy(); });
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    rig.received.length = 0;
+    rig.setHandler((_req, res) => { res.statusCode = 200; res.end("ok"); });
+    nowRef = { current: WED_MORNING_UTC };
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("hashes recipients in duplicate-outbound findings before sending", async () => {
+    // Append two byte-identical message.sent events to the same recipient
+    // within the dedup window, in the day we'll report (yesterday relative
+    // to THU_JUST_AFTER_MIDNIGHT_UTC = 2026-05-13 UTC).
+    const dupInsert = (i: number): AuditEventInsert => ({
+      eventType: "message.sent",
+      category: "message",
+      description: "send",
+      metadata: { channel: "telegram", recipient: "+15551234567" },
+      content: "hello",
+      sessionId: `s${i}`,
+    });
+    const a = store.append(dupInsert(1))!;
+    const b = store.append(dupInsert(2))!;
+    // Stamp both events into the target day.
+    store["db"].prepare("UPDATE audit_events SET created_at = ? WHERE id = ?")
+      .run("2026-05-13T12:00:00.000Z", a.id);
+    store["db"].prepare("UPDATE audit_events SET created_at = ? WHERE id = ?")
+      .run("2026-05-13T12:00:05.000Z", b.id);
+
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => nowRef.current,
+    });
+    svc.start();
+    nowRef.current = THU_JUST_AFTER_MIDNIGHT_UTC;
+    await svc.tick();
+    svc.stop();
+
+    assert.equal(rig.received.length, 1);
+    const body = JSON.parse(rig.received[0]!.body) as {
+      projection: { anomalies: { duplicateOutbound: Array<{ recipient: string }> } };
+    };
+    const dups = body.projection.anomalies.duplicateOutbound;
+    assert.ok(dups.length > 0, "expected at least one duplicate-outbound finding");
+    for (const d of dups) {
+      assert.ok(d.recipient.startsWith("sha256:"),
+        `recipient must be hashed; got ${d.recipient}`);
+      assert.ok(!d.recipient.includes("+15551234567"),
+        "raw phone number must not appear in the wire payload");
+    }
   });
 });
