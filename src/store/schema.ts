@@ -62,7 +62,8 @@ const DDL = [
     smt_root        TEXT NOT NULL,
     event_count     INTEGER NOT NULL,
     de_tx_hash      TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    verified_at     TEXT
   )`,
 
   `CREATE TABLE IF NOT EXISTS checkpoint_archive (
@@ -88,7 +89,7 @@ const DDL = [
   )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -202,6 +203,16 @@ export function initializeSchema(db: DatabaseSync): void {
       //     in-memory state of long-lived services (anchor, gateway, retention).
       //     All CREATE … IF NOT EXISTS in the DDL above; no procedural body
       //     needed beyond the version record.
+
+      // v6: Adds integrity_checkpoints.verified_at as a local cache so
+      //     verifyCheckpoints only re-checks unverified rows on startup
+      //     (without dedup, every restart re-fires divergence notifications
+      //     for any 404). NOT a tamper-evidence field: anyone with DB write
+      //     access can forge it. Authoritative integrity verification is done
+      //     externally by reconciling local checkpoints against DE.
+      if (current < 6 && !hasColumn(db, "integrity_checkpoints", "verified_at")) {
+        db.exec("ALTER TABLE integrity_checkpoints ADD COLUMN verified_at TEXT");
+      }
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

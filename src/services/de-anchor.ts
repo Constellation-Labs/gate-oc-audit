@@ -9,7 +9,7 @@ import {deAnchorLog} from "../util/logger.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
-const {DedClient} = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
+const {DedClient, DedApiError} = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
 
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -83,7 +83,7 @@ export function resolveExplorerBaseUrl(env: DeEnv): string | undefined {
     return DE_EXPLORER_URLS[env];
 }
 
-type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash?: string; eventId?: string; errors?: string[] }[]>;
+type SubmitFn = (submissions: unknown[]) => Promise<{ accepted: boolean; hash: string; eventId?: string; errors?: string[] }[]>;
 type VerifyFn = (hash: string) => Promise<unknown>;
 
 // ---------------------------------------------------------------------------
@@ -304,15 +304,9 @@ class ActiveAnchorService implements AnchorService {
 
             this.consecutiveFailures = 0;
             this.circuitOpenCount = 0;
-            if (txHash) {
-                deAnchorLog.info(
-                    `Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
-                );
-            } else {
-                deAnchorLog.warn(
-                    `DE accepted fingerprint but returned neither hash nor eventId — checkpoint ${checkpointId} has no DE reference (${eventCount} events, seq ${startSeq}-${seqEnd})`,
-                );
-            }
+            deAnchorLog.info(
+                `Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
+            );
             this.persistHealth();
         } catch (err) {
             this.recordFailure();
@@ -332,30 +326,37 @@ class ActiveAnchorService implements AnchorService {
         if (!this.verifyFn) return;
 
         try {
-            const checkpoints = this.store.getCheckpoints();
+            const checkpoints = this.store.getUnverifiedCheckpoints();
             const verifyFn = this.verifyFn;
             const notifier = this.notifier;
+            const store = this.store;
 
             await Promise.all(
-                checkpoints
-                    .filter((cp) => cp.deTxHash)
-                    .map(async (cp) => {
-                        try {
-                            const detail = await verifyFn(cp.smtRoot);
-                            if (!detail) {
-                                deAnchorLog.error(`Verification failed for checkpoint ${cp.id}`);
-                                notifier
-                                    ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
-                                    .catch((notifyErr) => {
-                                        const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
-                                        deAnchorLog.warn(`divergence notification failed for checkpoint ${cp.id}: ${msg}`);
-                                    });
-                            }
-                        } catch (err) {
-                            const msg = err instanceof Error ? err.message : "Unknown error";
-                            deAnchorLog.warn(`verify API call failed for checkpoint ${cp.id}: ${msg}`);
+                checkpoints.map(async (cp) => {
+                    const deTxHash = cp.deTxHash as string;
+                    try {
+                        await verifyFn(deTxHash);
+                        store.markCheckpointVerified(cp.id);
+                    } catch (err) {
+                        if (err instanceof DedApiError && (err as {status: number}).status === 404) {
+                            deAnchorLog.error(`Verification failed for checkpoint ${cp.id}: ${deTxHash} not found on DE`);
+                            // Mark verified so restarts don't re-fire the same divergence
+                            // notification. Clear verified_at manually to re-trigger if DE
+                            // state is restored.
+                            store.markCheckpointVerified(cp.id);
+                            notifier
+                                ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
+                                .catch((notifyErr) => {
+                                    const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
+                                    deAnchorLog.warn(`divergence notification failed for checkpoint ${cp.id}: ${msg}`);
+                                });
+                            return;
                         }
-                    }),
+                        // Transient error: leave verified_at NULL so we retry on next startup.
+                        const msg = err instanceof Error ? err.message : "Unknown error";
+                        deAnchorLog.warn(`verify API call failed for checkpoint ${cp.id}: ${msg}`);
+                    }
+                }),
             );
         } catch (err) {
             const message = err instanceof Error ? err.message : "Unknown error";
@@ -363,7 +364,7 @@ class ActiveAnchorService implements AnchorService {
         }
     }
 
-    private async submitFingerprint(smtRoot: string): Promise<string | null> {
+    private async submitFingerprint(smtRoot: string): Promise<string> {
         const submission = await dedCore.generateFingerprint(
             {
                 orgId: this.deOrgId,
@@ -385,7 +386,7 @@ class ActiveAnchorService implements AnchorService {
             deAnchorLog.warn(`DE rejected fingerprint — root: ${smtRoot.slice(0, 16)}…, reason: ${reason}, response: ${JSON.stringify(result)}`);
             throw new Error(`DE rejected fingerprint: ${reason}`);
         }
-        return result.hash ?? result.eventId ?? null;
+        return result.hash;
     }
 
     private isCircuitOpen(): boolean {
