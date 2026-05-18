@@ -137,6 +137,7 @@ interface CheckpointRow {
   event_count: number;
   de_tx_hash: string | null;
   created_at: string;
+  verified_at: string | null;
 }
 
 export interface CheckpointRecord {
@@ -147,6 +148,7 @@ export interface CheckpointRecord {
   eventCount: number;
   deTxHash: string | null;
   createdAt: string;
+  verifiedAt: string | null;
 }
 
 function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
@@ -158,6 +160,7 @@ function rowToCheckpoint(row: CheckpointRow): CheckpointRecord {
     eventCount: row.event_count,
     deTxHash: row.de_tx_hash,
     createdAt: row.created_at,
+    verifiedAt: row.verified_at,
   };
 }
 
@@ -180,6 +183,8 @@ export class AuditStore {
     deleteManifest: StatementSync;
     getCheckpoints: StatementSync;
     getLastCheckpoint: StatementSync;
+    getUnverifiedCheckpoints: StatementSync;
+    markCheckpointVerified: StatementSync;
     insertCheckpoint: StatementSync;
     countSince: StatementSync;
     maxSequenceSince: StatementSync;
@@ -236,7 +241,8 @@ export class AuditStore {
       RETURNING sequence, previous_hash
     `);
 
-    const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
+    const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at, verified_at";
+    const CP_INSERT_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
 
     this.stmts = {
       getManifestsByType: this.db.prepare("SELECT id, content_hash, file_path, captured_at FROM config_manifests WHERE manifest_type = ?"),
@@ -248,8 +254,16 @@ export class AuditStore {
       deleteManifest: this.db.prepare("DELETE FROM config_manifests WHERE id = ?"),
       getCheckpoints: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_start ASC`),
       getLastCheckpoint: this.db.prepare(`SELECT ${CP_COLS} FROM integrity_checkpoints ORDER BY sequence_end DESC LIMIT 1`),
+      getUnverifiedCheckpoints: this.db.prepare(
+        `SELECT ${CP_COLS} FROM integrity_checkpoints
+         WHERE de_tx_hash IS NOT NULL AND verified_at IS NULL
+         ORDER BY sequence_start ASC`,
+      ),
+      markCheckpointVerified: this.readOnly
+        ? this.db.prepare("SELECT 1 WHERE 0")
+        : this.db.prepare("UPDATE integrity_checkpoints SET verified_at = ? WHERE id = ?"),
       insertCheckpoint: this.db.prepare(
-        `INSERT INTO integrity_checkpoints (${CP_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO integrity_checkpoints (${CP_INSERT_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
@@ -689,6 +703,15 @@ export class AuditStore {
 
   insertCheckpoint(id: string, seqStart: number, seqEnd: number, smtRoot: string, eventCount: number, deTxHash: string | null): void {
     this.stmts.insertCheckpoint.run(id, seqStart, seqEnd, smtRoot, eventCount, deTxHash, new Date().toISOString());
+  }
+
+  getUnverifiedCheckpoints(): CheckpointRecord[] {
+    return (this.stmts.getUnverifiedCheckpoints.all() as unknown as CheckpointRow[]).map(rowToCheckpoint);
+  }
+
+  markCheckpointVerified(id: string): void {
+    if (this.readOnly) return;
+    this.stmts.markCheckpointVerified.run(new Date().toISOString(), id);
   }
 
   /** Returns the count of events at or after a given sequence. */
