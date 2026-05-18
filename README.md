@@ -142,7 +142,7 @@ openclaw config set plugins.entries.constellation-audit-plugin.config.reportWebh
 
 **Cadence:** daily digests fire shortly after local midnight, weekly digests after local Monday 00:00. The scheduler polls every ~5 minutes, so a digest "scheduled" for 00:00 may arrive anywhere in `[00:00, 00:05)`. After a long downtime only the most recently completed window is pushed (no backfill spam).
 
-**Privacy:** `recipient` fields in `anomalies.duplicateOutbound[]` are hashed before they leave the box (`sha256:` prefix), preserving "same recipient as last week" correlation without exposing phone numbers / emails / @handles to the webhook receiver. Channel names (`slack`, `discord`, etc.) are sent verbatim.
+**Privacy:** `recipient` values in `anomalies.duplicateOutbound[]` are replaced with a truncated SHA-256 digest (`sha256:<16-hex>`) before the payload leaves the machine. This is a **correlation hash** — enough entropy to recognise the same recipient across reports, not a security primitive — so phone numbers / emails / @handles never reach the webhook receiver. **Not hashed** and sent verbatim: channel names (`slack`, `discord`, …), `events[].id` and `events[].sequence`, `events[].sessionId`, tool names (`topTools[].toolName`), and the integrity footer's last-event hashes. If your session IDs or tool names embed customer identifiers, treat the webhook URL like the audit DB itself and route only to endpoints you control.
 
 #### Identity
 
