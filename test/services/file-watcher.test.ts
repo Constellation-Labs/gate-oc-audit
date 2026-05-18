@@ -31,8 +31,8 @@ describe("FileWatcher", () => {
     watchDir = mkdtempSync(join(tmpdir(), "filewatch-dir-"));
   });
 
-  afterEach(() => {
-    activeWatcher?.stop();
+  afterEach(async () => {
+    await activeWatcher?.stop();
     activeWatcher = undefined;
     store.close();
     rmSync(dirname(dbPath), { recursive: true, force: true });
@@ -42,7 +42,7 @@ describe("FileWatcher", () => {
   it("does nothing when no patterns configured", async () => {
     activeWatcher = new FileWatcher(store, limiter, {});
     await activeWatcher.start();
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.equal(events.length, 0);
@@ -58,7 +58,7 @@ describe("FileWatcher", () => {
     });
     await activeWatcher.start();
     await sleep(1500);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.equal(events.length, 0, "Should not fire events for pre-existing files");
@@ -75,7 +75,7 @@ describe("FileWatcher", () => {
 
     writeFileSync(join(watchDir, "hello.txt"), "hello world");
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.ok(events.length > 0, "Should have logged a file change event");
@@ -105,7 +105,7 @@ describe("FileWatcher", () => {
     // Modify it
     writeFileSync(join(watchDir, "data.txt"), "version 2");
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const modified = events.filter(
@@ -132,7 +132,7 @@ describe("FileWatcher", () => {
 
     rmSync(filePath);
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const removed = events.filter(
@@ -155,7 +155,7 @@ describe("FileWatcher", () => {
 
     writeFileSync(join(watchDir, "ignored", "secret.txt"), "should be ignored");
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const ignoredEvents = events.filter(
@@ -180,7 +180,7 @@ describe("FileWatcher", () => {
     // Re-write the same content
     writeFileSync(join(watchDir, "stable.txt"), "unchanged content");
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     const stableEvents = events.filter(
@@ -205,7 +205,7 @@ describe("FileWatcher", () => {
 
     writeFileSync(join(watchDir, "fast.txt"), "content");
     await sleep(2000);
-    activeWatcher.stop();
+    await activeWatcher.stop();
 
     const events = store.query({ category: "system" });
     assert.ok(events.length > 0, "Should still detect files with clamped interval");
@@ -216,7 +216,7 @@ describe("FileWatcher", () => {
       fileWatchPatterns: [join(watchDir, "**")],
     });
     await activeWatcher.start();
-    activeWatcher.stop();
-    activeWatcher.stop(); // should not throw
+    await activeWatcher.stop();
+    await activeWatcher.stop(); // should not throw
   });
 });

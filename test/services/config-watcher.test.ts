@@ -59,7 +59,7 @@ describe("ConfigWatcher", () => {
 
     // Wait for chokidar to detect the change
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const events = store.query({ category: "config" });
     assert.ok(events.length > 0, "Should have logged a config change event");
@@ -77,7 +77,7 @@ describe("ConfigWatcher", () => {
     // Modify the file
     writeFileSync(join(openclawDir, "tools", "my-tool.ts"), "version 2");
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const events = store.query({ category: "config" });
     const modifiedEvents = events.filter(
@@ -100,7 +100,7 @@ describe("ConfigWatcher", () => {
     );
 
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const scanEvents = store.query({ category: "security" });
     assert.ok(scanEvents.length > 0, "Should have logged scan results");
@@ -114,7 +114,7 @@ describe("ConfigWatcher", () => {
 
     writeFileSync(join(openclawDir, "skills", "tracked.ts"), "content");
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const manifests = store.getManifestsByType("skills");
 
@@ -132,7 +132,7 @@ describe("ConfigWatcher", () => {
 
     rmSync(filePath);
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const events = store.query({ category: "config" });
     const removedEvents = events.filter(
@@ -144,8 +144,8 @@ describe("ConfigWatcher", () => {
   it("stop is idempotent", async () => {
     const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();
-    watcher.stop();
-    watcher.stop(); // should not throw
+    await watcher.stop();
+    await watcher.stop(); // should not throw
   });
 
   it("syncs plugins manifest rows on start", async () => {
@@ -167,7 +167,7 @@ describe("ConfigWatcher", () => {
       assert.equal(manifests[0].id, `plugins:${entryFile}`);
       assert.ok(manifests[0].contentHash.length === 64, "should write sha256 hash");
     } finally {
-      watcher.stop();
+      await watcher.stop();
     }
   });
 
@@ -182,7 +182,7 @@ describe("ConfigWatcher", () => {
       const manifests = store.getManifestsByType("plugins");
       assert.equal(manifests.length, 0, "stale row should be cleaned up");
     } finally {
-      watcher.stop();
+      await watcher.stop();
     }
   });
 
@@ -194,7 +194,7 @@ describe("ConfigWatcher", () => {
     // Write a non-code file (e.g., markdown)
     writeFileSync(join(openclawDir, "skills", "readme.md"), `# Not code: ${"ev" + "al"}('x')`);
     await sleep(1500);
-    watcher.stop();
+    await watcher.stop();
 
     const scanEvents = store.query({ category: "security" });
     assert.equal(scanEvents.length, 0, "Should not scan non-code files");
@@ -236,7 +236,7 @@ describe("ConfigWatcher", () => {
       assert.equal(proof!.membership, true, "Proof should confirm membership");
       assert.equal(smtService.verifyProof(proof!), true, "Proof should verify");
     } finally {
-      watcher.stop();
+      await watcher.stop();
       await smtService.stop();
       rmSync(dirname(smtCheckpointDir), { recursive: true, force: true });
     }

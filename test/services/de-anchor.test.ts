@@ -326,10 +326,10 @@ describe("DeAnchorService", () => {
         });
     });
 
-    it("stop is idempotent", () => {
+    it("stop is idempotent", async () => {
         const service = createDeAnchorService(store, {});
-        service.stop();
-        service.stop();
+        await service.stop();
+        await service.stop();
     });
 
     describe("wallet key file", () => {

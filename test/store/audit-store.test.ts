@@ -263,38 +263,29 @@ describe("AuditStore", () => {
       assert.equal(store.isDegraded(), false);
     });
 
-    it("returns undefined and sets degraded on append failure", () => {
+    it("returns undefined when called after close, without degrading", () => {
       store.close();
-      const badStore = store;
+      const closedStore = store;
       store = new AuditStore(makeTempDb());
 
-      const result = badStore.append(sampleInsert());
+      const result = closedStore.append(sampleInsert());
       assert.equal(result, undefined);
-      assert.equal(badStore.isDegraded(), true);
+      assert.equal(closedStore.isDegraded(), false);
     });
 
-    it("clears degraded flag after successful append", () => {
-      // Force degraded via a corrupted prepared statement
-      const path2 = makeTempDb();
-      const store2 = new AuditStore(path2);
-      store2.append(sampleInsert());
+    it("sets degraded on append failure and clears it on next successful append", () => {
+      // Force a SQLite NOT NULL constraint violation by passing description=null;
+      // the prepared statement throws, the catch sets degraded=true.
+      const bad = sampleInsert();
+      (bad as { description: unknown }).description = null;
+      const failed = store.append(bad);
+      assert.equal(failed, undefined);
+      assert.equal(store.isDegraded(), true);
 
-      // Close and reopen to get a fresh handle, then corrupt it
-      store2.close();
-      const store3 = new AuditStore(path2);
-
-      // Manually trigger degraded by closing underlying DB and attempting append
-      store3.close();
-      store3.append(sampleInsert({ description: "will fail" }));
-      assert.equal(store3.isDegraded(), true);
-
-      // Reopen — degraded starts false, proving recovery on construction
-      const store4 = new AuditStore(path2);
-      assert.equal(store4.isDegraded(), false);
-      store4.append(sampleInsert({ description: "recovery" }));
-      assert.equal(store4.isDegraded(), false);
-      store4.close();
-      cleanupDb(path2);
+      // A subsequent successful append clears the flag.
+      const ok = store.append(sampleInsert());
+      assert.ok(ok);
+      assert.equal(store.isDegraded(), false);
     });
 
     it("does not advance sequence on failure", () => {

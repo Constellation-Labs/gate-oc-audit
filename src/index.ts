@@ -35,6 +35,10 @@ interface PluginHandlerTool {
 }
 
 export default (() => {
+    // These references are valid only while their underlying handles are open.
+    // retention.stop() closes the store and must reset them so the next
+    // register(api) rebuilds against a fresh api instead of resurrecting a
+    // closed store. Any future singleton cached here needs the same reset.
     let _registered = false;
     let _store: AuditStore | undefined;
     let _limiter: RateLimiter | undefined;
@@ -542,9 +546,17 @@ export default (() => {
                     retention.start();
                 },
                 stop() {
+                    // Detach signal handlers first so a SIGTERM/SIGINT arriving
+                    // mid-shutdown can't fire captureSignal against an
+                    // already-closed store.
+                    _gatewayStopCapture?.detachSignalListeners();
                     retention.stop();
                     limiter.flush();
                     activeStore.close();
+                    _registered = false;
+                    _store = undefined;
+                    _limiter = undefined;
+                    _gatewayStopCapture = undefined;
                 },
             });
 
@@ -553,8 +565,8 @@ export default (() => {
                 async start() {
                     await configWatcher.start();
                 },
-                stop() {
-                    configWatcher.stop();
+                async stop() {
+                    await configWatcher.stop();
                 },
             });
 
@@ -563,8 +575,8 @@ export default (() => {
                 async start() {
                     await deAnchor.start();
                 },
-                stop() {
-                    deAnchor.stop();
+                async stop() {
+                    await deAnchor.stop();
                 },
             });
 
@@ -586,8 +598,8 @@ export default (() => {
                 async start() {
                     await fileWatcher.start();
                 },
-                stop() {
-                    fileWatcher.stop();
+                async stop() {
+                    await fileWatcher.stop();
                 },
             });
 
