@@ -4,6 +4,8 @@ import type { NotificationService } from "./services/notifications.js";
 import type { SmtService } from "./services/smt-service.js";
 import { resolveAuditUiUrl } from "./util/gateway-url.js";
 import { streamExport, type ExportFormat } from "./ui/export.js";
+import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
+import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -204,6 +206,23 @@ export async function cliExportHandler(store: AuditStore, format?: string, opts:
 
 export function cliAuditUiHandler(): void {
   outLine(resolveAuditUiUrl());
+}
+
+export interface AuditInventoryOptions {
+  json?: boolean;
+}
+
+export function cliInventoryHandler(
+  store: AuditStore,
+  kind: InventoryKind | "summary",
+  opts: AuditInventoryOptions,
+  collectOpts: CollectOptions,
+): void {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  const report = collectInventory(store, kind, collectOpts);
+  outLine(opts.json ? formatInventoryJson(report) : formatInventoryHuman(report, kind));
 }
 
 export async function cliSmtHandler(
