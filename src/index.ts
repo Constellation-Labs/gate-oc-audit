@@ -6,6 +6,7 @@ import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandle
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
+import {ReportPusherService} from "./services/report-pusher.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
@@ -494,6 +495,10 @@ export default (() => {
             log.info(`Registering services (registrationMode: ${api.registrationMode})`);
 
             const retention = new RetentionService(activeStore, config);
+            const reportWebhookUrl = typeof config.reportWebhook === "string"
+                ? config.reportWebhook
+                : undefined;
+            const reportPusher = new ReportPusherService(activeStore, reportWebhookUrl);
             const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
             deAnchor = createDeAnchorService(activeStore, config, activeNotifier);
             deAnchor.setSmtService(activeSmt);
@@ -555,6 +560,20 @@ export default (() => {
                 },
                 async stop() {
                     await activeSmt.stop();
+                },
+            });
+
+            // Register *before* retention so that on shutdown (which the host
+            // typically runs in reverse registration order) the pusher's
+            // in-flight tick and retry timer are cancelled before retention.stop
+            // closes the underlying store.
+            api.registerService({
+                id: "constellation-audit-plugin:report-pusher",
+                start() {
+                    reportPusher.start();
+                },
+                stop() {
+                    reportPusher.stop();
                 },
             });
 

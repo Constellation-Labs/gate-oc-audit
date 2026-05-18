@@ -1,7 +1,6 @@
 import type { ConfigChangeMetadata, ScanFinding } from "../types/events.js";
 import {log} from "../util/logger.js";
-
-const SEND_TIMEOUT_MS = 10_000;
+import { isUnsafeWebhookUrl, postJsonWebhook } from "../util/webhook.js";
 
 const ARTIFACT_LABELS: Record<string, string> = {
   tools: "Tool",
@@ -18,19 +17,12 @@ export interface NotificationPayload {
   }>;
 }
 
-function isUnsafeUrl(raw: string): string | undefined {
-  let url: URL;
-  try { url = new URL(raw); } catch { return "malformed URL"; }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return `disallowed protocol ${url.protocol}`;
-  return undefined;
-}
-
 export class NotificationService {
   private webhookUrl: string | undefined;
 
   constructor(webhookUrl?: string) {
     if (webhookUrl) {
-      const reason = isUnsafeUrl(webhookUrl);
+      const reason = isUnsafeWebhookUrl(webhookUrl);
       if (reason) {
         log.warn(`Webhook URL rejected (${reason}), notifications disabled`);
       } else {
@@ -132,22 +124,13 @@ export class NotificationService {
 
   private async send(payload: NotificationPayload): Promise<void> {
     if (!this.webhookUrl) return;
-
-    try {
-      const response = await fetch(this.webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        log.error(
-          `Notification webhook returned ${response.status}: ${response.statusText}`,
-        );
+    const result = await postJsonWebhook(this.webhookUrl, payload);
+    if (!result.ok) {
+      if (result.status !== undefined) {
+        log.error(`Notification webhook returned ${result.status}: ${result.error}`);
+      } else {
+        log.error(`Notification webhook failed: ${result.error}`);
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      log.error(`Notification webhook failed: ${message}`);
     }
   }
 }

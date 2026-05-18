@@ -166,18 +166,16 @@ export function subtractCalendarDays(iso: string, days: number, tz: TimeZoneMode
                   d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds()).toISOString();
 }
 
-/** Default to "today" in the requested time zone. */
-export function todayInTz(tz: TimeZoneMode): string {
-  const now = new Date();
+/** Default to "today" in the requested time zone. `now` is injectable for tests. */
+export function todayInTz(tz: TimeZoneMode, now: Date = new Date()): string {
   if (tz === "utc") {
     return `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
   }
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
-/** Default to "this ISO week" in the requested time zone. */
-export function thisWeekInTz(tz: TimeZoneMode): string {
-  const now = new Date();
+/** Default to "this ISO week" in the requested time zone. `now` is injectable for tests. */
+export function thisWeekInTz(tz: TimeZoneMode, now: Date = new Date()): string {
   return `${isoWeekYear(now, tz)}-W${pad2(isoWeek(now, tz))}`;
 }
 
