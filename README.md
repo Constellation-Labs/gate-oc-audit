@@ -119,9 +119,30 @@ Or directly in the config JSON:
 
 #### Notifications
 
+Two channels, deliberately separate so incident pokes and periodic digests can be routed to different rooms:
+
+```bash
+openclaw config set plugins.entries.constellation-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
+openclaw config set plugins.entries.constellation-audit-plugin.config.reportWebhook "https://hooks.slack.com/services/AAA/BBB/DDD"
+```
+
+```json
+{
+  "config": {
+    "notificationWebhook": "https://hooks.slack.com/services/AAA/BBB/CCC",
+    "reportWebhook": "https://hooks.slack.com/services/AAA/BBB/DDD"
+  }
+}
+```
+
 | Option | Default | Description |
 |---|---|---|
-| `notificationWebhook` | — | Webhook URL for alerts (config changes, integrity violations, DE divergence) |
+| `notificationWebhook` | — | Webhook URL for incident alerts (config changes, integrity violations, DE divergence) |
+| `reportWebhook` | — | Webhook URL for daily and weekly audit digests. Payload is Slack-compatible `{text, blocks, projection}`; receivers that ignore extras still get a pretty message, and ETL receivers parse the full `projection` (same schema as `audit report`). |
+
+**Cadence:** daily digests fire shortly after local midnight, weekly digests after local Monday 00:00. The scheduler polls every ~5 minutes, so a digest "scheduled" for 00:00 may arrive anywhere in `[00:00, 00:05)`. After a long downtime only the most recently completed window is pushed (no backfill spam).
+
+**Privacy:** `recipient` fields in `anomalies.duplicateOutbound[]` are hashed before they leave the box (`sha256:` prefix), preserving "same recipient as last week" correlation without exposing phone numbers / emails / @handles to the webhook receiver. Channel names (`slack`, `discord`, etc.) are sent verbatim.
 
 #### Identity
 
