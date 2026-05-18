@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://constellationnetwork.io/schemas/openclaw-audit/audit-projection.schema.json",
+  "title": "AuditProjection",
+  "description": "Daily / weekly digest projection produced by `openclaw audit report`. Consumed by the gateway dashboard (AG-47, AG-101, AG-102) to render the same digest the CLI prints.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "period",
+    "detectorConfig",
+    "activity",
+    "cron",
+    "topTools",
+    "llmSpend",
+    "outboundMessaging",
+    "anomalies",
+    "integrity"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "period": {
+      "type": "object",
+      "required": ["kind", "fromIso", "toIso", "label", "tz"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["daily", "weekly"] },
+        "fromIso": { "type": "string", "format": "date-time" },
+        "toIso": { "type": "string", "format": "date-time" },
+        "label": { "type": "string" },
+        "tz": { "enum": ["local", "utc"] }
+      }
+    },
+    "detectorConfig": {
+      "type": "object",
+      "required": ["duplicateOutboundWindowSec", "firstSeenLookbackDays"],
+      "additionalProperties": false,
+      "properties": {
+        "duplicateOutboundWindowSec": { "type": "integer", "minimum": 1 },
+        "firstSeenLookbackDays": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "activity": {
+      "type": "object",
+      "required": ["totalEvents", "byCategory"],
+      "additionalProperties": false,
+      "properties": {
+        "totalEvents": { "type": "integer", "minimum": 0 },
+        "byCategory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["category", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "category": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "cron": {
+      "type": "object",
+      "required": ["executed", "failed", "byEventType"],
+      "additionalProperties": false,
+      "properties": {
+        "executed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "byEventType": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["eventType", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "eventType": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "topTools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["toolName", "invocations"],
+        "additionalProperties": false,
+        "properties": {
+          "toolName": { "type": "string" },
+          "invocations": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "llmSpend": {
+      "type": "object",
+      "required": ["totalCalls", "totalCostUsd", "byModel"],
+      "additionalProperties": false,
+      "properties": {
+        "totalCalls": { "type": "integer", "minimum": 0 },
+        "totalCostUsd": { "type": "number", "minimum": 0 },
+        "byModel": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "model",
+              "provider",
+              "callCount",
+              "inputTokens",
+              "outputTokens",
+              "cacheTokens",
+              "cacheWriteTokens",
+              "costUsd"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "model": { "type": "string" },
+              "provider": { "type": ["string", "null"] },
+              "callCount": { "type": "integer", "minimum": 0 },
+              "inputTokens": { "type": "integer", "minimum": 0 },
+              "outputTokens": { "type": "integer", "minimum": 0 },
+              "cacheTokens": { "type": "integer", "minimum": 0 },
+              "cacheWriteTokens": { "type": "integer", "minimum": 0 },
+              "costUsd": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "outboundMessaging": {
+      "type": "object",
+      "required": ["totalSent", "byChannel"],
+      "additionalProperties": false,
+      "properties": {
+        "totalSent": { "type": "integer", "minimum": 0 },
+        "byChannel": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["channel", "count"],
+            "additionalProperties": false,
+            "properties": {
+              "channel": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "anomalies": {
+      "type": "object",
+      "required": ["duplicateOutbound", "duplicateOutboundTruncated", "firstSeenTools"],
+      "additionalProperties": false,
+      "properties": {
+        "duplicateOutboundTruncated": {
+          "type": "boolean",
+          "description": "True when the duplicate-outbound detector hit its internal cap and the underlying message-set was truncated; further duplicates may exist beyond this report's view."
+        },
+        "duplicateOutbound": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["contentSha256", "channel", "recipient", "events", "deltaSeconds"],
+            "additionalProperties": false,
+            "properties": {
+              "contentSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "channel": { "type": "string" },
+              "recipient": { "type": "string" },
+              "deltaSeconds": { "type": "number", "minimum": 0 },
+              "events": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "sequence", "createdAt"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string" },
+                    "sequence": { "type": "integer", "minimum": 0 },
+                    "createdAt": { "type": "string", "format": "date-time" },
+                    "sessionId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "firstSeenTools": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "required": [
+        "lastSequence",
+        "lastEventId",
+        "lastEventCreatedAt",
+        "lastEventContentHash",
+        "lastCheckpoint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "lastSequence": { "type": ["integer", "null"], "minimum": 0 },
+        "lastEventId": { "type": ["string", "null"] },
+        "lastEventCreatedAt": { "type": ["string", "null"], "format": "date-time" },
+        "lastEventContentHash": { "type": ["string", "null"] },
+        "lastCheckpoint": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": [
+                "checkpointId",
+                "deTxHash",
+                "smtRoot",
+                "sequenceStart",
+                "sequenceEnd",
+                "createdAt"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "checkpointId": { "type": "string" },
+                "deTxHash": { "type": ["string", "null"] },
+                "smtRoot": { "type": "string" },
+                "sequenceStart": { "type": "integer", "minimum": 0 },
+                "sequenceEnd": { "type": "integer", "minimum": 0 },
+                "createdAt": { "type": "string", "format": "date-time" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

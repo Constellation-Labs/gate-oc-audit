@@ -444,6 +444,39 @@ Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smt
 >
 > The CLI (`openclaw audit export …`) is unaffected — it reads the local DB directly and doesn't traverse the HTTP gate.
 
+### Report
+
+Generate a daily or weekly activity digest with inline anomaly detectors. The projection covers Activity / Cron schedule / Top tools / LLM spend / Outbound messaging / Anomalies / Integrity, rendered as human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`).
+
+```bash
+openclaw audit report daily                                # today (UTC), human text
+openclaw audit report daily --date 2026-05-17              # specific UTC day
+openclaw audit report daily --tz local                     # use local-time day boundary
+openclaw audit report weekly                               # this ISO week (UTC)
+openclaw audit report weekly --week 2026-W19               # specific ISO week
+openclaw audit report daily --json                         # single-line JSON
+openclaw audit report daily --html > report.html           # standalone HTML
+```
+
+Detector knobs (capped on both CLI and HTTP):
+
+| Flag | Default | Max | Description |
+|---|---|---|---|
+| `--dup-window-sec` | `60` | `3600` | R5a duplicate-outbound: sha256-equal `message.sent` within this window to the same channel + recipient is flagged |
+| `--lookback-days` | `30` | `365` | R5b first-seen-tool: tools invoked in the window but absent from this trailing day count are flagged |
+| `--top-tools` | `10` | `1000` | Cap for the Top tools section |
+
+Anomaly detectors emitted in the `anomalies` block:
+
+- **R5a duplicate outbound** — same content hash sent to the same channel + recipient inside `--dup-window-sec`. `duplicateOutboundTruncated: true` indicates the underlying `message.sent` scan hit its 100k-row cap and a duplicate beyond that point could have been missed.
+- **R5b first-seen tools** — tool names invoked in the window that did not appear in the prior `--lookback-days` window. Calendar-day arithmetic in the report's timezone keeps the lookback DST-tolerant.
+
+The Integrity footer pins the report to a sequence point: last event id / sequence / `content_hash`, plus the last DE-anchored checkpoint (id, `smtRoot`, `deTxHash`, sequence range, `createdAt`) when one exists. A consumer can cross-check the footer against `openclaw audit verify` to confirm the report covers a tamper-evident slice of the trail.
+
+The same projection is available over HTTP at `GET /plugins/audit/api/report?period=daily|weekly&date=&week=&tz=&format=json|html&dupWindowSec=&lookbackDays=&topTools=`. The JSON shape is published at `schemas/audit-projection.schema.json` so dashboards can pin against `schemaVersion: 1`.
+
+> **HTTP endpoint and loopback.** Like `/api/export`, the report route is unauthenticated and returns `403` when the gateway binds beyond loopback unless `allowExportOnNonLoopback: true` is set. The CLI reads the local DB directly and is unaffected.
+
 ### SMT operations
 
 ```bash

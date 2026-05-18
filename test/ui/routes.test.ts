@@ -765,3 +765,84 @@ describe("ui: export endpoint", () => {
     }
   });
 });
+
+describe("ui: /api/report endpoint", () => {
+  let rig: UiRig;
+  before(async () => { rig = await createUiRig(); });
+  after(async () => { await rig.destroy(); });
+
+  it("rejects missing or invalid period", async () => {
+    const res1 = await fetch(`${rig.baseUrl}/plugins/audit/api/report`);
+    assert.equal(res1.status, 400);
+    const res2 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=hourly`);
+    assert.equal(res2.status, 400);
+  });
+
+  it("rejects invalid tz", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&tz=cest`);
+    assert.equal(res.status, 400);
+  });
+
+  it("rejects bad date or week strings with a 400", async () => {
+    const r1 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&date=not-a-date`);
+    assert.equal(r1.status, 400);
+    const r2 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=weekly&week=2026-Wxx`);
+    assert.equal(r2.status, 400);
+  });
+
+  it("enforces parameter caps on dupWindowSec/lookbackDays/topTools", async () => {
+    const r1 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&lookbackDays=1000000`);
+    assert.equal(r1.status, 400);
+    const r2 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&dupWindowSec=99999`);
+    assert.equal(r2.status, 400);
+    const r3 = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&topTools=99999`);
+    assert.equal(r3.status, 400);
+  });
+
+  it("default JSON response validates the schemaVersion + period kind", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&tz=utc&date=2026-05-18`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    const body = (await res.json()) as { schemaVersion: number; period: { kind: string; tz: string } };
+    assert.equal(body.schemaVersion, 1);
+    assert.equal(body.period.kind, "daily");
+    assert.equal(body.period.tz, "utc");
+  });
+
+  it("format=html returns a self-contained HTML document", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=daily&tz=utc&date=2026-05-18&format=html`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const text = await res.text();
+    assert.ok(text.startsWith("<!doctype html>"));
+    assert.ok(text.includes("Audit report"));
+  });
+
+  it("weekly period accepts --week", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report?period=weekly&tz=utc&week=2026-W21`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { period: { kind: string; label: string } };
+    assert.equal(body.period.kind, "weekly");
+    assert.match(body.period.label, /2026-W21/);
+  });
+
+  it("blocks the report when gateway is non-loopback and opt-in is off", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/report?period=daily&tz=utc&date=2026-05-18`);
+      assert.equal(res.status, 403);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the report on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/report?period=daily&tz=utc&date=2026-05-18`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+});

@@ -6,6 +6,10 @@ import { resolveAuditUiUrl } from "./util/gateway-url.js";
 import { streamExport, type ExportFormat } from "./ui/export.js";
 import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
 import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
+import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
+import { buildProjection } from "./reports/projection.js";
+import { formatProjectionText } from "./reports/format-text.js";
+import { formatProjectionHtml } from "./reports/format-html.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -310,4 +314,57 @@ export async function cliSmtHandler(
       console.error(`Unknown SMT action: ${action}`);
       process.exitCode = 1;
   }
+}
+
+export interface AuditReportOptions {
+  date?: string;
+  week?: string;
+  tz?: string;
+  json?: boolean;
+  html?: boolean;
+  dupWindowSec?: string;
+  lookbackDays?: string;
+  topTools?: string;
+}
+
+export function cliReportHandler(
+  store: AuditStore,
+  period: "daily" | "weekly",
+  opts: AuditReportOptions = {},
+): void {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
+  const window = period === "daily"
+    ? parseDate(opts.date ?? todayInTz(tz), tz)
+    : parseWeek(opts.week ?? thisWeekInTz(tz), tz);
+
+  const projection = buildProjection(store, window, {
+    duplicateOutboundWindowSec: parsePositiveInt(opts.dupWindowSec, "--dup-window-sec", 3600),
+    firstSeenLookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
+    topToolsLimit: parsePositiveInt(opts.topTools, "--top-tools", 1000),
+  });
+
+  if (opts.json === true) {
+    outLine(JSON.stringify(projection));
+    return;
+  }
+  if (opts.html === true) {
+    process.stdout.write(formatProjectionHtml(projection));
+    return;
+  }
+  process.stdout.write(formatProjectionText(projection));
+}
+
+function parsePositiveInt(value: string | undefined, flag: string, max: number): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${flag} must be a positive integer (got "${value}")`);
+  }
+  if (n > max) {
+    throw new Error(`${flag} must not exceed ${max} (got "${value}")`);
+  }
+  return n;
 }
