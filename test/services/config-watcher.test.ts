@@ -148,6 +148,44 @@ describe("ConfigWatcher", () => {
     watcher.stop(); // should not throw
   });
 
+  it("syncs plugins manifest rows on start", async () => {
+    const pluginDir = join(openclawDir, "extensions", "demo-plugin");
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, "package.json"),
+      JSON.stringify({ name: "demo-plugin", version: "0.1.0", main: "index.js" }),
+    );
+    writeFileSync(join(pluginDir, "index.js"), "module.exports = {};");
+
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+    try {
+      await watcher.start();
+      const manifests = store.getManifestsByType("plugins");
+      assert.equal(manifests.length, 1);
+      const entryFile = join(pluginDir, "index.js");
+      assert.equal(manifests[0].filePath, entryFile);
+      assert.equal(manifests[0].id, `plugins:${entryFile}`);
+      assert.ok(manifests[0].contentHash.length === 64, "should write sha256 hash");
+    } finally {
+      watcher.stop();
+    }
+  });
+
+  it("removes vanished plugin manifest rows on next start", async () => {
+    // Seed a row for a plugin that doesn't exist on disk
+    const orphan = join(openclawDir, "extensions", "removed-plugin", "index.js");
+    store.upsertManifest(`plugins:${orphan}`, "plugins", "stale", orphan);
+
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+    try {
+      await watcher.start();
+      const manifests = store.getManifestsByType("plugins");
+      assert.equal(manifests.length, 0, "stale row should be cleaned up");
+    } finally {
+      watcher.stop();
+    }
+  });
+
   it("does not scan non-code files", async () => {
     const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
     await watcher.start();

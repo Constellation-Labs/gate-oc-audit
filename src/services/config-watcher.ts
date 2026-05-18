@@ -6,6 +6,7 @@ import type { ToolScanner } from "../scanner.js";
 import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
 import { fileHash } from "../util/fs.js";
+import { extractPluginMetadata, listExtensionsPluginDirs, resolveOpenclawDir } from "../util/openclaw-paths.js";
 import {log} from "../util/logger.js";
 
 interface ManifestEntry {
@@ -60,9 +61,7 @@ export class ConfigWatcher {
     this.scanner = scanner;
     this.notifier = notifier;
 
-    this.openclawDir = typeof config.openclawDir === "string"
-      ? resolve(config.openclawDir)
-      : resolve(process.env.HOME ?? ".", ".openclaw");
+    this.openclawDir = resolveOpenclawDir(config);
 
     this.watchedDirs = [
       { path: resolve(this.openclawDir, "skills"), manifestType: "skills" },
@@ -80,6 +79,7 @@ export class ConfigWatcher {
     }
 
     this.loadManifestFromStore();
+    this.syncPluginsManifest();
 
     const watchPaths: string[] = [];
     for (const wd of this.watchedDirs) {
@@ -248,6 +248,41 @@ export class ConfigWatcher {
       }
     } catch {
       // Start with empty manifest
+    }
+  }
+
+  // Plugins are coarser-grained than skills/tools (one row per plugin keyed
+  // by its resolved entry file). A chokidar per-file watch would write
+  // O(files-per-plugin) rows, so we sync once on start and reconcile vanished
+  // plugins. The inventory CLI joins against these rows by entry-file path.
+  private syncPluginsManifest(): void {
+    try {
+      const existing = new Map<string, string>();
+      for (const row of this.store.getManifestsByType("plugins")) {
+        if (row.filePath) existing.set(row.filePath, row.contentHash);
+      }
+
+      const seen = new Set<string>();
+      for (const dir of listExtensionsPluginDirs(this.openclawDir)) {
+        const meta = extractPluginMetadata(dir);
+        if (!meta.entryFile || !existsSync(meta.entryFile)) continue;
+        const hash = fileHash(meta.entryFile);
+        if (!hash) continue;
+        seen.add(meta.entryFile);
+        if (existing.get(meta.entryFile) !== hash) {
+          this.store.upsertManifest(`plugins:${meta.entryFile}`, "plugins", hash, meta.entryFile);
+        }
+      }
+
+      for (const [path] of existing) {
+        if (seen.has(path)) continue;
+        if (existsSync(path)) continue;
+        try { this.store.deleteManifest(`plugins:${path}`); } catch (err) {
+          log.error(`Failed to delete plugin manifest: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    } catch (err) {
+      log.error(`Plugin manifest sync error: ${err instanceof Error ? err.message : err}`);
     }
   }
 }

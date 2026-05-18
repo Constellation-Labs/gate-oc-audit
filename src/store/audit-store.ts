@@ -239,7 +239,7 @@ export class AuditStore {
     const CP_COLS = "id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at";
 
     this.stmts = {
-      getManifestsByType: this.db.prepare("SELECT id, content_hash, file_path FROM config_manifests WHERE manifest_type = ?"),
+      getManifestsByType: this.db.prepare("SELECT id, content_hash, file_path, captured_at FROM config_manifests WHERE manifest_type = ?"),
       upsertManifest: this.db.prepare(
         `INSERT INTO config_manifests (id, manifest_type, content_hash, file_path, captured_at)
          VALUES (?, ?, ?, ?, ?)
@@ -659,9 +659,9 @@ export class AuditStore {
 
   // --- Config manifest operations (used by ConfigWatcher and FileWatcher) ---
 
-  getManifestsByType(manifestType: string): Array<{ id: string; contentHash: string; filePath: string | null }> {
-    return (this.stmts.getManifestsByType.all(manifestType) as Array<{ id: string; content_hash: string; file_path: string | null }>)
-      .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path }));
+  getManifestsByType(manifestType: string): Array<{ id: string; contentHash: string; filePath: string | null; capturedAt: string }> {
+    return (this.stmts.getManifestsByType.all(manifestType) as Array<{ id: string; content_hash: string; file_path: string | null; captured_at: string }>)
+      .map((r) => ({ id: r.id, contentHash: r.content_hash, filePath: r.file_path, capturedAt: r.captured_at }));
   }
 
   upsertManifest(id: string, manifestType: string, contentHash: string, filePath: string): void {

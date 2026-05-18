@@ -2,7 +2,9 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
+import {cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditExportOptions} from "./cli.js";
+import {INVENTORY_KINDS} from "./services/inventory.js";
+import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
@@ -80,6 +82,10 @@ export default (() => {
                 return notifier;
             }
 
+            function resolveCollectOpts(): { openclawDir: string; projectRoot: string } {
+                return { openclawDir: resolveOpenclawDir(config), projectRoot: process.cwd() };
+            }
+
             api.registerCli(({program}) => {
                 const audit = program.command("audit").description("View and manage audit trail");
 
@@ -118,6 +124,25 @@ export default (() => {
                     .action((format: string | undefined, opts: AuditExportOptions) =>
                         cliExportHandler(getStore(), format, opts),
                     );
+
+                // Inventory subcommands
+                const inventory = audit
+                    .command("inventory")
+                    .description("Inventory installed plugins/skills/tools/soul/crons")
+                    .option("--json", "Emit JSON instead of a human-readable table")
+                    .action((opts: { json?: boolean }) =>
+                        cliInventoryHandler(getStore(), "summary", opts, resolveCollectOpts()),
+                    );
+
+                for (const kind of INVENTORY_KINDS) {
+                    inventory
+                        .command(kind)
+                        .description(`List installed ${kind}`)
+                        .option("--json", "Emit JSON instead of a human-readable table")
+                        .action((opts: { json?: boolean }) =>
+                            cliInventoryHandler(getStore(), kind, opts, resolveCollectOpts()),
+                        );
+                }
 
                 // SMT subcommands
                 const smt = audit.command("smt").description("Sparse Merkle Tree operations");
