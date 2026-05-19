@@ -193,6 +193,9 @@ export type GateProbeResult =
 export interface GateTestRequest {
   url?: string;
   apiKey?: string;
+  /** Allow probing a saved Gate whose URL is on a private/link-local
+   * host. Mirrors the install-time flag. */
+  allowPrivateHost?: boolean;
 }
 
 export function testGate(req: GateTestRequest = {}): Promise<{ url: string; result: GateProbeResult }> {
@@ -214,7 +217,10 @@ export interface GateInstallRequest {
 export interface GateInstallResponse {
   configPath: string;
   changes: string[];
-  probe: "ok" | "unauthorized" | "http-error" | "network-error" | "skipped";
+  /** Install converts every non-ok probe outcome into a 400 (the
+   * installer throws), so the success response can only carry these
+   * two values. */
+  probe: "ok" | "skipped";
 }
 
 export function installGate(req: GateInstallRequest): Promise<GateInstallResponse> {

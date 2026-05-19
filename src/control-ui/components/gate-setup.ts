@@ -1,4 +1,4 @@
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import {
   getGateStatus,
@@ -147,12 +147,17 @@ export class GateSetup extends LitElement {
     void this.loadStatus();
   }
 
-  private async loadStatus() {
+  private async loadStatus(opts: { syncUrlField?: boolean } = {}) {
     this.loadingStatus = true;
     this.statusError = undefined;
     try {
       this.status = await getGateStatus();
-      if (this.status.url && !this.url) this.url = this.status.url;
+      // Normal load: only pre-fill if the URL field is empty.
+      // syncUrlField (post-install): pull the canonical saved value so
+      // a trimmed/normalized URL is reflected back in the form.
+      if (this.status.url && (!this.url || opts.syncUrlField)) {
+        this.url = this.status.url;
+      }
     } catch (err) {
       this.statusError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -165,19 +170,30 @@ export class GateSetup extends LitElement {
     this.testError = undefined;
     this.testResult = undefined;
     try {
+      // Status not loaded yet — refuse to act rather than fall into the
+      // "any typed URL is an override" branch, which would produce a
+      // misleading error message.
+      if (!this.status && !this.statusError) {
+        this.testError = "Status not loaded yet — wait a moment and try again";
+        return;
+      }
       // Test the saved config by default. If the operator has typed an
       // override URL into the form, require an explicit API key (same
       // policy as the CLI's --url-without-key guard).
       const overrideUrl = this.url.trim();
       const savedUrl = this.status?.url;
       const usingOverride = overrideUrl !== "" && overrideUrl !== savedUrl;
-      const payload = usingOverride
-        ? { url: overrideUrl, apiKey: this.apiKey.trim() || undefined }
-        : {};
-      if (usingOverride && !this.apiKey.trim()) {
+      const apiKey = this.apiKey.trim();
+      if (usingOverride && !apiKey) {
         this.testError = "URL override requires an API key (saved key is never sent to a different URL)";
         return;
       }
+      // Honor the same allowPrivateHost flag the install form sets, so
+      // a Gate installed at an RFC1918 URL can be re-probed without
+      // unchecking the box first.
+      const payload = usingOverride
+        ? { url: overrideUrl, apiKey, allowPrivateHost: this.allowPrivateHost }
+        : { allowPrivateHost: this.allowPrivateHost };
       this.testResult = await testGate(payload);
     } catch (err) {
       this.testError = err instanceof Error ? err.message : String(err);
@@ -205,7 +221,7 @@ export class GateSetup extends LitElement {
         skipProbe: this.skipProbe,
       });
       this.apiKey = ""; // never leave the key on screen after success
-      await this.loadStatus();
+      await this.loadStatus({ syncUrlField: true });
     } catch (err) {
       this.installError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -224,6 +240,7 @@ export class GateSetup extends LitElement {
           <label>Gate URL
             <input type="text" placeholder="https://gate.example.com"
               .value=${this.url}
+              autocomplete="off"
               @input=${(e: Event) => { this.url = (e.target as HTMLInputElement).value; }} />
           </label>
           <label>Gate API key
@@ -317,7 +334,7 @@ export class GateSetup extends LitElement {
   }
 }
 
-function pill(value: boolean, okClass: "ok" | "warn", badClass: "warn" | "bad", labelOverride?: string): unknown {
+function pill(value: boolean, okClass: "ok" | "warn", badClass: "warn" | "bad", labelOverride?: string): TemplateResult {
   const label = labelOverride ?? (value ? "yes" : "no");
   const cls = value ? okClass : badClass;
   return html`<span class="pill ${cls}">${label}</span>`;
@@ -329,6 +346,10 @@ function formatProbe(r: GateProbeResult): string {
     case "unauthorized": return `unauthorized (HTTP ${r.status}) — ${r.body || "(no body)"}`;
     case "http-error": return `http-error (HTTP ${r.status}) — ${r.body || "(no body)"}`;
     case "network-error": return `network-error — ${r.message}`;
+    default: {
+      const _exhaustive: never = r;
+      return `unknown probe result (${JSON.stringify(_exhaustive)})`;
+    }
   }
 }
 
