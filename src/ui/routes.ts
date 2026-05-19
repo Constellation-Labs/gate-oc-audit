@@ -19,6 +19,7 @@ import { log } from "../util/logger.js";
 import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "../reports/time-window.js";
 import { buildProjection } from "../reports/projection.js";
 import { formatProjectionHtml } from "../reports/format-html.js";
+import { buildCronRollup, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "../reports/cron-rollup.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -535,6 +536,49 @@ async function handleApi(
       return true;
     }
     sendJson(res, 200, projection);
+    return true;
+  }
+
+  // GET /api/report/cron/<job-id>?last=N&format=json|html
+  if (apiPath.startsWith("report/cron/") && req.method === "GET") {
+    // Same loopback gate as /api/report. The rollup surfaces aggregated
+    // run-level metadata (jobId, runId, sessionId, error strings) — narrow
+    // by intent but the same blast radius as a digest slice.
+    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit report is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    const jobId = decodeURIComponent(apiPath.slice("report/cron/".length));
+    if (!jobId) {
+      sendError(res, 400, "missing job-id");
+      return true;
+    }
+    const lastParam = parseOptPositiveInt(url.searchParams.get("last"), CRON_MAX_LAST);
+    if (lastParam === "invalid") {
+      sendError(res, 400, `last must be a positive integer in 1..${CRON_MAX_LAST}`);
+      return true;
+    }
+    const rollup = buildCronRollup(ctx.store, jobId, { last: lastParam ?? CRON_DEFAULT_LAST });
+    const format = (url.searchParams.get("format") ?? "json").toLowerCase();
+    if (format === "html") {
+      const body = Buffer.from(formatCronRollupHtml(rollup));
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-length", String(body.length));
+      res.setHeader("cache-control", "no-store");
+      res.end(body);
+      return true;
+    }
+    if (format !== "json") {
+      sendError(res, 400, "format must be 'json' or 'html'");
+      return true;
+    }
+    sendJson(res, 200, rollup);
     return true;
   }
 

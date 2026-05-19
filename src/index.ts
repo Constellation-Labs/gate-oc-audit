@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions , type AuditReportSessionOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -175,6 +175,16 @@ export default (() => {
                     .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
                     .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
                     .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "weekly", opts));
+
+                report
+                    .command("cron <job-id>")
+                    .description("Per-cron rollup — one row per execution for a given jobId")
+                    .option("--last <n>", "Limit to the N most recent executions (default: 20, max: 1000)")
+                    .option("--json", "Emit the rollup as JSON (single line)")
+                    .option("--html", "Emit the rollup as a self-contained HTML document")
+                    .action((jobId: string, opts: AuditReportCronOptions) =>
+                        cliReportCronHandler(getStore(), jobId, opts),
+                    );
 
                 audit
                     .command("anomalies")

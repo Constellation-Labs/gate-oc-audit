@@ -1047,3 +1047,90 @@ describe("ui: /api/report endpoint", () => {
     }
   });
 });
+
+describe("ui: /api/report/cron/<job-id> endpoint", () => {
+  let rig: UiRig;
+  before(async () => { rig = await createUiRig(); });
+  after(async () => { await rig.destroy(); });
+
+  it("default JSON response carries schemaVersion 1 and the requested jobId", async () => {
+    rig.appendUntracked({
+      sessionId: "sess-1",
+      eventType: "cron.executed" as any,
+      category: "cron" as any,
+      description: "cron.executed",
+      metadata: { jobId: "nightly-job", runId: "run-001" },
+    });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/nightly-job`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    const body = (await res.json()) as { schemaVersion: number; jobId: string; rows: Array<{ runId: string }> };
+    assert.equal(body.schemaVersion, 1);
+    assert.equal(body.jobId, "nightly-job");
+    assert.equal(body.rows.length, 1);
+    assert.equal(body.rows[0].runId, "run-001");
+  });
+
+  it("returns an empty rollup for an unknown jobId", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/no-such-job`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { jobId: string; rows: unknown[]; truncated: boolean };
+    assert.equal(body.jobId, "no-such-job");
+    assert.equal(body.rows.length, 0);
+    assert.equal(body.truncated, false);
+  });
+
+  it("format=html returns a self-contained HTML document", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/nightly-job?format=html`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const text = await res.text();
+    assert.ok(text.startsWith("<!doctype html>"));
+    assert.ok(text.includes("Per-cron rollup"));
+  });
+
+  it("rejects out-of-range last with a 400", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/nightly-job?last=99999`);
+    assert.equal(res.status, 400);
+  });
+
+  it("rejects an unknown format with a 400", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/nightly-job?format=xml`);
+    assert.equal(res.status, 400);
+  });
+
+  it("percent-decodes the job-id from the path", async () => {
+    rig.appendUntracked({
+      sessionId: "sess-2",
+      eventType: "cron.executed" as any,
+      category: "cron" as any,
+      description: "cron.executed",
+      metadata: { jobId: "weird/id with spaces", runId: "run-007" },
+    });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/cron/${encodeURIComponent("weird/id with spaces")}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { jobId: string; rows: Array<{ runId: string }> };
+    assert.equal(body.jobId, "weird/id with spaces");
+    assert.equal(body.rows[0].runId, "run-007");
+  });
+
+  it("blocks the rollup when gateway is non-loopback and opt-in is off", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/report/cron/nightly-job`);
+      assert.equal(res.status, 403);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the rollup on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/report/cron/nightly-job`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+});

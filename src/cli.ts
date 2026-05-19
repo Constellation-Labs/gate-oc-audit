@@ -15,6 +15,7 @@ import { formatAnomalyViewText } from "./reports/format-anomalies-text.js";
 import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
 import { buildSessionProjection } from "./reports/session-projection.js";
 import { formatSessionProjectionText, serializeSessionProjectionJson } from "./reports/format-session.js";
+import { buildCronRollup, formatCronRollupText, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "./reports/cron-rollup.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -428,6 +429,38 @@ function parsePositiveInt(value: string | undefined, flag: string, max: number):
     throw new Error(`${flag} must not exceed ${max} (got "${value}")`);
   }
   return n;
+}
+
+export interface AuditReportCronOptions {
+  last?: string;
+  json?: boolean;
+  html?: boolean;
+}
+
+export function cliReportCronHandler(
+  store: AuditStore,
+  jobId: string | undefined,
+  opts: AuditReportCronOptions = {},
+): void {
+  if (!jobId || jobId.trim() === "") {
+    throw new Error("audit report cron requires a <job-id> argument");
+  }
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  const last = parsePositiveInt(opts.last, "--last", CRON_MAX_LAST) ?? CRON_DEFAULT_LAST;
+
+  const rollup = buildCronRollup(store, jobId, { last });
+
+  if (opts.json === true) {
+    outLine(JSON.stringify(rollup));
+    return;
+  }
+  if (opts.html === true) {
+    process.stdout.write(formatCronRollupHtml(rollup));
+    return;
+  }
+  process.stdout.write(formatCronRollupText(rollup));
 }
 
 export interface AuditAnomaliesOptions {

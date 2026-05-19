@@ -213,7 +213,7 @@ describe("migrateAuditEventsToV4", () => {
 
     // schema_version is bumped to the current version.
     const versionRow = db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number };
-    assert.equal(versionRow.v, 6);
+    assert.equal(versionRow.v, 7);
   });
 
   it("substitutes NULL for missing nullable columns (pre-v3 DB)", () => {
@@ -242,7 +242,7 @@ describe("migrateAuditEventsToV4", () => {
     initializeSchema(db);
 
     const rows = db.prepare("SELECT version FROM schema_version ORDER BY version").all() as { version: number }[];
-    assert.deepEqual(rows.map((r) => r.version), [6]);
+    assert.deepEqual(rows.map((r) => r.version), [7]);
   });
 
   it("recreates indexes that were dropped with the old table", () => {
@@ -282,7 +282,7 @@ describe("migrateAuditEventsToV4", () => {
     const versions = db
       .prepare("SELECT version FROM schema_version ORDER BY version")
       .all() as { version: number }[];
-    assert.deepEqual(versions.map((r) => r.version), [4, 6]);
+    assert.deepEqual(versions.map((r) => r.version), [4, 7]);
 
     // Compound indexes present.
     const indexes = db

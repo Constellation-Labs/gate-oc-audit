@@ -477,6 +477,9 @@ openclaw audit report weekly                               # this ISO week (UTC)
 openclaw audit report weekly --week 2026-W19               # specific ISO week
 openclaw audit report daily --json                         # single-line JSON
 openclaw audit report daily --html > report.html           # standalone HTML
+openclaw audit report cron <job-id>                        # per-cron rollup, one row per execution
+openclaw audit report cron <job-id> --last 5 --json        # last 5 executions, JSON
+openclaw audit report cron <job-id> --html > cron.html     # standalone HTML
 ```
 
 Detector knobs (capped on both CLI and HTTP):
@@ -493,6 +496,8 @@ Anomaly detectors emitted in the `anomalies` block:
 - **R5b first-seen tools** — tool names invoked in the window that did not appear in the prior `--lookback-days` window. Calendar-day arithmetic in the report's timezone keeps the lookback DST-tolerant.
 
 The Integrity footer pins the report to a sequence point: last event id / sequence / `content_hash`, plus the last DE-anchored checkpoint (id, `smtRoot`, `deTxHash`, sequence range, `createdAt`) when one exists. A consumer can cross-check the footer against `openclaw audit verify` to confirm the report covers a tamper-evident slice of the trail.
+
+**Per-cron rollup (R9).** `openclaw audit report cron <job-id>` projects the trail as one row per cron execution for a given `jobId`, newest first. Each row pairs the `cron.executed` event with its matching `agent.end` (by `sessionId` + `metadata.runId`) and attributes tool / LLM / outbound-message activity that fired on the same session between the two timestamps. `--last N` (default 20, max 1000) bounds the rollup; when the store has more executions than fit, `truncated: true` is surfaced in all output formats. Output is human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`). The JSON shape is published at `schemas/audit-cron-rollup.schema.json` so dashboards can pin against `schemaVersion: 1`.
 
 The same projection is available over HTTP at `GET /plugins/audit/api/report?period=daily|weekly&date=&week=&tz=&format=json|html&dupWindowSec=&lookbackDays=&topTools=`. The JSON shape is published at `schemas/audit-projection.schema.json` so dashboards can pin against `schemaVersion: 1`.
 

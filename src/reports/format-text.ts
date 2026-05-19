@@ -1,4 +1,5 @@
 import type { AuditProjection } from "./projection.js";
+import { padRight as pad } from "./text-utils.js";
 
 /**
  * Human-readable rendering of an AuditProjection — one screen worth of
@@ -108,11 +109,6 @@ export function formatProjectionText(p: AuditProjection): string {
   }
 
   return lines.join("\n") + "\n";
-}
-
-function pad(s: string, width: number): string {
-  if (s.length >= width) return s;
-  return s + " ".repeat(width - s.length);
 }
 
 function fmtUsd(n: number): string {

@@ -46,6 +46,12 @@ const DDL = [
   "CREATE INDEX IF NOT EXISTS idx_events_org ON audit_events(org_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_events_type_created ON audit_events(event_type, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_events_category_created ON audit_events(category, created_at)",
+  // Per-cron rollup (R9). Partial expression index turns the
+  // `WHERE event_type = 'cron.executed' AND json_extract(metadata, '$.jobId') = ?`
+  // lookup into a direct index probe instead of a full scan of cron.executed
+  // rows. WHERE clause keeps the index small (cron events are sparse) and
+  // null-jobId rows out.
+  "CREATE INDEX IF NOT EXISTS idx_events_cron_jobid ON audit_events(json_extract(metadata, '$.jobId')) WHERE event_type = 'cron.executed' AND json_extract(metadata, '$.jobId') IS NOT NULL",
 
   `CREATE TABLE IF NOT EXISTS config_manifests (
     id            TEXT PRIMARY KEY,
@@ -89,7 +95,7 @@ const DDL = [
   )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -213,6 +219,11 @@ export function initializeSchema(db: DatabaseSync): void {
       if (current < 6 && !hasColumn(db, "integrity_checkpoints", "verified_at")) {
         db.exec("ALTER TABLE integrity_checkpoints ADD COLUMN verified_at TEXT");
       }
+
+      // v7: Purely additive — partial expression index on cron.executed by
+      //     metadata.jobId for the per-cron rollup (`audit report cron`).
+      //     CREATE INDEX IF NOT EXISTS in DDL above; no procedural body
+      //     needed beyond the version record.
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

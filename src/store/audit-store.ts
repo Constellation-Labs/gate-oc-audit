@@ -200,6 +200,7 @@ export class AuditStore {
     aggMessageSentByChannel: StatementSync;
     distinctToolNames: StatementSync;
     reportFooterLastEvent: StatementSync;
+    cronRollupRows: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -359,6 +360,76 @@ export class AuditStore {
         FROM audit_events
         ORDER BY sequence DESC
         LIMIT 1
+      `),
+
+      // Per-cron rollup (R9). Pulls the most recent cron.executed events for
+      // a given jobId (newest first, capped by @limit), LEFT-JOINs each to
+      // its matching agent.end (by sessionId + metadata.runId, smallest
+      // post-cron sequence), and attaches the three per-run activity
+      // counters (tool.invoked / prompt.response / message.sent on the same
+      // session within the [startedAt, endedAt] window) as correlated
+      // sub-selects. One round-trip replaces what would otherwise be 4N
+      // prepared-statement executions from JS for an N-row rollup.
+      //
+      // The `cron_runs` CTE caps the row set BEFORE any joins so the
+      // correlated subselects only fire `last` times (not for every
+      // cron.executed event in history). The idx_events_cron_jobid partial
+      // index turns the CTE itself into a direct index probe.
+      //
+      // We over-fetch by `@limit` (caller passes last+1) so the JS layer
+      // can detect truncation; the CTE-level LIMIT applies to the input,
+      // not the output, so all over-fetched rows reach the caller.
+      cronRollupRows: this.db.prepare(`
+        WITH cron_runs AS (
+          SELECT id, sequence, session_id, metadata, created_at
+          FROM audit_events
+          WHERE event_type = 'cron.executed'
+            AND json_extract(metadata, '$.jobId') = @jobId
+          ORDER BY sequence DESC
+          LIMIT @limit
+        )
+        SELECT
+          c.id AS cron_id,
+          c.sequence AS cron_sequence,
+          c.session_id AS session_id,
+          c.created_at AS started_at,
+          json_extract(c.metadata, '$.runId') AS run_id,
+          ae.created_at AS ended_at,
+          CAST(json_extract(ae.metadata, '$.durationMs') AS INTEGER) AS duration_ms,
+          json_extract(ae.metadata, '$.success') AS success,
+          json_extract(ae.metadata, '$.error') AS error_msg,
+          COALESCE((
+            SELECT COUNT(*) FROM audit_events x
+            WHERE x.event_type = 'tool.invoked'
+              AND x.session_id = c.session_id
+              AND x.created_at >= c.created_at
+              AND x.created_at <= ae.created_at
+          ), 0) AS tool_count,
+          COALESCE((
+            SELECT COUNT(*) FROM audit_events x
+            WHERE x.event_type = 'prompt.response'
+              AND x.session_id = c.session_id
+              AND x.created_at >= c.created_at
+              AND x.created_at <= ae.created_at
+          ), 0) AS llm_count,
+          COALESCE((
+            SELECT COUNT(*) FROM audit_events x
+            WHERE x.event_type = 'message.sent'
+              AND x.session_id = c.session_id
+              AND x.created_at >= c.created_at
+              AND x.created_at <= ae.created_at
+          ), 0) AS msg_count
+        FROM cron_runs c
+        LEFT JOIN audit_events ae ON ae.id = (
+          SELECT x.id FROM audit_events x
+          WHERE x.event_type = 'agent.end'
+            AND x.session_id = c.session_id
+            AND x.sequence > c.sequence
+            AND json_extract(x.metadata, '$.runId') = json_extract(c.metadata, '$.runId')
+          ORDER BY x.sequence ASC
+          LIMIT 1
+        )
+        ORDER BY c.sequence DESC
       `),
     };
   }
@@ -872,6 +943,64 @@ export class AuditStore {
   aggregateMessageSentByChannelInWindow(fromIso: string, toIso: string): Array<{ channel: string; count: number }> {
     const rows = this.stmts.aggMessageSentByChannel.all({ fromIso, toIso }) as Array<{ channel: string | null; c: number }>;
     return rows.map((r) => ({ channel: r.channel ?? "<unknown>", count: r.c }));
+  }
+
+  /**
+   * Fully-assembled per-cron rollup rows for `audit report cron`. One round
+   * trip returns the cron.executed events for `jobId` (newest first, capped
+   * by `limit`), each paired with its matching agent.end (sessionId +
+   * metadata.runId) and the three per-run activity counts. See the
+   * `cronRollupRows` prepared statement for the join shape.
+   *
+   * `success` comes through as 0/1 (or null when there's no agent.end);
+   * callers normalize to boolean. All json_extract fields can be null when
+   * the underlying row is missing or has bad metadata; callers must treat
+   * them defensively. Counts are always integers ≥ 0 (zero when the run
+   * has no agent.end yet — see the rollup builder for why).
+   */
+  queryCronRollupRows(
+    jobId: string,
+    limit: number,
+  ): Array<{
+    sequence: number;
+    sessionId: string | null;
+    runId: string | null;
+    startedAt: string;
+    endedAt: string | null;
+    durationMs: number | null;
+    success: 0 | 1 | null;
+    error: string | null;
+    toolCount: number;
+    llmCount: number;
+    msgCount: number;
+  }> {
+    const rows = this.stmts.cronRollupRows.all({ jobId, limit }) as Array<{
+      cron_id: string;
+      cron_sequence: number;
+      session_id: string | null;
+      started_at: string;
+      run_id: string | null;
+      ended_at: string | null;
+      duration_ms: number | null;
+      success: 0 | 1 | null;
+      error_msg: string | null;
+      tool_count: number;
+      llm_count: number;
+      msg_count: number;
+    }>;
+    return rows.map((r) => ({
+      sequence: r.cron_sequence,
+      sessionId: r.session_id,
+      runId: r.run_id,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      durationMs: r.duration_ms,
+      success: r.success,
+      error: r.error_msg,
+      toolCount: r.tool_count,
+      llmCount: r.llm_count,
+      msgCount: r.msg_count,
+    }));
   }
 
   distinctToolNamesInWindow(fromIso: string, toIso: string): string[] {
