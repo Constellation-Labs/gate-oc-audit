@@ -1,0 +1,254 @@
+import { validateGatewayUrl, validateGatewayApiKey } from "./gateway-publisher.js";
+import {
+  applyBrokerProviderPatch,
+  applyGateInstallPatch,
+  configFilePath,
+  isJsonObject,
+  readOpenclawConfig,
+  writeOpenclawConfig,
+  type JsonObject,
+} from "../util/openclaw-config-writer.js";
+import { resolveOpenclawDir } from "../util/openclaw-paths.js";
+import { probeGate, type ProbeResult } from "./gate-client.js";
+
+export interface InstallInput {
+  url: string;
+  apiKey: string;
+  /** Also register Gate as a model broker under `models.providers.gate`. */
+  registerBroker: boolean;
+  /** Allow `https://` URLs to private/link-local hosts (RFC1918/CGNAT).
+   * When set AND the URL actually needs it, the installer also persists
+   * `gatewayAllowPrivateHost: true` so the runtime publisher accepts the
+   * same URL at startup. */
+  allowPrivateHost: boolean;
+  /** Skip the live probe — used in non-interactive setups where the
+   * operator already knows the connection works (e.g. CI). */
+  skipProbe: boolean;
+  /** Override openclaw config dir; defaults to `~/.openclaw`. */
+  openclawDir?: string;
+}
+
+export interface InstallReport {
+  configPath: string;
+  changes: string[];
+  probe: ProbeResult | null;
+}
+
+export class GateInstallError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+/**
+ * Normalize the operator-supplied URL (strip trailing slashes) and
+ * validate it against the same rules the runtime gateway publisher
+ * uses — so a URL that passes install will never get rejected later at
+ * gateway startup. Userinfo (`https://user:pass@host`) is rejected here
+ * because it would be persisted into the config and echoed to terminal
+ * output by `audit gate status` / `audit gate test`; the plugin
+ * authenticates via `X-Gateway-Api-Key`, never basic-auth.
+ */
+export function normalizeAndValidateUrl(raw: string, allowPrivateHost: boolean): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+
+  // Reject userinfo early — `new URL("https://u:p@host").hostname === "host"`,
+  // so `validateGatewayUrl` doesn't see the credential; we have to filter
+  // it here before persistence or status display.
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new GateInstallError("invalid-url", "Gate URL rejected: malformed URL");
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new GateInstallError(
+      "invalid-url",
+      "Gate URL rejected: userinfo (user:pass@host) is not supported — pass the API key via --api-key instead",
+    );
+  }
+
+  const validation = validateGatewayUrl(trimmed, { allowPrivateHost });
+  if (!validation.ok) {
+    throw new GateInstallError("invalid-url", `Gate URL rejected: ${validation.reason}`);
+  }
+  return trimmed;
+}
+
+export function validateApiKeyOrThrow(key: string): string {
+  const trimmed = key.trim();
+  const validation = validateGatewayApiKey(trimmed);
+  if (!validation.ok) {
+    throw new GateInstallError("invalid-api-key", `Gate API key rejected: ${validation.reason}`);
+  }
+  return trimmed;
+}
+
+/**
+ * Returns true when the URL passes validation only with `allowPrivateHost
+ * = true` — i.e. the runtime publisher will need the config flag set to
+ * accept this URL too. Computed by re-running the same validator with
+ * the flag off; avoids re-implementing private/link-local IP detection
+ * separately from the gateway publisher.
+ */
+function urlNeedsAllowPrivateHost(url: string): boolean {
+  const strict = validateGatewayUrl(url, { allowPrivateHost: false });
+  const permissive = validateGatewayUrl(url, { allowPrivateHost: true });
+  return !strict.ok && permissive.ok;
+}
+
+/**
+ * Run the full Gate install: validate inputs, probe the connection, and
+ * (on success) merge new keys into `~/.openclaw/config.json`. Returns a
+ * report describing exactly which dotted-path keys were written so the
+ * caller can show the user "wrote: a.b, c.d" instead of "wrote config".
+ */
+export async function installGate(input: InstallInput): Promise<InstallReport> {
+  const url = normalizeAndValidateUrl(input.url, input.allowPrivateHost);
+  const apiKey = validateApiKeyOrThrow(input.apiKey);
+
+  let probe: ProbeResult | null = null;
+  if (!input.skipProbe) {
+    probe = await probeGate(url, apiKey);
+    if (probe.kind === "unauthorized") {
+      throw new GateInstallError(
+        "probe-unauthorized",
+        `Gate rejected the API key (HTTP ${probe.status}). Check the key and try again.`,
+      );
+    }
+    if (probe.kind === "network-error") {
+      throw new GateInstallError(
+        "probe-network",
+        `Could not reach Gate at ${url}: ${probe.message}`,
+      );
+    }
+    if (probe.kind === "http-error") {
+      throw new GateInstallError(
+        "probe-http",
+        `Gate returned HTTP ${probe.status}. Body: ${probe.body || "(empty)"}`,
+      );
+    }
+  }
+
+  const openclawDir = resolveOpenclawDir({ openclawDir: input.openclawDir });
+  const file = readOpenclawConfig(openclawDir);
+  const content: JsonObject = file.content;
+
+  const changes: string[] = [];
+  changes.push(
+    ...applyGateInstallPatch(content, {
+      gatewayUrl: url,
+      gatewayApiKey: apiKey,
+      addToAllowlist: true,
+      grantConversationAccess: true,
+      allowPrivateHost: input.allowPrivateHost && urlNeedsAllowPrivateHost(url),
+      enable: true,
+    }),
+  );
+
+  if (input.registerBroker) {
+    changes.push(
+      ...applyBrokerProviderPatch(content, {
+        baseUrl: url,
+        apiKey,
+      }),
+    );
+  }
+
+  // Only write when something actually changed. Re-running install is a
+  // legitimate "verify connection" flow; we don't want to spam .bak files.
+  if (changes.length > 0) {
+    writeOpenclawConfig(file.path, content);
+  }
+
+  return {
+    configPath: file.path,
+    changes,
+    probe,
+  };
+}
+
+export interface StatusReport {
+  configPath: string;
+  configured: boolean;
+  url?: string;
+  hasApiKey: boolean;
+  allowlisted: boolean;
+  conversationAccess: boolean;
+  enabled?: boolean;
+  brokerProviderKey?: string;
+}
+
+const PLUGIN_ID = "constellation-audit-plugin";
+const DEFAULT_BROKER_KEY = "gate";
+
+/**
+ * Read-only summary of the operator's current Gate config. Does not
+ * touch the network. Used by `audit gate status`.
+ */
+export function readGateStatus(openclawDirOverride?: string): StatusReport {
+  const openclawDir = resolveOpenclawDir({ openclawDir: openclawDirOverride });
+  const path = configFilePath(openclawDir);
+  let file: { path: string; content: JsonObject };
+  try {
+    file = readOpenclawConfig(openclawDir);
+  } catch {
+    // Malformed JSON is a real problem but `status` should still answer
+    // truthfully ("nothing configured") rather than crash. The CLI test
+    // handler surfaces the parse error via the explicit read in
+    // readApiKeyFromConfig — status is the "soft" read.
+    return {
+      configPath: path,
+      configured: false,
+      hasApiKey: false,
+      allowlisted: false,
+      conversationAccess: false,
+    };
+  }
+
+  const plugins = isJsonObject(file.content.plugins) ? file.content.plugins : {};
+  const allow = Array.isArray(plugins.allow) ? plugins.allow : [];
+  const allowlisted = allow.includes(PLUGIN_ID);
+
+  const entries = isJsonObject(plugins.entries) ? plugins.entries : {};
+  const entry = isJsonObject(entries[PLUGIN_ID]) ? entries[PLUGIN_ID] : {};
+  const cfg = isJsonObject(entry.config) ? entry.config : {};
+  const hooks = isJsonObject(entry.hooks) ? entry.hooks : {};
+
+  const url = typeof cfg.gatewayUrl === "string" ? cfg.gatewayUrl : undefined;
+  const hasApiKey = typeof cfg.gatewayApiKey === "string" && cfg.gatewayApiKey.length > 0;
+  const conversationAccess = hooks.allowConversationAccess === true;
+  const enabled = typeof entry.enabled === "boolean" ? entry.enabled : undefined;
+
+  const models = isJsonObject(file.content.models) ? file.content.models : {};
+  const providers = isJsonObject(models.providers) ? models.providers : {};
+  // Prefer the conventional "gate" key when it matches the configured URL;
+  // only fall back to scanning when an operator hand-named the provider
+  // something else. Avoids the insertion-order ambiguity when two
+  // providers share the same baseUrl.
+  let brokerProviderKey: string | undefined;
+  if (url) {
+    const conventional = providers[DEFAULT_BROKER_KEY];
+    if (isJsonObject(conventional) && conventional.baseUrl === url) {
+      brokerProviderKey = DEFAULT_BROKER_KEY;
+    } else {
+      for (const [k, v] of Object.entries(providers)) {
+        if (isJsonObject(v) && typeof v.baseUrl === "string" && v.baseUrl === url) {
+          brokerProviderKey = k;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    configPath: file.path,
+    configured: Boolean(url && hasApiKey),
+    url,
+    hasApiKey,
+    allowlisted,
+    conversationAccess,
+    enabled,
+    brokerProviderKey,
+  };
+}

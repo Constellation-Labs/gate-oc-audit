@@ -36,7 +36,7 @@ const INGEST_PATH = "/v1/audit/ingest";
  * budget with multi-byte content. Multi-byte chars at the boundary are
  * truncated cleanly rather than producing a partial code unit.
  */
-function sanitizeForLog(raw: string, maxBytes: number): string {
+export function sanitizeForLog(raw: string, maxBytes: number): string {
   const stripped = raw.replace(/[\x00-\x1f\x7f]/g, " ");
   const buf = Buffer.from(stripped, "utf8");
   if (buf.byteLength <= maxBytes) return stripped;
