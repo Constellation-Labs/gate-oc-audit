@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions , type AuditReportSessionOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -192,6 +192,17 @@ export default (() => {
                     .option("--drop-threshold <n>", "Min drop milestones per cluster (default: 3)")
                     .action((opts: AuditAnomaliesOptions) =>
                         cliAnomaliesHandler(getStore(), getSmtService(), opts),
+                    );
+
+                report
+                    .command("session <sessionId>")
+                    .description("Per-conversation rollup: timeline, dedup, tools, cost, outbound, integrity")
+                    .option("--raw", "Return the un-deduplicated row stream (forensic)")
+                    .option("--json", "Emit the projection as JSON (single line)")
+                    .option("--limit <n>", "Show the last N events of the session (default: all, capped at 50000)")
+                    .option("--include-metadata", "Include raw event metadata in --json output (off by default; may contain tool args)")
+                    .action((sessionId: string, opts: AuditReportSessionOptions) =>
+                        cliReportSessionHandler(getStore(), getSmtService(), sessionId, opts),
                     );
 
                 // SMT subcommands
