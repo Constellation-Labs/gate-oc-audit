@@ -13,6 +13,8 @@ import { formatProjectionHtml } from "./reports/format-html.js";
 import { buildAnomalyView } from "./reports/anomalies-view.js";
 import { formatAnomalyViewText } from "./reports/format-anomalies-text.js";
 import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
+import { buildSessionProjection } from "./reports/session-projection.js";
+import { formatSessionProjectionText, serializeSessionProjectionJson } from "./reports/format-session.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -358,6 +360,62 @@ export function cliReportHandler(
     return;
   }
   process.stdout.write(formatProjectionText(projection));
+}
+
+export interface AuditReportSessionOptions {
+  raw?: boolean;
+  json?: boolean;
+  limit?: string;
+  includeMetadata?: boolean;
+}
+
+export async function cliReportSessionHandler(
+  store: AuditStore,
+  smtService: SmtService,
+  sessionId: string,
+  opts: AuditReportSessionOptions = {},
+): Promise<void> {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  if (!sessionId || sessionId.trim() === "") {
+    console.error("Session ID is required.");
+    process.exitCode = 1;
+    return;
+  }
+
+  // SmtService is best-effort: only attached when the on-disk SMT tree is
+  // present. The read-only CLI may run on a host that has the audit DB but
+  // no SMT working state (e.g. during a forensic copy), so any failure to
+  // load SMT state should downgrade to "proofs unavailable" rather than
+  // fail the whole command.
+  let smtForProjection: SmtService | undefined;
+  let knownRoots: Set<string> | undefined;
+  try {
+    await smtService.ensureReady();
+    knownRoots = smtService.getKnownRoots(store.getCheckpointedRoots());
+    smtForProjection = smtService;
+  } catch {
+    smtForProjection = undefined;
+  }
+
+  const projection = buildSessionProjection(store, sessionId, {
+    raw: opts.raw === true,
+    limit: parsePositiveInt(opts.limit, "--limit", 50_000),
+    smtService: smtForProjection,
+    knownRoots,
+  });
+
+  if (projection.timeline.length === 0 && opts.json !== true) {
+    outLine(`No events found for session ${sessionId}.`);
+    return;
+  }
+
+  if (opts.json === true) {
+    outLine(serializeSessionProjectionJson(projection, opts.includeMetadata === true));
+    return;
+  }
+  process.stdout.write(formatSessionProjectionText(projection));
 }
 
 function parsePositiveInt(value: string | undefined, flag: string, max: number): number | undefined {
