@@ -29,6 +29,17 @@ import {
   validateApiKeyOrThrow,
 } from "../services/gate-installer.js";
 import { probeGate } from "../services/gate-client.js";
+import {
+  applyProviderEntryPatch,
+  readOpenclawConfig,
+  readProviders,
+  removeProviderEntry,
+  writeOpenclawConfig,
+} from "../util/openclaw-config-writer.js";
+import { resolveOpenclawDir } from "../util/openclaw-paths.js";
+import { startOpenAIOAuthFlow, type OAuthToken } from "../services/openai-oauth.js";
+import { resolveOpenAIOAuthEndpoints } from "../services/openai-oauth-constants.js";
+import { randomBytes } from "node:crypto";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -144,6 +155,36 @@ function parseUrl(req: IncomingMessage): URL | undefined {
 }
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+/**
+ * In-flight OAuth sessions, keyed by the opaque sessionId returned to
+ * the UI. Each session owns one ActiveOAuthFlow + an eventual
+ * resolution. The map is module-local because the loopback OAuth port
+ * is fixed (codex-cli convention), so at most one flow can be in
+ * flight per plugin process.
+ */
+type OAuthSessionStatus =
+  | { kind: "pending"; authUrl: string; startedAt: number }
+  | { kind: "complete"; configPath: string; providerKey: string; expiresAt: string }
+  | { kind: "error"; message: string };
+
+interface OAuthSession {
+  providerKey: string;
+  status: OAuthSessionStatus;
+  cancel: () => void;
+  /** Wall-clock when this session entry can be reaped (ttl + grace). */
+  reapAt: number;
+}
+
+const openaiOauthSessions = new Map<string, OAuthSession>();
+const OAUTH_SESSION_GRACE_MS = 60_000; // keep terminal sessions around so the UI can poll once more
+
+function reapOauthSessions(): void {
+  const now = Date.now();
+  for (const [sid, s] of openaiOauthSessions.entries()) {
+    if (s.reapAt <= now) openaiOauthSessions.delete(sid);
+  }
+}
 
 /**
  * Origin-bind CSRF defense for mutating / IO-driving routes. The audit
@@ -825,7 +866,215 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/gate/providers — redacted list. Never includes api-key
+  // values or refresh tokens, only the metadata needed to render a
+  // provider list in the UI.
+  if (apiPath === "gate/providers" && req.method === "GET") {
+    let file;
+    try { file = readOpenclawConfig(resolveOpenclawDir({ openclawDir: ctx.openclawDir })); }
+    catch (err) { sendError(res, 500, err instanceof Error ? err.message : "config read error"); return true; }
+    const providers = readProviders(file.content);
+    const list = Object.entries(providers).map(([key, entry]) => {
+      const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl : undefined;
+      const auth = typeof entry.auth === "string" ? entry.auth : undefined;
+      const hasApiKey = typeof entry.apiKey === "string" && entry.apiKey.length > 0;
+      let oauthExpiresAt: string | undefined;
+      const meta = entry.openclawAudit;
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const oa = (meta as Record<string, unknown>).oauth;
+        if (oa && typeof oa === "object" && !Array.isArray(oa)) {
+          const v = (oa as Record<string, unknown>).expiresAt;
+          if (typeof v === "string") oauthExpiresAt = v;
+        }
+      }
+      return { key, baseUrl, auth, hasApiKey, oauthExpiresAt };
+    });
+    sendJson(res, 200, { providers: list });
+    return true;
+  }
+
+  // POST /api/gate/providers — body { providerKey?, kind: "openai", apiKey }.
+  // OAuth flow uses the /gate/oauth/openai/* endpoints below; this one
+  // is for direct api-key entry.
+  if (apiPath === "gate/providers" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+    const kind = bodyStr(b, "kind");
+    if (kind !== "openai") {
+      sendError(res, 400, "only kind: 'openai' is supported in this release");
+      return true;
+    }
+    const providerKey = bodyStr(b, "providerKey") ?? "openai";
+    const apiKey = bodyStr(b, "apiKey");
+    if (!apiKey) {
+      sendError(res, 400, "apiKey is required (non-empty string)");
+      return true;
+    }
+    if (/\s/.test(apiKey)) {
+      sendError(res, 400, "apiKey contains whitespace");
+      return true;
+    }
+    const dir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let file;
+    try { file = readOpenclawConfig(dir); }
+    catch (err) { sendError(res, 500, err instanceof Error ? err.message : "config read error"); return true; }
+    const changes = applyProviderEntryPatch(file.content, {
+      providerKey,
+      baseUrl: "https://api.openai.com/v1",
+      apiKey,
+      tokenKind: "api-key",
+    });
+    if (changes.length > 0) writeOpenclawConfig(file.path, file.content);
+    sendJson(res, 200, { configPath: file.path, providerKey, changes });
+    return true;
+  }
+
+  // DELETE /api/gate/providers/<key> — remove. Refuses the conventional
+  // 'gate' key (owned by `audit gate install`).
+  if (apiPath.startsWith("gate/providers/") && req.method === "DELETE") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const key = decodeURIComponent(apiPath.slice("gate/providers/".length));
+    if (!key) { sendError(res, 400, "missing provider key"); return true; }
+    const dir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let file;
+    try { file = readOpenclawConfig(dir); }
+    catch (err) { sendError(res, 500, err instanceof Error ? err.message : "config read error"); return true; }
+    let changes: string[];
+    try { changes = removeProviderEntry(file.content, key); }
+    catch (err) { sendError(res, 400, err instanceof Error ? err.message : "remove failed"); return true; }
+    if (changes.length > 0) writeOpenclawConfig(file.path, file.content);
+    sendJson(res, 200, { configPath: file.path, providerKey: key, changes });
+    return true;
+  }
+
+  // POST /api/gate/oauth/openai/start — body { providerKey? }. Starts
+  // the loopback OAuth flow and returns the authorize URL the browser
+  // should open. Only one flow may be in flight per process (the
+  // redirect_uri port is fixed); a second start while one is pending
+  // returns 409.
+  if (apiPath === "gate/oauth/openai/start" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate oauth disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    reapOauthSessions();
+    for (const s of openaiOauthSessions.values()) {
+      if (s.status.kind === "pending") {
+        sendError(res, 409, "an OAuth flow is already in progress; wait or cancel it before starting a new one");
+        return true;
+      }
+    }
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+    const providerKey = bodyStr(b, "providerKey") ?? "openai";
+
+    const endpoints = resolveOpenAIOAuthEndpoints();
+    let flow;
+    try { flow = startOpenAIOAuthFlow({ endpoints }); }
+    catch (err) {
+      sendError(res, 500, `failed to start OAuth listener on port ${endpoints.redirectPort}: ${err instanceof Error ? err.message : String(err)}`);
+      return true;
+    }
+
+    const sessionId = randomBytes(16).toString("hex");
+    const session: OAuthSession = {
+      providerKey,
+      status: { kind: "pending", authUrl: flow.authUrl, startedAt: Date.now() },
+      cancel: flow.cancel,
+      reapAt: Date.now() + 6 * 60_000, // 5min timeout + 1min grace
+    };
+    openaiOauthSessions.set(sessionId, session);
+
+    flow.waitForToken.then(
+      (token) => onOauthComplete(sessionId, session, token, ctx),
+      (err) => onOauthError(sessionId, session, err),
+    );
+
+    sendJson(res, 200, { sessionId, authUrl: flow.authUrl, port: flow.port });
+    return true;
+  }
+
+  // GET /api/gate/oauth/openai/<sid>/status — long-poll-friendly
+  // status check. Returns pending/complete/error.
+  if (apiPath.startsWith("gate/oauth/openai/") && apiPath.endsWith("/status") && req.method === "GET") {
+    reapOauthSessions();
+    const sid = apiPath.slice("gate/oauth/openai/".length, -"/status".length);
+    const session = openaiOauthSessions.get(sid);
+    if (!session) { sendError(res, 404, "unknown sessionId"); return true; }
+    sendJson(res, 200, { providerKey: session.providerKey, ...session.status });
+    return true;
+  }
+
+  // POST /api/gate/oauth/openai/<sid>/cancel — tear down a pending flow.
+  if (apiPath.startsWith("gate/oauth/openai/") && apiPath.endsWith("/cancel") && req.method === "POST") {
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const sid = apiPath.slice("gate/oauth/openai/".length, -"/cancel".length);
+    const session = openaiOauthSessions.get(sid);
+    if (!session) { sendError(res, 404, "unknown sessionId"); return true; }
+    session.cancel();
+    if (session.status.kind === "pending") {
+      session.status = { kind: "error", message: "cancelled by operator" };
+      session.reapAt = Date.now() + OAUTH_SESSION_GRACE_MS;
+    }
+    sendJson(res, 200, { cancelled: true });
+    return true;
+  }
+
   return false;
+}
+
+function onOauthComplete(
+  sessionId: string,
+  session: OAuthSession,
+  token: OAuthToken,
+  ctx: AuditUiContext,
+): void {
+  try {
+    const dir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    const file = readOpenclawConfig(dir);
+    applyProviderEntryPatch(file.content, {
+      providerKey: session.providerKey,
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: token.accessToken,
+      tokenKind: "oauth-access",
+      oauth: {
+        issuer: new URL(resolveOpenAIOAuthEndpoints().authorizeUrl).origin,
+        clientId: resolveOpenAIOAuthEndpoints().clientId,
+        refreshToken: token.refreshToken,
+        expiresAt: token.expiresAt,
+        scope: token.scope,
+      },
+    });
+    writeOpenclawConfig(file.path, file.content);
+    session.status = {
+      kind: "complete",
+      configPath: file.path,
+      providerKey: session.providerKey,
+      expiresAt: token.expiresAt,
+    };
+  } catch (err) {
+    session.status = { kind: "error", message: err instanceof Error ? err.message : String(err) };
+  }
+  session.reapAt = Date.now() + OAUTH_SESSION_GRACE_MS;
+  // sessionId reference is kept by callers; this fn just updates the
+  // session entry that was inserted by the route handler.
+  void sessionId;
+}
+
+function onOauthError(sessionId: string, session: OAuthSession, err: unknown): void {
+  session.status = { kind: "error", message: err instanceof Error ? err.message : String(err) };
+  session.reapAt = Date.now() + OAUTH_SESSION_GRACE_MS;
+  void sessionId;
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {

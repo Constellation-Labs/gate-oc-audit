@@ -7,8 +7,11 @@ import { tmpdir } from "node:os";
 import {
   applyBrokerProviderPatch,
   applyGateInstallPatch,
+  applyProviderEntryPatch,
   isJsonObject,
   readOpenclawConfig,
+  readProviders,
+  removeProviderEntry,
   writeOpenclawConfig,
   type JsonObject,
 } from "../src/util/openclaw-config-writer.js";
@@ -236,6 +239,105 @@ describe("openclaw-config-writer: write atomicity & permissions", () => {
     writeOpenclawConfig(path, {} as JsonObject);
     writeFileSync(path, '"a string, not an object"');
     assert.throws(() => readOpenclawConfig(dir), /must contain a JSON object/);
+  });
+});
+
+describe("openclaw-config-writer: applyProviderEntryPatch (openai)", () => {
+  it("writes an api-key provider entry with the canonical shape", () => {
+    const content: JsonObject = {};
+    const changes = applyProviderEntryPatch(content, {
+      providerKey: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-test-aaaa",
+      tokenKind: "api-key",
+    });
+    assert.ok(changes.length > 0);
+    const openai = ((content.models as JsonObject).providers as JsonObject).openai as JsonObject;
+    assert.equal(openai.baseUrl, "https://api.openai.com/v1");
+    assert.equal(openai.auth, "api-key");
+    assert.equal(openai.apiKey, "sk-test-aaaa");
+    assert.deepEqual(openai.models, []);
+    assert.equal(openai.openclawAudit, undefined);
+  });
+
+  it("writes OAuth metadata under openclawAudit.oauth when tokenKind=oauth-access", () => {
+    const content: JsonObject = {};
+    applyProviderEntryPatch(content, {
+      providerKey: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "tok_access",
+      tokenKind: "oauth-access",
+      oauth: {
+        issuer: "https://auth.openai.com",
+        clientId: "client-123",
+        refreshToken: "tok_refresh",
+        expiresAt: "2026-12-31T00:00:00Z",
+        scope: "openid profile",
+      },
+    });
+    const openai = ((content.models as JsonObject).providers as JsonObject).openai as JsonObject;
+    const meta = openai.openclawAudit as JsonObject;
+    const oauth = meta.oauth as JsonObject;
+    assert.equal(oauth.issuer, "https://auth.openai.com");
+    assert.equal(oauth.clientId, "client-123");
+    assert.equal(oauth.refreshToken, "tok_refresh");
+    assert.equal(oauth.expiresAt, "2026-12-31T00:00:00Z");
+    assert.equal(oauth.scope, "openid profile");
+  });
+
+  it("wipes prior OAuth metadata on an api-key install", () => {
+    const content: JsonObject = {};
+    // First an OAuth install
+    applyProviderEntryPatch(content, {
+      providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "tok_a", tokenKind: "oauth-access",
+      oauth: { issuer: "x", clientId: "y", refreshToken: "z", expiresAt: "2026-01-01T00:00:00Z" },
+    });
+    // Then re-install with an api-key
+    const changes = applyProviderEntryPatch(content, {
+      providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-new", tokenKind: "api-key",
+    });
+    assert.ok(changes.includes("models.providers.openai.openclawAudit.oauth"));
+    const openai = ((content.models as JsonObject).providers as JsonObject).openai as JsonObject;
+    const meta = openai.openclawAudit as JsonObject;
+    assert.equal(meta.oauth, undefined);
+  });
+
+  it("is idempotent — re-applying the same patch is a no-op", () => {
+    const content: JsonObject = {};
+    applyProviderEntryPatch(content, { providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-1", tokenKind: "api-key" });
+    const second = applyProviderEntryPatch(content, { providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-1", tokenKind: "api-key" });
+    assert.deepEqual(second, []);
+  });
+});
+
+describe("openclaw-config-writer: removeProviderEntry / readProviders", () => {
+  it("removes a configured provider and returns the changed path", () => {
+    const content: JsonObject = {};
+    applyProviderEntryPatch(content, { providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-1", tokenKind: "api-key" });
+    const changes = removeProviderEntry(content, "openai");
+    assert.deepEqual(changes, ["models.providers.openai"]);
+    const providers = (content.models as JsonObject).providers as JsonObject;
+    assert.equal(providers.openai, undefined);
+  });
+
+  it("refuses to remove the conventional 'gate' broker", () => {
+    const content: JsonObject = {};
+    applyBrokerProviderPatch(content, { baseUrl: "https://gate.example.com", apiKey: "sk-gw-aaaa" });
+    assert.throws(() => removeProviderEntry(content, "gate"), /broker.*managed by/i);
+  });
+
+  it("returns [] when removing a non-existent provider", () => {
+    const content: JsonObject = {};
+    assert.deepEqual(removeProviderEntry(content, "nonexistent"), []);
+  });
+
+  it("readProviders returns the populated provider map", () => {
+    const content: JsonObject = {};
+    applyProviderEntryPatch(content, { providerKey: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-1", tokenKind: "api-key" });
+    applyBrokerProviderPatch(content, { baseUrl: "https://gate.example.com", apiKey: "sk-gw-aaaa" });
+    const providers = readProviders(content);
+    assert.ok(providers.openai);
+    assert.ok(providers.gate);
   });
 });
 

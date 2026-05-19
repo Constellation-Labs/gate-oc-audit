@@ -230,3 +230,66 @@ export function installGate(req: GateInstallRequest): Promise<GateInstallRespons
     body: JSON.stringify(req),
   });
 }
+
+export interface ProviderRow {
+  key: string;
+  baseUrl?: string;
+  auth?: string;
+  hasApiKey: boolean;
+  oauthExpiresAt?: string;
+}
+
+export function listProviders(): Promise<{ providers: ProviderRow[] }> {
+  return fetchJson<{ providers: ProviderRow[] }>("gate/providers");
+}
+
+export interface AddOpenAIProviderRequest {
+  kind: "openai";
+  providerKey?: string;
+  apiKey: string;
+}
+
+export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ configPath: string; providerKey: string; changes: string[] }> {
+  return fetchJson("gate/providers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export function removeProvider(key: string): Promise<{ configPath: string; providerKey: string; changes: string[] }> {
+  return fetchJson(`gate/providers/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+  });
+}
+
+export interface OAuthStartResponse {
+  sessionId: string;
+  authUrl: string;
+  port: number;
+}
+
+export type OAuthSessionStatus =
+  | { kind: "pending"; authUrl: string; startedAt: number; providerKey: string }
+  | { kind: "complete"; configPath: string; providerKey: string; expiresAt: string }
+  | { kind: "error"; message: string; providerKey: string };
+
+export function startOpenAIOAuth(providerKey = "openai"): Promise<OAuthStartResponse> {
+  return fetchJson<OAuthStartResponse>("gate/oauth/openai/start", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ providerKey }),
+  });
+}
+
+export function getOpenAIOAuthStatus(sessionId: string): Promise<OAuthSessionStatus> {
+  return fetchJson<OAuthSessionStatus>(`gate/oauth/openai/${encodeURIComponent(sessionId)}/status`);
+}
+
+export function cancelOpenAIOAuth(sessionId: string): Promise<{ cancelled: boolean }> {
+  return fetchJson(`gate/oauth/openai/${encodeURIComponent(sessionId)}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+  });
+}

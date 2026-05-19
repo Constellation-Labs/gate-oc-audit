@@ -52,6 +52,36 @@ openclaw audit gate test       # re-probe the configured URL/key
 
 The same flow is available in the control UI under the **Gate** tab (`/plugins/audit/#/gate`). The browser form posts to `/api/gate/install` and `/api/gate/test`; `GET /api/gate/status` returns the same shape as `audit gate status --json` (and never includes the API-key value — only `hasApiKey: boolean`). The two mutation endpoints are disabled when the gateway binds beyond loopback unless the operator sets `allowGateMutationOnNonLoopback: true`, and reject cross-origin requests via a Content-Type + Origin + Sec-Fetch-Site check so a malicious browser tab on the same machine can't forge an install. The UI also sends `X-Frame-Options: DENY` to defeat iframe-based UI-redress.
 
+### LLM providers
+
+Configure individual model providers (OpenAI, etc.) that openclaw can route to. Two paths:
+
+```bash
+# API-key (sk-…). Pipe via stdin or env var to keep it out of argv:
+echo "$OPENAI_API_KEY" | openclaw audit gate provider add openai --api-key-stdin
+OPENCLAW_OPENAI_API_KEY=sk-… openclaw audit gate provider add openai
+
+# OAuth (ChatGPT-account sign-in via the public codex-cli client_id):
+openclaw audit gate provider add openai --oauth
+
+# Inspect / remove:
+openclaw audit gate provider list
+openclaw audit gate provider remove openai
+```
+
+The control UI surfaces the same flow under the **Providers** tab (`/plugins/audit/#/providers`) — there's a "Sign in with OpenAI" button that opens the OpenAI authorize URL in a new tab and polls `/api/gate/oauth/openai/<sessionId>/status` until the loopback callback fires.
+
+**About the OAuth client_id.** The default `clientId` is the public `codex-cli` application (`app_EMoamEEZ73f0CkXaXp7hrann`) — it has not been published by OpenAI as a stable, supported public API, so re-verify the value against the upstream [`codex-cli` repository](https://github.com/openai/codex) before cutting a release that depends on it. Operators with their own registered OpenAI application should override via environment:
+
+```bash
+OPENCLAW_OPENAI_OAUTH_CLIENT_ID=<your-app-id>
+OPENCLAW_OPENAI_OAUTH_BASE_URL=https://auth.openai.com   # default
+OPENCLAW_OPENAI_OAUTH_PORT=1455                          # must match your registered redirect_uri
+OPENCLAW_OPENAI_OAUTH_SCOPES="openid profile email offline_access"
+```
+
+The plugin writes the OpenAI access token to `models.providers.openai.apiKey` (treating it as a long-lived bearer for SDK compatibility) and persists the refresh token + expiry under a plugin-namespaced `openclawAudit.oauth` key so the credential can be refreshed without re-prompting. Refresh is currently manual — re-run the install command (or click "Sign in with OpenAI" again) when the token expires.
+
 If you'd rather edit config by hand, the manual instructions below are still authoritative.
 
 ### Required openclaw config (openclaw ≥ 2026.4.24)

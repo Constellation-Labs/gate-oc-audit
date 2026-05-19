@@ -500,6 +500,91 @@ describe("/api/gate/test — additional cases", () => {
   });
 });
 
+describe("/api/gate/providers (add / list / remove)", () => {
+  let rig: Rig;
+  beforeEach(async () => { rig = await bootRig(); });
+  afterEach(async () => { await rig.destroy(); });
+
+  it("starts empty, then lists an openai provider after add", async () => {
+    const list1 = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
+    assert.deepEqual(list1, { providers: [] });
+
+    const addRes = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "openai", apiKey: "sk-test-aaaa" }),
+    });
+    assert.equal(addRes.status, 200);
+
+    const list2 = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
+    assert.equal(list2.providers.length, 1);
+    assert.equal(list2.providers[0].key, "openai");
+    assert.equal(list2.providers[0].auth, "api-key");
+    assert.equal(list2.providers[0].hasApiKey, true);
+    // The API key value must NEVER appear in the redacted listing
+    const text = JSON.stringify(list2);
+    assert.equal(text.includes("sk-test-aaaa"), false);
+  });
+
+  it("rejects non-openai kinds", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "anthropic", apiKey: "sk-x" }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("rejects empty / whitespace apiKey", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "openai", apiKey: "   " }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("removes a provider via DELETE", async () => {
+    await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "openai", apiKey: "sk-test-aaaa" }),
+    });
+    const delRes = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers/openai`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(delRes.status, 200);
+    const list = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
+    assert.deepEqual(list, { providers: [] });
+  });
+
+  it("refuses to delete the 'gate' broker key", async () => {
+    // Install a real gate broker first
+    await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", skipProbe: true }),
+    });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers/gate`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /broker/i);
+  });
+
+  it("CSRF: POST without application/json content-type is rejected", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ kind: "openai", apiKey: "sk-test" }),
+    });
+    assert.equal(res.status, 415);
+  });
+});
+
 describe("/api/gate/status — populated shape", () => {
   let rig: Rig;
   beforeEach(async () => { rig = await bootRig(); });
