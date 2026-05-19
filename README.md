@@ -74,6 +74,8 @@ The plugin also logs a warning at startup if a tool call is observed without any
 
 ### Configuration (optional)
 
+> **Config key:** in openclaw config this plugin lives under `constellation-audit-plugin` (the manifest id), **not** the npm package name `@constellation-network/openclaw-audit-plugin`. Openclaw logs a warning about the mismatch on load — it's expected and safe to ignore.
+
 Set values via the CLI:
 
 ```bash
