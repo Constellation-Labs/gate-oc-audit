@@ -12,7 +12,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -197,7 +197,7 @@ describe("/api/gate/test", () => {
   afterEach(async () => { await rig.destroy(); });
 
   it("returns 400 when no config exists and no body is supplied", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST" });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST", headers: { "content-type": "application/json" } });
     assert.equal(res.status, 400);
   });
 
@@ -233,7 +233,7 @@ describe("/api/gate/test", () => {
         body: JSON.stringify({ url: mock.url, apiKey: "sk-gw-aaaa", registerBroker: false, skipProbe: true }),
       });
 
-      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST" });
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST", headers: { "content-type": "application/json" } });
       assert.equal(res.status, 200);
       const body = await res.json();
       assert.equal(body.result.kind, "ok");
@@ -261,7 +261,7 @@ describe("/api/gate/* non-loopback gating", () => {
   });
 
   it("blocks /test when gateway is non-loopback and opt-in is off", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST" });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, { method: "POST", headers: { "content-type": "application/json" } });
     assert.equal(res.status, 403);
   });
 
@@ -285,5 +285,243 @@ describe("/api/gate/* with allowGateMutationOnNonLoopback=true", () => {
       body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: false, skipProbe: true }),
     });
     assert.equal(res.status, 200);
+  });
+});
+
+describe("CSRF defense on /api/gate/{install,test}", () => {
+  let rig: Rig;
+  beforeEach(async () => { rig = await bootRig(); });
+  afterEach(async () => { await rig.destroy(); });
+
+  it("rejects POST /install without Content-Type: application/json (415)", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", skipProbe: true }),
+    });
+    assert.equal(res.status, 415);
+    const cfgPath = join(rig.openclawDir, "config.json");
+    assert.equal(existsSync(cfgPath), false);
+  });
+
+  it("rejects POST /install when Origin does not match Host (403)", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "origin": "https://evil.example" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", skipProbe: true }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it("rejects POST /test when Sec-Fetch-Site is cross-site (403)", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it("accepts a same-origin POST (Sec-Fetch-Site: same-origin + Origin matches Host)", async () => {
+    const port = new URL(rig.baseUrl).port;
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "origin": `http://127.0.0.1:${port}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: false, skipProbe: true }),
+    });
+    assert.equal(res.status, 200);
+  });
+
+  it("sets X-Frame-Options: DENY on every JSON response (clickjacking)", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/status`);
+    assert.equal(res.headers.get("x-frame-options"), "DENY");
+    assert.match(res.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  });
+});
+
+describe("/api/gate/install — additional cases", () => {
+  let rig: Rig;
+  beforeEach(async () => { rig = await bootRig(); });
+  afterEach(async () => { await rig.destroy(); });
+
+  it("registerBroker: false actually omits the broker provider from config", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: false, skipProbe: true }),
+    });
+    assert.equal(res.status, 200);
+    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
+    assert.equal(cfg.models, undefined);
+  });
+
+  it("rejects a non-boolean registerBroker (truthy stringy value does not skip broker)", async () => {
+    // Strict validation: only `false` opts out. `"false"` (a string)
+    // must default to true (so the broker IS written).
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: "false", skipProbe: true }),
+    });
+    assert.equal(res.status, 200);
+    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
+    assert.ok(cfg.models?.providers?.gate);
+  });
+
+  it("returns 400 with the canonical validator message when probe fails (401)", async () => {
+    const mock = await bootMockGate((_req, res) => { res.statusCode = 401; res.end("bad key"); });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: mock.url, apiKey: "sk-gw-aaaa", registerBroker: false }),
+      });
+      assert.equal(res.status, 400);
+      const body = await res.json();
+      assert.match(body.error, /401/);
+      // Nothing should be written when probe fails
+      assert.equal(existsSync(join(rig.openclawDir, "config.json")), false);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("returns 400 for malformed JSON body", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("treats empty-string url as missing", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "", apiKey: "sk-gw-aaaa" }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("treats whitespace-only apiKey as missing", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "   " }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 404 for GET on the install path (method-not-allowed via implicit miss)", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`);
+    assert.equal(res.status, 404);
+  });
+});
+
+describe("/api/gate/test — additional cases", () => {
+  let rig: Rig;
+  beforeEach(async () => { rig = await bootRig(); });
+  afterEach(async () => { await rig.destroy(); });
+
+  it("supports both url + apiKey overridden (no saved config touched)", async () => {
+    const mock = await bootMockGate((_req, res) => { res.statusCode = 200; res.end("{}"); });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: mock.url, apiKey: "sk-gw-override" }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.result.kind, "ok");
+      assert.equal(body.url, mock.url);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("supports apiKey-only body (no url) — falls back to saved url", async () => {
+    const mock = await bootMockGate((_req, res) => { res.statusCode = 200; res.end("{}"); });
+    try {
+      // First install so a saved URL exists
+      await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: mock.url, apiKey: "sk-gw-saved", registerBroker: false, skipProbe: true }),
+      });
+
+      // Now test with a different apiKey but no url override — must use saved url
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apiKey: "sk-gw-different" }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.url, mock.url);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("honors allowPrivateHost when probing a saved private-host Gate", async () => {
+    // Install a Gate at a private-IP loopback (no allowPrivateHost
+    // needed at install time because 127.0.0.1 is loopback, not private).
+    // But test the allowPrivateHost knob on /test itself via a body that
+    // exercises the validator path:
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://10.0.0.5:8080", apiKey: "sk-gw-aaaa", allowPrivateHost: true }),
+    });
+    // 10.0.0.5 won't actually respond, but we should pass URL validation
+    // and reach the probe (which then network-errors). Either way: NOT 400.
+    assert.notEqual(res.status, 400);
+    if (res.status === 200) {
+      const body = await res.json();
+      assert.equal(body.result.kind, "network-error");
+    }
+  });
+
+  it("rejects a private-host URL without allowPrivateHost", async () => {
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://10.0.0.5:8080", apiKey: "sk-gw-aaaa" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /private/i);
+  });
+});
+
+describe("/api/gate/status — populated shape", () => {
+  let rig: Rig;
+  beforeEach(async () => { rig = await bootRig(); });
+  afterEach(async () => { await rig.destroy(); });
+
+  it("returns the full StatusReport shape after install", async () => {
+    await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: true, skipProbe: true }),
+    });
+    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/status`);
+    const body = await res.json();
+    assert.equal(typeof body.configPath, "string");
+    assert.equal(body.configured, true);
+    assert.equal(body.url, "http://127.0.0.1:1");
+    assert.equal(body.hasApiKey, true);
+    assert.equal(body.allowlisted, true);
+    assert.equal(body.conversationAccess, true);
+    assert.equal(body.enabled, true);
+    assert.equal(body.brokerProviderKey, "gate");
+    // Critical: the actual key value must NEVER be in the response
+    assert.equal(Object.values(body).some((v) => v === "sk-gw-aaaa"), false);
   });
 });

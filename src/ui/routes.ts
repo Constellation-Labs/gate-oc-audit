@@ -25,11 +25,10 @@ import {
   installGate,
   normalizeAndValidateUrl,
   readGateStatus,
+  readSavedGatewayApiKey,
   validateApiKeyOrThrow,
 } from "../services/gate-installer.js";
 import { probeGate } from "../services/gate-client.js";
-import { isJsonObject, readOpenclawConfig } from "../util/openclaw-config-writer.js";
-import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -105,12 +104,23 @@ let inFlightExports = 0;
 const MAX_CONCURRENT_VERIFIES = 2;
 let inFlightVerifies = 0;
 
+/** Clickjacking + framing defense: refuse to be embedded in a cross-
+ * origin iframe. Set on every JSON response and on static HTML so a
+ * malicious page can't overlay the Gate setup form with a transparent
+ * UI-redress attack. CSP is the modern equivalent; both are sent
+ * because older proxies sometimes drop one or the other. */
+function setSecurityHeaders(res: ServerResponse): void {
+  res.setHeader("x-frame-options", "DENY");
+  res.setHeader("content-security-policy", "frame-ancestors 'none'");
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-length", String(buf.length));
   res.setHeader("cache-control", "no-store");
+  setSecurityHeaders(res);
   res.end(buf);
 }
 
@@ -135,23 +145,87 @@ function parseUrl(req: IncomingMessage): URL | undefined {
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
 
-/** Re-read the on-disk gateway API key for the /api/gate/test fallback.
- * Status reports `hasApiKey: boolean` only to avoid leaking the value;
- * test needs the actual key. Errors propagate so the route returns 500
- * (the operator's config is broken, not a request error). */
-function readSavedApiKey(openclawDir: string | undefined): string | undefined {
-  const dir = resolveOpenclawDir({ openclawDir });
-  const file = readOpenclawConfig(dir);
-  const plugins = file.content.plugins;
-  if (!isJsonObject(plugins)) return undefined;
-  const entries = plugins.entries;
-  if (!isJsonObject(entries)) return undefined;
-  const entry = entries["constellation-audit-plugin"];
-  if (!isJsonObject(entry)) return undefined;
-  const cfg = entry.config;
-  if (!isJsonObject(cfg)) return undefined;
-  const key = cfg.gatewayApiKey;
-  return typeof key === "string" ? key : undefined;
+/**
+ * Origin-bind CSRF defense for mutating / IO-driving routes. The audit
+ * UI is served from the same loopback origin as the gateway, so a
+ * legitimate POST from the SPA carries:
+ *   - `Content-Type: application/json` (Lit fetch in api.ts always sets it)
+ *   - `Origin` matching the request's `Host`
+ *   - `Sec-Fetch-Site: same-origin` or `none` (set by all modern browsers)
+ *
+ * A cross-origin tab cannot reproduce all three without a CORS
+ * preflight (which we never honor). Returns true to continue, false
+ * after writing a 403 — short-circuit the route on false.
+ *
+ * Not applied to GET endpoints. The browser SOP already prevents a
+ * cross-origin tab from reading their responses; the only residual
+ * exposure (heavy CPU/DB work triggered by a forged GET) is gated
+ * behind the existing `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback`
+ * opt-ins.
+ */
+function requireSameOriginJsonPost(req: IncomingMessage, res: ServerResponse): boolean {
+  const ct = req.headers["content-type"];
+  if (typeof ct !== "string" || !ct.toLowerCase().split(";", 1)[0].trim().startsWith("application/json")) {
+    sendError(res, 415, "Content-Type must be application/json");
+    return false;
+  }
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && origin.length > 0 && origin !== "null") {
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch {
+      sendError(res, 403, "Origin header is malformed");
+      return false;
+    }
+    const host = req.headers.host;
+    if (typeof host !== "string" || parsed.host !== host) {
+      sendError(res, 403, "cross-origin request rejected (Origin does not match Host)");
+      return false;
+    }
+  }
+  // Sec-Fetch-Site is set by Chromium/Firefox/Safari for all fetch+XHR
+  // requests since 2020. `same-origin` (Lit UI) and `none` (curl,
+  // server-side) are acceptable; `cross-site` / `same-site` are not.
+  const sfs = req.headers["sec-fetch-site"];
+  if (typeof sfs === "string" && sfs !== "same-origin" && sfs !== "none") {
+    sendError(res, 403, "cross-site request rejected (Sec-Fetch-Site)");
+    return false;
+  }
+  return true;
+}
+
+/** Parse a JSON body or write 400 and return null. Collapses the
+ * repeated try/catch+typeof prologue used by every POST handler. */
+async function readJsonOr400(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+    return null;
+  }
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+  return {};
+}
+
+/** Read a string field from a parsed body, trimming whitespace and
+ * treating empty / missing / non-string as undefined. */
+function bodyStr(b: Record<string, unknown>, key: string): string | undefined {
+  const v = b[key];
+  if (typeof v !== "string") return undefined;
+  const trimmed = v.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/** Strict-boolean read: only literal `true` / `false` pass through;
+ * everything else is `undefined`. Caller picks the default explicitly. */
+function bodyBool(b: Record<string, unknown>, key: string): boolean | undefined {
+  const v = b[key];
+  return v === true || v === false ? v : undefined;
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -406,6 +480,7 @@ async function handleApi(
       );
       return true;
     }
+    if (!requireSameOriginJsonPost(req, res)) return true;
     if (inFlightVerifies >= MAX_CONCURRENT_VERIFIES) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_VERIFIES} concurrent verifies allowed`);
@@ -630,11 +705,10 @@ async function handleApi(
     return true;
   }
 
-  // POST /api/gate/test — body { url?, apiKey? }. If either is omitted,
-  // we fall back to the saved config — but only when the URL is also
-  // saved/empty in the request (otherwise we'd POST the saved key to a
-  // request-supplied URL, mirroring the `audit gate test --url` exfil
-  // vector closed in PR 1).
+  // POST /api/gate/test — body { url?, apiKey?, allowPrivateHost? }.
+  // If url+apiKey are not both supplied, fall back to the saved config.
+  // PR-1 exfil guard: when only `url` is supplied, refuse to load the
+  // saved key (or it'd get POSTed to the request-supplied URL).
   if (apiPath === "gate/test" && req.method === "POST") {
     if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
       sendError(
@@ -645,15 +719,14 @@ async function handleApi(
       );
       return true;
     }
-    let body: unknown;
-    try { body = await readJsonBody(req); } catch (err) {
-      sendError(res, 400, err instanceof Error ? err.message : "invalid json");
-      return true;
-    }
-    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-    const urlOverride = typeof b.url === "string" ? b.url : undefined;
-    let apiKey = typeof b.apiKey === "string" ? b.apiKey : undefined;
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+
+    const urlOverride = bodyStr(b, "url");
+    let apiKey = bodyStr(b, "apiKey");
     let url = urlOverride;
+    const allowPrivateHost = bodyBool(b, "allowPrivateHost") === true;
 
     if (urlOverride && !apiKey) {
       sendError(
@@ -672,7 +745,7 @@ async function handleApi(
       url = url ?? status.url;
       if (!apiKey) {
         try {
-          apiKey = readSavedApiKey(ctx.openclawDir);
+          apiKey = readSavedGatewayApiKey(ctx.openclawDir);
         } catch (err) {
           sendError(res, 500, err instanceof Error ? err.message : "config read error");
           return true;
@@ -680,11 +753,14 @@ async function handleApi(
       }
     }
     if (!url || !apiKey) {
-      sendError(res, 400, "could not resolve URL or API key");
+      // Should be unreachable given the branches above, but keeps the
+      // type narrowing honest and avoids a silent 200 with a probe of
+      // undefined values if a future refactor breaks an invariant.
+      sendError(res, 500, "could not resolve URL or API key");
       return true;
     }
     try {
-      url = normalizeAndValidateUrl(url, false);
+      url = normalizeAndValidateUrl(url, allowPrivateHost);
       apiKey = validateApiKeyOrThrow(apiKey);
     } catch (err) {
       if (err instanceof GateInstallError) {
@@ -710,31 +786,34 @@ async function handleApi(
       );
       return true;
     }
-    let body: unknown;
-    try { body = await readJsonBody(req); } catch (err) {
-      sendError(res, 400, err instanceof Error ? err.message : "invalid json");
-      return true;
-    }
-    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-    const url = typeof b.url === "string" ? b.url : "";
-    const apiKey = typeof b.apiKey === "string" ? b.apiKey : "";
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+
+    const url = bodyStr(b, "url");
+    const apiKey = bodyStr(b, "apiKey");
     if (!url || !apiKey) {
-      sendError(res, 400, "url and apiKey are required");
+      sendError(res, 400, "url and apiKey are required (non-empty strings)");
       return true;
     }
     try {
       const report = await installGate({
         url,
         apiKey,
-        registerBroker: b.registerBroker !== false,
-        allowPrivateHost: b.allowPrivateHost === true,
-        skipProbe: b.skipProbe === true,
+        // Strict boolean: only explicit `false` opts out. Truthy
+        // non-bool values (null, "false", 0) are ignored.
+        registerBroker: bodyBool(b, "registerBroker") !== false,
+        allowPrivateHost: bodyBool(b, "allowPrivateHost") === true,
+        skipProbe: bodyBool(b, "skipProbe") === true,
         openclawDir: ctx.openclawDir,
       });
       sendJson(res, 200, {
         configPath: report.configPath,
         changes: report.changes,
-        probe: report.probe?.kind ?? "skipped",
+        // installGate throws on every non-ok probe outcome, so the
+        // only values we can actually send here are "ok" and "skipped".
+        // The client union is narrowed to match.
+        probe: report.probe?.kind === "ok" ? "ok" : "skipped",
       });
     } catch (err) {
       if (err instanceof GateInstallError) {
@@ -761,6 +840,7 @@ async function handleStatic(
   res: ServerResponse,
   uiPath: string,
 ): Promise<boolean> {
+  setSecurityHeaders(res);
   // Strip leading slash; empty path => index.html
   const requestPath = uiPath.replace(/^\/+/, "") || "index.html";
   const served = await serveStaticFile(req, res, STATIC_ROOT, requestPath);

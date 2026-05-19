@@ -6,11 +6,10 @@ import {
   installGate,
   normalizeAndValidateUrl,
   readGateStatus,
+  readSavedGatewayApiKey,
   validateApiKeyOrThrow,
 } from "./services/gate-installer.js";
 import { probeGate } from "./services/gate-client.js";
-import { isJsonObject, readOpenclawConfig } from "./util/openclaw-config-writer.js";
-import { resolveOpenclawDir } from "./util/openclaw-paths.js";
 
 /** Env-var fallback for the API key — preferred over `--api-key` in CI
  * since flag values land in `ps`/argv and shell history. */
@@ -193,7 +192,7 @@ export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<vo
     url = url ?? status.url;
     if (!apiKey) {
       try {
-        apiKey = readApiKeyFromConfig(opts.openclawDir);
+        apiKey = readSavedGatewayApiKey(opts.openclawDir);
       } catch (err) {
         handleError(err, opts.json === true);
         return;
@@ -297,28 +296,6 @@ async function readLineFromStdin(): Promise<string> {
     process.stdin.once("end", onEnd);
     process.stdin.once("error", onError);
   });
-}
-
-/**
- * Re-read the on-disk gateway API key for `audit gate test`. The status
- * helper exposes only `hasApiKey` (boolean) to avoid leaking the key
- * into status output, so the test handler reads it explicitly through
- * this path. Errors propagate so a malformed config produces a clear
- * diagnostic instead of "could not resolve URL or API key".
- */
-function readApiKeyFromConfig(openclawDirOverride?: string): string | undefined {
-  const dir = resolveOpenclawDir({ openclawDir: openclawDirOverride });
-  const file = readOpenclawConfig(dir);
-  const plugins = file.content.plugins;
-  if (!isJsonObject(plugins)) return undefined;
-  const entries = plugins.entries;
-  if (!isJsonObject(entries)) return undefined;
-  const entry = entries["constellation-audit-plugin"];
-  if (!isJsonObject(entry)) return undefined;
-  const cfg = entry.config;
-  if (!isJsonObject(cfg)) return undefined;
-  const key = cfg.gatewayApiKey;
-  return typeof key === "string" ? key : undefined;
 }
 
 function parseTimeout(raw: string | undefined): number | undefined {
