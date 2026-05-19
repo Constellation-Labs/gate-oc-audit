@@ -168,3 +168,59 @@ export function verifyRange(from: string, to: string): Promise<VerifyResult> {
     body: JSON.stringify({ from, to }),
   });
 }
+
+export interface GateStatus {
+  configPath: string;
+  configured: boolean;
+  url?: string;
+  hasApiKey: boolean;
+  allowlisted: boolean;
+  conversationAccess: boolean;
+  enabled?: boolean;
+  brokerProviderKey?: string;
+}
+
+export function getGateStatus(): Promise<GateStatus> {
+  return fetchJson<GateStatus>("gate/status");
+}
+
+export type GateProbeResult =
+  | { kind: "ok"; status: number }
+  | { kind: "unauthorized"; status: number; body: string }
+  | { kind: "http-error"; status: number; body: string }
+  | { kind: "network-error"; message: string };
+
+export interface GateTestRequest {
+  url?: string;
+  apiKey?: string;
+}
+
+export function testGate(req: GateTestRequest = {}): Promise<{ url: string; result: GateProbeResult }> {
+  return fetchJson("gate/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export interface GateInstallRequest {
+  url: string;
+  apiKey: string;
+  registerBroker?: boolean;
+  allowPrivateHost?: boolean;
+  skipProbe?: boolean;
+}
+
+export interface GateInstallResponse {
+  configPath: string;
+  changes: string[];
+  probe: "ok" | "unauthorized" | "http-error" | "network-error" | "skipped";
+}
+
+export function installGate(req: GateInstallRequest): Promise<GateInstallResponse> {
+  return fetchJson<GateInstallResponse>("gate/install", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
