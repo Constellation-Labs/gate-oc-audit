@@ -171,7 +171,8 @@ describe("ReportPusherService — daily fire", () => {
     const h = row!.payload as Record<string, unknown>;
     assert.equal(h.lastDailyReportedDate, "2026-05-13");
     assert.ok(typeof h.lastPushAt === "string");
-    assert.equal(h.lastPushError, undefined);
+    assert.equal(h.lastDailyError, undefined);
+    assert.equal(h.lastWeeklyError, undefined);
     assert.ok(typeof h.nextDailyAt === "string");
   });
 });
@@ -256,7 +257,7 @@ describe("ReportPusherService — failure handling", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("retries once on transient failure and clears lastPushError on success", async () => {
+  it("retries once on transient failure and clears lastDailyError on success", async () => {
     let calls = 0;
     rig.setHandler((_req, res) => {
       calls++;
@@ -273,11 +274,11 @@ describe("ReportPusherService — failure handling", () => {
 
     assert.equal(calls, 2, "expected one retry");
     const h = store.getServiceHealth("report-pusher")!.payload as Record<string, unknown>;
-    assert.equal(h.lastPushError, undefined);
+    assert.equal(h.lastDailyError, undefined);
     assert.equal(h.lastDailyReportedDate, "2026-05-13");
   });
 
-  it("gives up after the retry and persists lastPushError; does NOT advance the day marker", async () => {
+  it("gives up after the retry and persists lastDailyError; does NOT advance the day marker", async () => {
     rig.setHandler((_req, res) => { res.statusCode = 503; res.statusMessage = "Service Unavailable"; res.end(); });
     const svc = new ReportPusherService(store, rig.baseUrl, {
       tz: "utc", now: () => nowRef.current, retryDelayMs: 10,
@@ -290,7 +291,10 @@ describe("ReportPusherService — failure handling", () => {
     svc.stop();
 
     const h = store.getServiceHealth("report-pusher")!.payload as Record<string, unknown>;
-    assert.match(h.lastPushError as string, /503/);
+    assert.match(h.lastDailyError as string, /503/);
+    // Weekly is current (Wed→Thu doesn't cross a Mon boundary) so its error
+    // field must NOT be set — daily failure must not leak across phases.
+    assert.equal(h.lastWeeklyError, undefined);
     // Marker stays on its previous value so the next tick will retry the
     // same window rather than silently skipping it.
     assert.equal(h.lastDailyReportedDate, initialDate);
@@ -400,7 +404,7 @@ describe("ReportPusherService — re-entrancy + lifecycle", () => {
     assert.equal(rig.received.length, 2, "exactly one tick should reach the wire (2 attempts)");
   });
 
-  it("recovers from a thrown error inside the tick (sets lastPushError, does not crash)", async () => {
+  it("recovers from a thrown error inside the tick (sets lastDailyError, does not crash)", async () => {
     rig.setHandler((_req, res) => { res.statusCode = 200; res.end("ok"); });
     const svc = new ReportPusherService(store, rig.baseUrl, {
       tz: "utc", now: () => nowRef.current,
@@ -410,17 +414,55 @@ describe("ReportPusherService — re-entrancy + lifecycle", () => {
     // will hit a finalised prepared statement.
     store.close();
     nowRef.current = THU_JUST_AFTER_MIDNIGHT_UTC;
-    // tick() must not reject — it should catch the error and persist
-    // lastPushError. (Persisting service_health may itself fail because the
-    // store is closed; we accept the warning log on that path.)
+    // tick() must not reject — runPhase catches the error and routes it to
+    // the daily error field. persist() may itself fail because the store is
+    // closed; that's logged but doesn't escape.
     await svc.tick();
     svc.stop();
-    // We can't read service_health (store is closed), but the absence of an
-    // unhandled rejection is the contract this test enforces.
-    assert.ok(true);
+    const h = svc.health();
+    assert.ok(h.lastDailyError, "lastDailyError must be set after a failed daily phase");
+    assert.match(h.lastDailyError!, /finalized|closed/i);
+    assert.equal(h.lastWeeklyError, undefined, "weekly phase must not be implicated");
     // Re-open so afterEach's `store.close()` is idempotent against the
     // already-closed handle.
     store = new AuditStore(dbPath);
+  });
+
+  it("keeps lastDailyError and lastWeeklyError independent (no cross-phase clobber)", async () => {
+    // Daily POST fails (both attempts 503), weekly POST succeeds. With the
+    // per-phase error fields the daily failure must survive the weekly
+    // success — otherwise operators lose visibility into the failure.
+    let dailyCalls = 0;
+    let weeklyCalls = 0;
+    rig.setHandler((_req, res) => {
+      // The rig already buffered the request body into `received` before
+      // invoking us. Peek at the most recent entry to decide which phase
+      // is calling.
+      const last = rig.received[rig.received.length - 1]!;
+      const body = JSON.parse(last.body) as { projection: { period: { kind: string } } };
+      if (body.projection.period.kind === "daily") {
+        dailyCalls++;
+        res.statusCode = 503; res.statusMessage = "DailyDown"; res.end();
+      } else {
+        weeklyCalls++;
+        res.statusCode = 200; res.end("ok");
+      }
+    });
+    // Jump from Wed to Mon so both daily and weekly fire in the same tick.
+    const svc = new ReportPusherService(store, rig.baseUrl, {
+      tz: "utc", now: () => nowRef.current, retryDelayMs: 10,
+    });
+    svc.start();
+    nowRef.current = MON_AFTER_MIDNIGHT_UTC;
+    await svc.tick();
+    svc.stop();
+
+    assert.equal(dailyCalls, 2, "daily should retry once and give up");
+    assert.equal(weeklyCalls, 1, "weekly should succeed on first try");
+    const h = svc.health();
+    assert.match(h.lastDailyError ?? "", /503/, "daily error must survive weekly success");
+    assert.equal(h.lastWeeklyError, undefined, "weekly error must be clear after success");
+    assert.ok(h.lastPushAt, "lastPushAt records the successful weekly push");
   });
 
   it("supports stop()→start() (AbortController is recreated)", async () => {

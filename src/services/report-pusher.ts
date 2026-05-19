@@ -21,19 +21,27 @@ const POST_TIMEOUT_MS = 10_000;
 export const REPORT_PUSHER_HEALTH_NAME = "report-pusher";
 
 export interface ReportPusherHealth {
-  /** Next instant a daily push will fire (ISO 8601). */
-  nextDailyAt: string | undefined;
-  /** Next instant a weekly push will fire (ISO 8601). */
-  nextWeeklyAt: string | undefined;
+  /** Next instant a daily push will fire (ISO 8601). Computed on demand. */
+  nextDailyAt: string;
+  /** Next instant a weekly push will fire (ISO 8601). Computed on demand. */
+  nextWeeklyAt: string;
   /** ISO of the most recent successful push (daily or weekly). */
   lastPushAt: string | undefined;
-  /** Last error message; cleared on success. */
-  lastPushError: string | undefined;
+  /** Last daily-phase error message; cleared when a daily push succeeds.
+   *  Kept separate from weekly so a successful weekly doesn't mask a daily
+   *  failure (and vice versa). */
+  lastDailyError: string | undefined;
+  /** Last weekly-phase error message; cleared when a weekly push succeeds. */
+  lastWeeklyError: string | undefined;
   /** YYYY-MM-DD of the last reported daily window, or undefined if none yet. */
   lastDailyReportedDate: string | undefined;
   /** YYYY-Www of the last reported weekly window, or undefined if none yet. */
   lastWeeklyReportedWeek: string | undefined;
 }
+
+/** In-memory state — what we mutate. `next*At` are derived in `health()`,
+ *  not stored, so there's no cache to keep in sync. */
+type ReportPusherState = Omit<ReportPusherHealth, "nextDailyAt" | "nextWeeklyAt">;
 
 export interface ReportPusherOptions {
   /** Time zone for calendar-boundary math. Defaults to "local". */
@@ -68,11 +76,10 @@ export class ReportPusherService {
   /** Re-entrancy guard: setInterval doesn't serialize async handlers, and a
    *  retry sleep can push a tick past the next interval boundary. */
   private inFlightTick = false;
-  private state: ReportPusherHealth = {
-    nextDailyAt: undefined,
-    nextWeeklyAt: undefined,
+  private state: ReportPusherState = {
     lastPushAt: undefined,
-    lastPushError: undefined,
+    lastDailyError: undefined,
+    lastWeeklyError: undefined,
     lastDailyReportedDate: undefined,
     lastWeeklyReportedWeek: undefined,
   };
@@ -134,8 +141,7 @@ export class ReportPusherService {
 
   health(): ReportPusherHealth {
     // Computing next-fire times on demand keeps `health()` consistent with
-    // the wall clock even when the last tick was a while ago. The persisted
-    // service_health row is still a snapshot of `state` — that's fine.
+    // the wall clock even when the last tick was a while ago.
     return {
       ...this.state,
       nextDailyAt: this.computeNextDailyAt(),
@@ -151,7 +157,9 @@ export class ReportPusherService {
     this.inFlightTick = true;
     try {
       // Daily and weekly are independent reports — a failure in one must
-      // not suppress the other. Per-phase try/catch keeps them isolated.
+      // not suppress the other. Per-phase try/catch keeps them isolated;
+      // per-phase error fields (`lastDailyError` / `lastWeeklyError`) keep
+      // a success in one phase from clobbering the other's failure.
       await this.runPhase("daily", async () => {
         const targetDay = this.dayMostRecentlyCompleted();
         if (this.state.lastDailyReportedDate !== targetDay) {
@@ -165,69 +173,87 @@ export class ReportPusherService {
         }
       });
     } finally {
-      this.refreshNextFireTimes();
-      this.persist();
+      // Clear the re-entrancy flag *first* so a throw from `persist()` (or
+      // any future finally work) can't strand the service in a permanently
+      // "in flight" state. persist() has its own try/catch.
       this.inFlightTick = false;
+      this.persist();
     }
   }
 
-  private async runPhase(label: string, fn: () => Promise<void>): Promise<void> {
+  private async runPhase(label: "daily" | "weekly", fn: () => Promise<void>): Promise<void> {
     try {
       await fn();
     } catch (err) {
+      // An abort isn't an error — stop() was called, the in-flight retry
+      // resolved with aborted=true, and any further throw shape we add
+      // later (e.g. signal.throwIfAborted) should not be surfaced as a
+      // push failure to the operator.
+      if (err instanceof Error && err.name === "AbortError") return;
       const msg = sanitizeMessage(err instanceof Error ? err.message : "Unknown error");
       log.error(`reportWebhook ${label} tick failed: ${msg}`);
-      this.state.lastPushError = msg;
+      this.setPhaseError(label, msg);
     }
   }
 
   private async fireDaily(date: string): Promise<void> {
     const window = parseDate(date, this.tz);
-    const projection = buildProjection(this.store, window);
-    const payload = {
-      ...formatDigestBlocks(projection),
-      projection: sanitizeProjectionForWebhook(projection),
-    };
-    const ok = await this.postWithRetry(payload);
-    if (ok) this.state.lastDailyReportedDate = date;
+    // Sanitize before formatting so neither the chat blocks nor the JSON
+    // arm can leak raw recipients — even if a future change adds recipient
+    // rendering to format-blocks, both sides see the hashed value.
+    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window));
+    const payload = { ...formatDigestBlocks(sanitized), projection: sanitized };
+    const result = await this.postWithRetry(payload);
+    if (result.ok) {
+      this.state.lastDailyReportedDate = date;
+      this.state.lastDailyError = undefined;
+    } else if (result.error) {
+      this.state.lastDailyError = result.error;
+    }
   }
 
   private async fireWeekly(week: string): Promise<void> {
     const window = parseWeek(week, this.tz);
-    const projection = buildProjection(this.store, window);
-    const payload = {
-      ...formatDigestBlocks(projection),
-      projection: sanitizeProjectionForWebhook(projection),
-    };
-    const ok = await this.postWithRetry(payload);
-    if (ok) this.state.lastWeeklyReportedWeek = week;
+    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window));
+    const payload = { ...formatDigestBlocks(sanitized), projection: sanitized };
+    const result = await this.postWithRetry(payload);
+    if (result.ok) {
+      this.state.lastWeeklyReportedWeek = week;
+      this.state.lastWeeklyError = undefined;
+    } else if (result.error) {
+      this.state.lastWeeklyError = result.error;
+    }
   }
 
-  /** One immediate attempt + one delayed retry on transient failure. */
-  private async postWithRetry(payload: unknown): Promise<boolean> {
-    if (!this.webhookUrl) return false;
+  /** One immediate attempt + one delayed retry on transient failure.
+   *  Returns the outcome; the caller decides which phase field to update. */
+  private async postWithRetry(payload: unknown): Promise<{ ok: boolean; error?: string }> {
+    if (!this.webhookUrl) return { ok: false };
     for (let attempt = 0; attempt < 2; attempt++) {
-      if (this.abortController.signal.aborted) return false;
+      if (this.abortController.signal.aborted) return { ok: false };
       const result = await postJsonWebhook(this.webhookUrl, payload, { timeoutMs: POST_TIMEOUT_MS });
       if (result.ok) {
         this.state.lastPushAt = this.now().toISOString();
-        this.state.lastPushError = undefined;
-        return true;
+        return { ok: true };
       }
       const errMsg = result.status !== undefined
         ? `webhook ${result.status}: ${result.error}`
         : `webhook failed: ${result.error}`;
-      this.state.lastPushError = errMsg;
       if (attempt === 0) {
         log.warn(`reportWebhook attempt failed (${errMsg}); retrying in ${this.retryDelayMs}ms`);
         const aborted = await this.delayOrAbort(this.retryDelayMs);
-        if (aborted) return false;
+        if (aborted) return { ok: false };
         continue;
       }
       log.error(`reportWebhook gave up after retry: ${errMsg}`);
-      return false;
+      return { ok: false, error: errMsg };
     }
-    return false;
+    return { ok: false };
+  }
+
+  private setPhaseError(label: "daily" | "weekly", msg: string): void {
+    if (label === "daily") this.state.lastDailyError = msg;
+    else this.state.lastWeeklyError = msg;
   }
 
   /** Returns true if the wait was cut short by abort. */
@@ -279,14 +305,12 @@ export class ReportPusherService {
     return parseWeek(thisWeekInTz(this.tz, this.now()), this.tz).toIso;
   }
 
-  private refreshNextFireTimes(): void {
-    this.state.nextDailyAt = this.computeNextDailyAt();
-    this.state.nextWeeklyAt = this.computeNextWeeklyAt();
-  }
-
   private persist(): void {
+    // Persist the same shape `health()` returns so the row stays consistent
+    // with the live getter — operators reading service_health see the same
+    // next-fire instants the live API would have served.
     try {
-      this.store.upsertServiceHealth(REPORT_PUSHER_HEALTH_NAME, this.state);
+      this.store.upsertServiceHealth(REPORT_PUSHER_HEALTH_NAME, this.health());
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       log.warn(`failed to persist report-pusher service_health: ${msg}`);
