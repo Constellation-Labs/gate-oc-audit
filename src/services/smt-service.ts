@@ -113,6 +113,17 @@ export class SmtService {
     try {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
+      // Authoritative cursor lives in the tree DBs (kv `meta:lastInsertedSeq`)
+      // so it can't desync from the leaves. If no tree carried it (legacy
+      // .db files, or trees rebuilt by deleting their .db while keeping
+      // _metadata.json), restoreMetadata's value stands for this boot and
+      // the next checkpoint will populate the key. If trees AND metadata
+      // disagree, the trees win — a stale JSON pointing past empty trees
+      // is exactly the bug this coupling exists to prevent.
+      const cursor = this.manager.getRestoredCursor();
+      if (cursor.hasCursor) {
+        this.lastInsertedSeq = cursor.cursor;
+      }
       const trees = this.manager.listTrees();
       smtLog.info(
         `Restored ${trees.length} tree(s) from checkpoint`,
@@ -166,7 +177,7 @@ export class SmtService {
     // Final checkpoint on shutdown — each step is independent so a tree
     // checkpoint failure doesn't prevent metadata from being persisted.
     try {
-      await this.manager.checkpointAll(this.config.checkpointDir);
+      await this.manager.checkpointAll(this.config.checkpointDir, this.lastInsertedSeq);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       smtLog.error(`Tree checkpoint failed: ${msg}`);
@@ -661,7 +672,7 @@ export class SmtService {
       .catch(() => {})
       .then(() =>
         Promise.all([
-          this.manager.checkpointAll(this.config.checkpointDir).catch((err) => {
+          this.manager.checkpointAll(this.config.checkpointDir, this.lastInsertedSeq).catch((err) => {
             const msg = err instanceof Error ? err.message : "Unknown error";
             smtLog.error(`Tree checkpoint failed: ${msg}`);
           }),
