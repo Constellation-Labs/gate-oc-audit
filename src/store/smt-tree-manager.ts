@@ -52,18 +52,22 @@ export class TreeManager {
   /**
    * Replay cursor recovered from the tree DBs (key `meta:lastInsertedSeq`).
    *
-   * Returns `{ hasCursor: false }` when no restored tree carried the key —
-   * either because no trees were on disk or because every `.db` predates this
-   * key (legacy upgrades). The caller should treat that as "fall back to the
-   * sibling JSON for this boot; the next checkpoint will populate the key".
-   *
-   * When at least one tree has the key we take the **min** across trees: a
-   * half-failed checkpoint that updated some trees but not others should
-   * cause over-replay (safe — `onEventAppended` short-circuits via
-   * `isFrozen`, and re-inserting an existing leaf is a set-semantics no-op)
-   * rather than under-replay (silent leaf gap).
+   * - **No trees on disk** → `{ hasCursor: true, cursor: 0 }`. The SMT is
+   *   empty; the caller must replay every audit event regardless of what a
+   *   sibling JSON says. This is precisely the desync this coupling exists
+   *   to defeat (operator deletes .db files but leaves _metadata.json).
+   * - **Trees on disk but none carry the key** → `{ hasCursor: false }`.
+   *   Legacy DBs that predate this key. The caller should defer to the JSON
+   *   for this one boot; the next checkpoint populates the key and locks in
+   *   the coupling.
+   * - **At least one tree carries the key** → min across trees. A
+   *   half-failed checkpoint that updated some trees but not others should
+   *   cause over-replay (safe — `onEventAppended` short-circuits via
+   *   `isFrozen`, and re-inserting an existing leaf is a set-semantics
+   *   no-op) rather than under-replay (silent leaf gap).
    */
   getRestoredCursor(): { hasCursor: false } | { hasCursor: true; cursor: number } {
+    if (this.trees.size === 0) return { hasCursor: true, cursor: 0 };
     if (this.restoredCursors.size === 0) return { hasCursor: false };
     let min = Infinity;
     for (const v of this.restoredCursors.values()) {

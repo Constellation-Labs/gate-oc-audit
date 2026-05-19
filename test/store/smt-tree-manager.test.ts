@@ -58,15 +58,25 @@ describe("TreeManager", () => {
     }
   });
 
-  it("returns hasCursor=false when no trees were on disk", async () => {
+  it("forces cursor=0 when no trees were on disk", async () => {
+    // Operator deleted the .db files but a sibling _metadata.json may still
+    // claim a high lastInsertedSeq. The SMT is in fact empty, so the caller
+    // must replay from the start; reporting hasCursor: true with cursor 0
+    // overrides whatever the JSON says.
     const dir = mkdtempSync(join(tmpdir(), "tm-cursor-empty-"));
     try {
       const tm = new TreeManager();
       await tm.restoreAll(dir);
-      assert.deepEqual(tm.getRestoredCursor(), { hasCursor: false });
+      assert.deepEqual(tm.getRestoredCursor(), { hasCursor: true, cursor: 0 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("forces cursor=0 when the checkpoint directory does not exist", async () => {
+    const tm = new TreeManager();
+    await tm.restoreAll(join(tmpdir(), "tm-cursor-missing-" + Date.now()));
+    assert.deepEqual(tm.getRestoredCursor(), { hasCursor: true, cursor: 0 });
   });
 
   it("takes the min cursor across trees when checkpoints disagree", async () => {
