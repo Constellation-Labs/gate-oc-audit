@@ -708,6 +708,8 @@ export default (() => {
                 isNonLoopback: () => resolveGatewayBaseUrl().nonLoopback,
                 allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
                 allowVerifyOnNonLoopback: config.allowVerifyOnNonLoopback === true,
+                allowGateMutationOnNonLoopback: config.allowGateMutationOnNonLoopback === true,
+                openclawDir: typeof config.openclawDir === "string" ? config.openclawDir : undefined,
             });
 
             api.registerService({

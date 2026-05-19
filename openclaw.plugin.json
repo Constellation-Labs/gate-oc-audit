@@ -143,6 +143,14 @@
       "allowExportOnNonLoopback": {
         "type": "boolean",
         "description": "Opt-in to keep GET /plugins/audit/api/export available when the gateway binds beyond loopback. Default false. The export streams raw audit events (with content when ?includeContent=true) and is unauthenticated; on a non-loopback bind it would be reachable by anything that can reach the gateway port."
+      },
+      "allowVerifyOnNonLoopback": {
+        "type": "boolean",
+        "description": "Opt-in to keep POST /plugins/audit/api/verify available when the gateway binds beyond loopback. Default false. Verification re-hashes every event in the audit log (CPU-bound full-table scan)."
+      },
+      "allowGateMutationOnNonLoopback": {
+        "type": "boolean",
+        "description": "Opt-in to keep POST /plugins/audit/api/gate/{install,test} available when the gateway binds beyond loopback. Default false. These endpoints write the operator's Gate API key to ~/.openclaw/config.json (install) and emit outbound HTTP probes with that key (test); both are credential-handling paths that shouldn't accept arbitrary network input."
       }
     },
     "additionalProperties": false

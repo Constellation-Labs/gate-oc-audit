@@ -50,6 +50,8 @@ openclaw audit gate status     # read-only view of current config
 openclaw audit gate test       # re-probe the configured URL/key
 ```
 
+The same flow is available in the control UI under the **Gate** tab (`/plugins/audit/#/gate`). The browser form posts to `/api/gate/install` and `/api/gate/test`; `GET /api/gate/status` returns the same shape as `audit gate status --json` (and never includes the API-key value — only `hasApiKey: boolean`). The two mutation endpoints are disabled when the gateway binds beyond loopback unless the operator sets `allowGateMutationOnNonLoopback: true`.
+
 If you'd rather edit config by hand, the manual instructions below are still authoritative.
 
 ### Required openclaw config (openclaw ≥ 2026.4.24)

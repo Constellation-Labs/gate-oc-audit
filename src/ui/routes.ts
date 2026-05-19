@@ -20,6 +20,16 @@ import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from
 import { buildProjection } from "../reports/projection.js";
 import { formatProjectionHtml } from "../reports/format-html.js";
 import { buildCronRollup, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "../reports/cron-rollup.js";
+import {
+  GateInstallError,
+  installGate,
+  normalizeAndValidateUrl,
+  readGateStatus,
+  validateApiKeyOrThrow,
+} from "../services/gate-installer.js";
+import { probeGate } from "../services/gate-client.js";
+import { isJsonObject, readOpenclawConfig } from "../util/openclaw-config-writer.js";
+import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -55,6 +65,17 @@ interface AuditUiContext {
    * export (CPU-bound full-table scan).
    */
   allowVerifyOnNonLoopback: boolean;
+  /**
+   * Operator opt-in to keep the mutation endpoints `/api/gate/install`
+   * and `/api/gate/test` enabled when the gateway binds beyond loopback.
+   * Off by default — these endpoints write the operator's Gate API key
+   * to ~/.openclaw/config.json (install) and emit outbound HTTP probes
+   * with that key (test); both are credential-handling paths that
+   * shouldn't accept arbitrary network input.
+   */
+  allowGateMutationOnNonLoopback: boolean;
+  /** Override openclaw config dir for tests. */
+  openclawDir?: string;
 }
 
 /**
@@ -113,6 +134,25 @@ function parseUrl(req: IncomingMessage): URL | undefined {
 }
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+/** Re-read the on-disk gateway API key for the /api/gate/test fallback.
+ * Status reports `hasApiKey: boolean` only to avoid leaking the value;
+ * test needs the actual key. Errors propagate so the route returns 500
+ * (the operator's config is broken, not a request error). */
+function readSavedApiKey(openclawDir: string | undefined): string | undefined {
+  const dir = resolveOpenclawDir({ openclawDir });
+  const file = readOpenclawConfig(dir);
+  const plugins = file.content.plugins;
+  if (!isJsonObject(plugins)) return undefined;
+  const entries = plugins.entries;
+  if (!isJsonObject(entries)) return undefined;
+  const entry = entries["constellation-audit-plugin"];
+  if (!isJsonObject(entry)) return undefined;
+  const cfg = entry.config;
+  if (!isJsonObject(cfg)) return undefined;
+  const key = cfg.gatewayApiKey;
+  return typeof key === "string" ? key : undefined;
+}
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -582,6 +622,130 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/gate/status — redacted summary of the operator's Gate config.
+  // Never returns the API key value; only `hasApiKey: boolean`.
+  if (apiPath === "gate/status" && req.method === "GET") {
+    const status = readGateStatus(ctx.openclawDir);
+    sendJson(res, 200, status);
+    return true;
+  }
+
+  // POST /api/gate/test — body { url?, apiKey? }. If either is omitted,
+  // we fall back to the saved config — but only when the URL is also
+  // saved/empty in the request (otherwise we'd POST the saved key to a
+  // request-supplied URL, mirroring the `audit gate test --url` exfil
+  // vector closed in PR 1).
+  if (apiPath === "gate/test" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit gate test is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowGateMutationOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+      return true;
+    }
+    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const urlOverride = typeof b.url === "string" ? b.url : undefined;
+    let apiKey = typeof b.apiKey === "string" ? b.apiKey : undefined;
+    let url = urlOverride;
+
+    if (urlOverride && !apiKey) {
+      sendError(
+        res,
+        400,
+        "url override requires apiKey; the saved API key is never sent to a non-configured URL",
+      );
+      return true;
+    }
+    if (!url || !apiKey) {
+      const status = readGateStatus(ctx.openclawDir);
+      if (!status.configured) {
+        sendError(res, 400, "Gate is not configured. POST /api/gate/install first.");
+        return true;
+      }
+      url = url ?? status.url;
+      if (!apiKey) {
+        try {
+          apiKey = readSavedApiKey(ctx.openclawDir);
+        } catch (err) {
+          sendError(res, 500, err instanceof Error ? err.message : "config read error");
+          return true;
+        }
+      }
+    }
+    if (!url || !apiKey) {
+      sendError(res, 400, "could not resolve URL or API key");
+      return true;
+    }
+    try {
+      url = normalizeAndValidateUrl(url, false);
+      apiKey = validateApiKeyOrThrow(apiKey);
+    } catch (err) {
+      if (err instanceof GateInstallError) {
+        sendError(res, 400, err.message);
+        return true;
+      }
+      throw err;
+    }
+    const result = await probeGate(url, apiKey);
+    sendJson(res, 200, { url, result });
+    return true;
+  }
+
+  // POST /api/gate/install — body { url, apiKey, registerBroker?,
+  // allowPrivateHost?, skipProbe? }. Writes Gate config to disk.
+  if (apiPath === "gate/install" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit gate install is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowGateMutationOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+      return true;
+    }
+    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const url = typeof b.url === "string" ? b.url : "";
+    const apiKey = typeof b.apiKey === "string" ? b.apiKey : "";
+    if (!url || !apiKey) {
+      sendError(res, 400, "url and apiKey are required");
+      return true;
+    }
+    try {
+      const report = await installGate({
+        url,
+        apiKey,
+        registerBroker: b.registerBroker !== false,
+        allowPrivateHost: b.allowPrivateHost === true,
+        skipProbe: b.skipProbe === true,
+        openclawDir: ctx.openclawDir,
+      });
+      sendJson(res, 200, {
+        configPath: report.configPath,
+        changes: report.changes,
+        probe: report.probe?.kind ?? "skipped",
+      });
+    } catch (err) {
+      if (err instanceof GateInstallError) {
+        sendError(res, 400, err.message);
+        return true;
+      }
+      throw err;
+    }
+    return true;
+  }
+
   return false;
 }
 
@@ -627,6 +791,10 @@ export interface AuditUiOptions {
   allowExportOnNonLoopback?: boolean;
   /** Operator opt-in to keep /api/verify available when bound beyond loopback. */
   allowVerifyOnNonLoopback?: boolean;
+  /** Operator opt-in to keep /api/gate/{install,test} available when bound beyond loopback. */
+  allowGateMutationOnNonLoopback?: boolean;
+  /** Override openclaw config dir (for tests / non-default installs). */
+  openclawDir?: string;
 }
 
 export function registerAuditUiRoutes(
@@ -646,6 +814,8 @@ export function registerAuditUiRoutes(
     isNonLoopback: opts.isNonLoopback ?? (() => false),
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
+    allowGateMutationOnNonLoopback: opts.allowGateMutationOnNonLoopback === true,
+    openclawDir: opts.openclawDir,
   };
 
   api.registerHttpRoute({
