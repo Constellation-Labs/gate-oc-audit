@@ -11,7 +11,7 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
@@ -35,8 +35,14 @@ import {
 } from "../src/services/gateway-publisher.js";
 import type { AuditEvent } from "../src/types/events.js";
 import {
+  cliAnomaliesHandler,
   cliAuditHandler,
+  cliAuditUiHandler,
   cliExportHandler,
+  cliInventoryHandler,
+  cliReportCronHandler,
+  cliReportHandler,
+  cliReportSessionHandler,
   cliSmtHandler,
   cliVerifyHandler,
 } from "../src/cli.js";
@@ -857,12 +863,20 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.equal(received.content, "hello cli");
   });
 
-  it("audit smt root — prints current root and entry count", async () => {
+  it("audit smt root — prints current root and entry count (default and --tree)", async () => {
     const { stdout } = await captureConsoleAsync(() =>
       cliSmtHandler(rig.smt, "root", {}),
     );
     assert.match(stdout, /Root: [0-9a-f]{64}/);
     assert.match(stdout, /Entries: 10/); // 5 events × 2 (raw + censored)
+
+    // Same answer when an explicit --tree key is supplied.
+    const treeKey = rig.smt.listTrees()[0].key;
+    const withTree = await captureConsoleAsync(() =>
+      cliSmtHandler(rig.smt, "root", { tree: treeKey }),
+    );
+    assert.match(withTree.stdout, /Root: [0-9a-f]{64}/);
+    assert.match(withTree.stdout, /Entries: 10/);
   });
 
   it("audit smt trees — lists the tree created by hook activity", async () => {
@@ -894,6 +908,14 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     );
     assert.match(badRun.stderr, /INVALID|UNVERIFIABLE/);
     process.exitCode = beforeCode; // reset so a non-zero code doesn't leak into node:test
+
+    // proof --tree <key> targets a specific tree explicitly (same shape).
+    const treeKey = rig.smt.listTrees()[0].key;
+    const explicit = await captureConsoleAsync(() =>
+      cliSmtHandler(rig.smt, "proof", { hash, tree: treeKey }),
+    );
+    const explicitProof = JSON.parse(explicit.stdout);
+    assert.equal(explicitProof.membership, true);
   });
 
   it("audit smt chain — prints chain entries for the session's conversationId", async () => {
@@ -913,6 +935,473 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.match(stdout, /Sampled \d+ event proof\(s\) — all valid/);
     assert.ok(stdout.includes("OK"), "should conclude OK when no proofs fail");
     process.exitCode = beforeCode;
+  });
+
+  it("audit list — --last, --limit, --offset, --category narrow the row set", () => {
+    const last2 = captureConsole(() => cliAuditHandler(rig.store, { last: "2" }));
+    assert.match(last2.stdout, /Showing 2 of 5 events/);
+
+    const limit3 = captureConsole(() => cliAuditHandler(rig.store, { limit: "3" }));
+    assert.match(limit3.stdout, /Showing 3 of 5 events/);
+
+    const offset2 = captureConsole(() => cliAuditHandler(rig.store, { offset: "2" }));
+    assert.match(offset2.stdout, /Showing 3 of 5 events/);
+
+    const systemOnly = captureConsole(() => cliAuditHandler(rig.store, { category: "system" }));
+    assert.ok(systemOnly.stdout.includes("session.start"));
+    assert.ok(systemOnly.stdout.includes("session.end"));
+    assert.ok(!systemOnly.stdout.includes("tool.invoked"));
+  });
+
+  it("audit export — --type, --session, --from/--to, --security-only, --limit narrow rows", async () => {
+    const byType = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { type: "tool.invoked" }),
+    );
+    const typeRows = byType.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(typeRows.length, 1);
+    assert.equal(typeRows[0].eventType, "tool.invoked");
+
+    // --category restricts to a single taxonomy bucket.
+    const byCategory = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { category: "tool" }),
+    );
+    const toolRows = byCategory.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(toolRows.length, 2);
+    for (const r of toolRows) assert.equal(r.category, "tool");
+
+    const bySession = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { session: sessionId }),
+    );
+    assert.equal(bySession.stdout.split("\n").filter(Boolean).length, 5);
+
+    const noSession = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { session: "no-such-session" }),
+    );
+    assert.equal(noSession.stdout.trim(), "");
+
+    const inWindow = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", {
+        from: "2020-01-01T00:00:00.000Z",
+        to: "2099-12-31T23:59:59.999Z",
+      }),
+    );
+    assert.equal(inWindow.stdout.split("\n").filter(Boolean).length, 5);
+
+    const outOfWindow = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", {
+        from: "2099-01-01T00:00:00.000Z",
+        to: "2099-12-31T23:59:59.999Z",
+      }),
+    );
+    assert.equal(outOfWindow.stdout.trim(), "");
+
+    // seedSession produces 2 "system"-category events (session.start, session.end).
+    const securityOnly = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { securityOnly: true }),
+    );
+    const securityRows = securityOnly.stdout.split("\n").filter(Boolean);
+    assert.equal(securityRows.length, 2);
+    for (const line of securityRows) {
+      const row = JSON.parse(line);
+      assert.equal(row.category, "system");
+    }
+
+    const capped = await captureConsoleAsync(() =>
+      cliExportHandler(rig.store, "json", { limit: "2" }),
+    );
+    assert.equal(capped.stdout.split("\n").filter(Boolean).length, 2);
+
+    await assert.rejects(
+      () => cliExportHandler(rig.store, "json", { limit: "0" }),
+      /--limit must be a positive integer/,
+    );
+  });
+
+  it("audit ui — prints the audit UI URL", () => {
+    const { stdout } = captureConsole(() => cliAuditUiHandler());
+    assert.match(stdout, /^https?:\/\/[^\s]+\/plugins\/audit\/\s*$/);
+  });
+
+  it("audit report daily — text, --json, --html over hook-populated events", () => {
+    // Pin to the date of the first seeded event so the report window always
+    // covers them, even when the test runs across a UTC midnight boundary.
+    const firstEvent = rig.store.query({ sessionId, limit: 1, includeContent: false })[0];
+    const date = firstEvent.createdAt.slice(0, 10);
+
+    const text = captureConsole(() => cliReportHandler(rig.store, "daily", { date, tz: "utc" }));
+    assert.match(text.stdout, new RegExp(`Audit report — ${date}`));
+    assert.ok(text.stdout.includes("=== Activity ==="));
+    assert.ok(text.stdout.includes("Total events:"));
+
+    const json = captureConsole(() =>
+      cliReportHandler(rig.store, "daily", { date, tz: "utc", json: true }),
+    );
+    const lines = json.stdout.split("\n").filter(Boolean);
+    assert.equal(lines.length, 1);
+    const projection = JSON.parse(lines[0]);
+    assert.equal(projection.schemaVersion, 1);
+    assert.equal(typeof projection.activity.totalEvents, "number");
+    assert.ok(projection.activity.totalEvents >= 5);
+
+    const html = captureConsole(() =>
+      cliReportHandler(rig.store, "daily", { date, tz: "utc", html: true }),
+    );
+    assert.ok(html.stdout.startsWith("<!doctype html>"));
+    assert.ok(html.stdout.includes("Audit report"));
+  });
+
+  it("audit report daily — --top-tools/--dup-window-sec/--lookback-days take effect and bad values are rejected", () => {
+    const firstEvent = rig.store.query({ sessionId, limit: 1, includeContent: false })[0];
+    const date = firstEvent.createdAt.slice(0, 10);
+
+    // Tuned detector flags are accepted and round-trip through the projection.
+    const tuned = captureConsole(() =>
+      cliReportHandler(rig.store, "daily", {
+        date,
+        tz: "utc",
+        json: true,
+        dupWindowSec: "30",
+        lookbackDays: "7",
+        topTools: "3",
+      }),
+    );
+    const projection = JSON.parse(tuned.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(projection.schemaVersion, 1);
+    // --top-tools must cap the surfaced list.
+    assert.ok(projection.topTools.length <= 3);
+
+    // Bad values are rejected at the parsePositiveInt boundary.
+    assert.throws(
+      () => cliReportHandler(rig.store, "daily", { date, topTools: "0" }),
+      /--top-tools must be a positive integer/,
+    );
+    assert.throws(
+      () => cliReportHandler(rig.store, "daily", { date, dupWindowSec: "abc" }),
+      /--dup-window-sec must be a positive integer/,
+    );
+    assert.throws(
+      () => cliReportHandler(rig.store, "daily", { date, lookbackDays: "1000000" }),
+      /--lookback-days must not exceed/,
+    );
+  });
+
+  it("audit report weekly — --json emits a single-line projection for the ISO week", () => {
+    const firstEvent = rig.store.query({ sessionId, limit: 1, includeContent: false })[0];
+    // Derive the ISO 8601 week the seeded events fall into; pinning avoids
+    // a midnight-Sunday boundary flake.
+    const d = new Date(firstEvent.createdAt);
+    const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    const dayNum = (tmp.getUTCDay() + 6) % 7; // ISO: Monday = 0
+    tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3);
+    const firstThursday = tmp.valueOf();
+    tmp.setUTCMonth(0, 1);
+    const week =
+      `${d.getUTCFullYear()}-W` +
+      String(
+        1 + Math.round(((firstThursday - tmp.valueOf()) / 86_400_000 - 3 + ((tmp.getUTCDay() + 6) % 7)) / 7),
+      ).padStart(2, "0");
+
+    const json = captureConsole(() =>
+      cliReportHandler(rig.store, "weekly", { week, tz: "utc", json: true }),
+    );
+    const projection = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(projection.schemaVersion, 1);
+    assert.ok(
+      projection.period.label.includes(week),
+      `expected weekly label to include "${week}", got "${projection.period.label}"`,
+    );
+
+    const text = captureConsole(() =>
+      cliReportHandler(rig.store, "weekly", { week, tz: "utc" }),
+    );
+    assert.ok(text.stdout.includes("Audit report"));
+    assert.ok(text.stdout.includes(week));
+    assert.ok(text.stdout.includes("=== Activity ==="));
+
+    const html = captureConsole(() =>
+      cliReportHandler(rig.store, "weekly", { week, tz: "utc", html: true }),
+    );
+    assert.ok(html.stdout.startsWith("<!doctype html>"));
+    assert.ok(html.stdout.includes(week));
+  });
+
+  it("audit report session — text and --json render the timeline for the session", async () => {
+    const text = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, {}),
+    );
+    assert.ok(text.stdout.includes(`Session ${sessionId}`));
+    assert.ok(text.stdout.includes("=== Timeline ==="));
+
+    const json = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, { json: true }),
+    );
+    const projection = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(projection.schemaVersion, 1);
+    assert.equal(projection.sessionId, sessionId);
+    assert.ok(projection.timeline.length >= 1);
+
+    // Default JSON output must NOT expose raw metadata; opt-in flips it on.
+    assert.ok(projection.timeline.every((e: { metadata?: unknown }) => e.metadata === undefined));
+    const jsonWithMeta = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, { json: true, includeMetadata: true }),
+    );
+    const withMeta = JSON.parse(jsonWithMeta.stdout.split("\n").filter(Boolean)[0]);
+    assert.ok(withMeta.timeline.some((e: { metadata?: unknown }) => e.metadata !== undefined));
+
+    const missing = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, "no-such-session", {}),
+    );
+    assert.match(missing.stdout, /No events found for session/);
+  });
+
+  it("audit report session — --raw skips dedup; --limit caps the timeline and sets truncated", async () => {
+    // --raw: text output carries the [--raw] marker; JSON sets `raw: true`.
+    const rawText = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, { raw: true }),
+    );
+    assert.ok(rawText.stdout.includes("[--raw]"));
+    assert.ok(rawText.stdout.includes("=== Timeline (raw) ==="));
+
+    const rawJson = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, { raw: true, json: true }),
+    );
+    const rawProjection = JSON.parse(rawJson.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(rawProjection.raw, true);
+
+    // --limit caps the timeline; with 5 seeded events, --limit 2 must
+    // truncate the view and the projection must flag truncated: true.
+    const limited = await captureConsoleAsync(() =>
+      cliReportSessionHandler(rig.store, rig.smt, sessionId, { raw: true, json: true, limit: "2" }),
+    );
+    const limitedProjection = JSON.parse(limited.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(limitedProjection.timeline.length, 2);
+    assert.equal(limitedProjection.truncated, true);
+
+    // Bad --limit is rejected at the parsePositiveInt boundary.
+    await assert.rejects(
+      () => cliReportSessionHandler(rig.store, rig.smt, sessionId, { limit: "0" }),
+      /--limit must be a positive integer/,
+    );
+  });
+
+  it("audit anomalies — text and --json over a window that covers the seeded events", () => {
+    const text = captureConsole(() =>
+      cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc" }),
+    );
+    assert.match(text.stdout, /Audit anomalies — /);
+    assert.ok(text.stdout.includes("Events in window:"));
+
+    const json = captureConsole(() =>
+      cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc", json: true }),
+    );
+    const view = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(view.schemaVersion, 1);
+    assert.equal(view.counts.capped, false);
+    assert.equal(typeof view.counts.totalEventsInWindow, "number");
+    assert.ok(view.anomalies);
+    assert.ok(view.detectorConfig);
+  });
+
+  it("audit anomalies — --html, --until and all detector tuning flags round-trip through the view", () => {
+    const html = captureConsole(() =>
+      cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc", html: true }),
+    );
+    assert.ok(html.stdout.startsWith("<!doctype html>"));
+    assert.ok(html.stdout.includes("Audit anomalies"));
+
+    // --until pins the upper bound and the JSON view echoes it back.
+    const until = "2099-01-01T00:00:00.000Z";
+    const bounded = captureConsole(() =>
+      cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", until, tz: "utc", json: true }),
+    );
+    const boundedView = JSON.parse(bounded.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(boundedView.period.toIso, until);
+
+    // Every detector-tuning flag is accepted and reflected in detectorConfig.
+    const tuned = captureConsole(() =>
+      cliAnomaliesHandler(rig.store, rig.smt, {
+        since: "24h",
+        tz: "utc",
+        json: true,
+        dupWindowSec: "120",
+        lookbackDays: "14",
+        denialWindowSec: "60",
+        denialThreshold: "7",
+        dropWindowSec: "180",
+        dropThreshold: "4",
+      }),
+    );
+    const cfg = JSON.parse(tuned.stdout.split("\n").filter(Boolean)[0]).detectorConfig;
+    assert.equal(cfg.dupWindowSec, 120);
+    assert.equal(cfg.lookbackDays, 14);
+    assert.equal(cfg.denialWindowSec, 60);
+    assert.equal(cfg.denialThreshold, 7);
+    assert.equal(cfg.dropWindowSec, 180);
+    assert.equal(cfg.dropThreshold, 4);
+
+    // A representative bad value is rejected at the boundary.
+    assert.throws(
+      () => cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", denialThreshold: "abc" }),
+      /--denial-threshold must be a positive integer/,
+    );
+  });
+});
+
+describe("e2e: audit report cron — rollup CLI over a hook-populated cron run", () => {
+  let rig: Rig;
+  before(async () => { rig = await createRig(); });
+  after(async () => { await destroyRig(rig); });
+
+  function fireCronRun(jobId: string, sessionId: string, runId: string, success: boolean) {
+    const ctx = {
+      sessionId,
+      sessionKey: `sk-${runId}`,
+      trigger: "cron",
+      agentId: "agent-cron",
+      runId,
+      jobId,
+      conversationId: sessionId,
+    };
+    fire(rig.api, "before_model_resolve", { prompt: `cron run ${runId}` }, ctx);
+    fire(rig.api, "agent_end",
+      { messages: [], success, error: success ? null : "timeout", durationMs: 4000 },
+      ctx,
+    );
+  }
+
+  it("emits text, --json, and --html rollups; --last bounds the row count", () => {
+    fireCronRun("job-nightly", "sess-cron-ok-1", "run-1", true);
+    fireCronRun("job-nightly", "sess-cron-fail-1", "run-2", false);
+
+    const text = captureConsole(() => cliReportCronHandler(rig.store, "job-nightly", {}));
+    assert.ok(text.stdout.includes("Per-cron rollup — jobId=job-nightly"));
+    assert.ok(text.stdout.includes("run-1"));
+    assert.ok(text.stdout.includes("run-2"));
+
+    const json = captureConsole(() =>
+      cliReportCronHandler(rig.store, "job-nightly", { json: true }),
+    );
+    const rollup = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(rollup.schemaVersion, 1);
+    assert.equal(rollup.jobId, "job-nightly");
+    assert.equal(rollup.rows.length, 2);
+    assert.equal(rollup.truncated, false);
+    assert.ok(rollup.rows.some((r: { status: string }) => r.status === "ok"));
+    assert.ok(rollup.rows.some((r: { status: string }) => r.status === "failed"));
+
+    const html = captureConsole(() =>
+      cliReportCronHandler(rig.store, "job-nightly", { html: true }),
+    );
+    assert.ok(html.stdout.startsWith("<!doctype html>"));
+    assert.ok(html.stdout.includes("Per-cron rollup"));
+
+    const lastOne = captureConsole(() =>
+      cliReportCronHandler(rig.store, "job-nightly", { last: "1", json: true }),
+    );
+    const bounded = JSON.parse(lastOne.stdout.split("\n").filter(Boolean)[0]);
+    assert.equal(bounded.rows.length, 1);
+    assert.equal(bounded.truncated, true);
+  });
+
+  it("rejects a missing job-id with a helpful error", () => {
+    assert.throws(
+      () => cliReportCronHandler(rig.store, undefined, {}),
+      /requires a <job-id>/,
+    );
+    assert.throws(
+      () => cliReportCronHandler(rig.store, "", {}),
+      /requires a <job-id>/,
+    );
+  });
+});
+
+describe("e2e: audit inventory — CLI handler over a hook-populated store", () => {
+  let rig: Rig;
+  let openclawDir: string;
+  let projectRoot: string;
+
+  before(async () => {
+    rig = await createRig();
+    openclawDir = mkdtempSync(join(tmpdir(), "audit-e2e-inv-oc-"));
+    projectRoot = mkdtempSync(join(tmpdir(), "audit-e2e-inv-proj-"));
+    // Seed two installed plugins so the inventory walker has something to find.
+    for (const name of ["alpha-plugin", "beta-plugin"]) {
+      const dir = join(openclawDir, "extensions", name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ name, version: "0.0.1", main: "index.js" }),
+      );
+      writeFileSync(join(dir, "index.js"), "module.exports = {};");
+    }
+    // Drive at least one hook so the SMT/store are exercised alongside inventory.
+    seedSession(rig, "sess-inv-1");
+  });
+
+  after(async () => {
+    await destroyRig(rig);
+    rmSync(openclawDir, { recursive: true, force: true });
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it("summary lists every lens with the seeded plugin count", () => {
+    const { stdout } = captureConsole(() =>
+      cliInventoryHandler(rig.store, "summary", {}, { openclawDir, projectRoot }),
+    );
+    assert.match(stdout, /plugins: 2/);
+    assert.ok(stdout.includes("skills:"));
+    assert.ok(stdout.includes("tools:"));
+    assert.ok(stdout.includes("soul:"));
+    assert.ok(stdout.includes("crons:"));
+  });
+
+  it("plugins --json emits a stable shape carrying both seeded plugins", () => {
+    const { stdout } = captureConsole(() =>
+      cliInventoryHandler(rig.store, "plugins", { json: true }, { openclawDir, projectRoot }),
+    );
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.summary.plugins, 2);
+    assert.equal(parsed.plugins.length, 2);
+    const names = parsed.plugins.map((p: { name: string }) => p.name).sort();
+    assert.deepEqual(names, ["alpha-plugin", "beta-plugin"]);
+  });
+
+  it("skills/tools/soul/crons subcommands each render --json and human modes", () => {
+    // Seed one item in each non-plugins lens.
+    mkdirSync(join(openclawDir, "skills"), { recursive: true });
+    writeFileSync(join(openclawDir, "skills", "alpha.ts"), "x");
+
+    mkdirSync(join(openclawDir, "tools"), { recursive: true });
+    writeFileSync(join(openclawDir, "tools", "tool-a.ts"), "x");
+
+    mkdirSync(openclawDir, { recursive: true });
+    writeFileSync(join(openclawDir, "soul.md"), "# soul");
+
+    mkdirSync(join(openclawDir, "crons"), { recursive: true });
+    writeFileSync(join(openclawDir, "crons", "nightly.json"), JSON.stringify({ jobId: "nightly" }));
+
+    for (const kind of ["skills", "tools", "soul", "crons"] as const) {
+      const text = captureConsole(() =>
+        cliInventoryHandler(rig.store, kind, {}, { openclawDir, projectRoot }),
+      );
+      // Human mode: either the lens header is present, or "No <kind> found." —
+      // whichever the walker decides; both are valid signals the handler ran.
+      assert.ok(
+        text.stdout.includes(kind) || text.stdout.includes(`No ${kind} found`),
+        `expected ${kind} output to mention the lens, got: ${text.stdout}`,
+      );
+
+      const json = captureConsole(() =>
+        cliInventoryHandler(rig.store, kind, { json: true }, { openclawDir, projectRoot }),
+      );
+      const parsed = JSON.parse(json.stdout);
+      assert.ok(parsed.summary, `${kind}: parsed JSON must carry a summary`);
+      assert.equal(typeof parsed.summary[kind], "number");
+      assert.ok(Array.isArray(parsed[kind]), `${kind}: parsed JSON must carry a ${kind} array`);
+      // The seeded entry above must appear in at least one of the lenses, but
+      // some walkers (soul) collect from multiple paths, so we just assert
+      // shape — content assertions belong in cli-inventory.test.ts.
+    }
   });
 });
 
