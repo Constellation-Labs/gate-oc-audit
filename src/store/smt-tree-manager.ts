@@ -23,6 +23,10 @@ export interface TreeInfo {
 
 export class TreeManager {
   private trees: Map<string, SmtStore> = new Map();
+  // Per-tree cursor read from kv on restore. Lets the SmtService derive the
+  // authoritative lastInsertedSeq from the trees themselves rather than from
+  // a sibling JSON file that can drift if the tree DBs are rebuilt/wiped.
+  private restoredCursors: Map<string, number> = new Map();
 
   getOrCreate(treeKey: string): SmtStore {
     let store = this.trees.get(treeKey);
@@ -45,6 +49,33 @@ export class TreeManager {
     return total;
   }
 
+  /**
+   * Replay cursor recovered from the tree DBs (key `meta:lastInsertedSeq`).
+   *
+   * - **No trees on disk** → `{ hasCursor: true, cursor: 0 }`. The SMT is
+   *   empty; the caller must replay every audit event regardless of what a
+   *   sibling JSON says. This is precisely the desync this coupling exists
+   *   to defeat (operator deletes .db files but leaves _metadata.json).
+   * - **Trees on disk but none carry the key** → `{ hasCursor: false }`.
+   *   Legacy DBs that predate this key. The caller should defer to the JSON
+   *   for this one boot; the next checkpoint populates the key and locks in
+   *   the coupling.
+   * - **At least one tree carries the key** → min across trees. A
+   *   half-failed checkpoint that updated some trees but not others should
+   *   cause over-replay (safe — `onEventAppended` short-circuits via
+   *   `isFrozen`, and re-inserting an existing leaf is a set-semantics
+   *   no-op) rather than under-replay (silent leaf gap).
+   */
+  getRestoredCursor(): { hasCursor: false } | { hasCursor: true; cursor: number } {
+    if (this.trees.size === 0) return { hasCursor: true, cursor: 0 };
+    if (this.restoredCursors.size === 0) return { hasCursor: false };
+    let min = Infinity;
+    for (const v of this.restoredCursors.values()) {
+      if (v < min) min = v;
+    }
+    return { hasCursor: true, cursor: min };
+  }
+
   listTrees(): TreeInfo[] {
     const result: TreeInfo[] = [];
     for (const [key, store] of this.trees) {
@@ -59,7 +90,7 @@ export class TreeManager {
     return result;
   }
 
-  async checkpointAll(dir: string): Promise<void> {
+  async checkpointAll(dir: string, lastInsertedSeq?: number): Promise<void> {
     mkdirSync(dir, { recursive: true });
 
     for (const [treeKey, store] of this.trees) {
@@ -75,13 +106,19 @@ export class TreeManager {
         const deleteNodes = db.prepare("DELETE FROM kv WHERE key LIKE 'n:%'");
 
         // Single transaction so the snapshot replaces atomically — no torn
-        // state where stale n:% rows coexist with new ones.
+        // state where stale n:% rows coexist with new ones. The cursor is
+        // written here too so the replay high-water mark can never outlive
+        // the tree contents it claims to describe.
         db.exec("BEGIN IMMEDIATE");
         try {
           deleteNodes.run();
 
           upsert.run("meta:root", snapshot.root);
           upsert.run("meta:entryCount", String(store.getEntryCount()));
+
+          if (typeof lastInsertedSeq === "number") {
+            upsert.run("meta:lastInsertedSeq", String(lastInsertedSeq));
+          }
 
           const frozenKeys = store.getFrozenKeys();
           if (frozenKeys.size > 0) {
@@ -101,6 +138,10 @@ export class TreeManager {
         }
       } finally {
         db.close();
+      }
+
+      if (typeof lastInsertedSeq === "number") {
+        this.restoredCursors.set(treeKey, lastInsertedSeq);
       }
     }
   }
@@ -157,6 +198,16 @@ export class TreeManager {
           | { value: string }
           | undefined;
         const frozenKeys = frozenRow ? (JSON.parse(frozenRow.value) as string[]) : undefined;
+
+        const cursorRow = db.prepare("SELECT value FROM kv WHERE key = ?").get("meta:lastInsertedSeq") as
+          | { value: string }
+          | undefined;
+        if (cursorRow) {
+          const parsed = Number(cursorRow.value);
+          if (Number.isFinite(parsed)) {
+            this.restoredCursors.set(treeKey, parsed);
+          }
+        }
 
         const store = new SmtStore();
         store.restore({ root, nodes, frozenKeys });
