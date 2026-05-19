@@ -232,24 +232,28 @@ export function installGate(req: GateInstallRequest): Promise<GateInstallRespons
 }
 
 export interface ProviderRow {
-  key: string;
-  baseUrl?: string;
-  auth?: string;
-  hasApiKey: boolean;
-  oauthExpiresAt?: string;
+  /** Profile ID inside the SDK auth-profile store. */
+  profileId: string;
+  /** Provider this profile authenticates against (e.g. "openai"). */
+  provider: string;
+  /** Credential type. */
+  type: "api_key" | "oauth" | "token";
+  email?: string;
+  displayName?: string;
+  /** ISO-8601 expiry when the credential is an oauth/token. */
+  expiresAt?: string;
 }
 
-export function listProviders(): Promise<{ providers: ProviderRow[] }> {
-  return fetchJson<{ providers: ProviderRow[] }>("gate/providers");
+export function listProviders(): Promise<{ profiles: ProviderRow[] }> {
+  return fetchJson<{ profiles: ProviderRow[] }>("gate/providers");
 }
 
 export interface AddOpenAIProviderRequest {
   kind: "openai";
-  providerKey?: string;
   apiKey: string;
 }
 
-export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ configPath: string; providerKey: string; changes: string[] }> {
+export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ ok: true; profileId: string; provider: string; mode: "api_key" }> {
   return fetchJson("gate/providers", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -257,39 +261,12 @@ export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ conf
   });
 }
 
-export function removeProvider(key: string): Promise<{ configPath: string; providerKey: string; changes: string[] }> {
-  return fetchJson(`gate/providers/${encodeURIComponent(key)}`, {
+/** Removes ALL profiles for the given provider. The SDK doesn't expose
+ * per-profile removal; the API key form re-adds an OpenAI profile in
+ * one click if you change your mind. */
+export function removeProvider(provider: string): Promise<{ ok: true; provider: string }> {
+  return fetchJson(`gate/providers/${encodeURIComponent(provider)}`, {
     method: "DELETE",
-    headers: { "content-type": "application/json" },
-  });
-}
-
-export interface OAuthStartResponse {
-  sessionId: string;
-  authUrl: string;
-  port: number;
-}
-
-export type OAuthSessionStatus =
-  | { kind: "pending"; authUrl: string; startedAt: number; providerKey: string }
-  | { kind: "complete"; configPath: string; providerKey: string; expiresAt: string }
-  | { kind: "error"; message: string; providerKey: string };
-
-export function startOpenAIOAuth(providerKey = "openai"): Promise<OAuthStartResponse> {
-  return fetchJson<OAuthStartResponse>("gate/oauth/openai/start", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerKey }),
-  });
-}
-
-export function getOpenAIOAuthStatus(sessionId: string): Promise<OAuthSessionStatus> {
-  return fetchJson<OAuthSessionStatus>(`gate/oauth/openai/${encodeURIComponent(sessionId)}/status`);
-}
-
-export function cancelOpenAIOAuth(sessionId: string): Promise<{ cancelled: boolean }> {
-  return fetchJson(`gate/oauth/openai/${encodeURIComponent(sessionId)}/cancel`, {
-    method: "POST",
     headers: { "content-type": "application/json" },
   });
 }

@@ -1,19 +1,26 @@
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
 import {
-  applyProviderEntryPatch,
+  applyAuthProfileConfig,
+  ensureAuthProfileStore,
+  listProfilesForProvider,
+  removeProviderAuthProfilesWithLock,
+  upsertApiKeyProfile,
+  writeOAuthCredentials,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/provider-auth";
+import { loginOpenAICodexOAuth } from "openclaw/plugin-sdk/provider-auth-login";
+
+import {
   readOpenclawConfig,
-  readProviders,
-  removeProviderEntry,
   writeOpenclawConfig,
-  type JsonObject,
 } from "./util/openclaw-config-writer.js";
 import { resolveOpenclawDir } from "./util/openclaw-paths.js";
-import { OPENAI_PROVIDER_BASE_URL, resolveOpenAIOAuthEndpoints } from "./services/openai-oauth-constants.js";
-import { startOpenAIOAuthFlow } from "./services/openai-oauth.js";
+import { createReadlineWizardPrompter } from "./services/wizard-prompter.js";
 
 const API_KEY_ENV = "OPENCLAW_OPENAI_API_KEY";
+const OPENAI_PROVIDER_ID = "openai";
+const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
 
 function outLine(s: string): void { process.stdout.write(`${s}\n`); }
 function errLine(s: string): void { process.stderr.write(`${s}\n`); }
@@ -24,42 +31,56 @@ export interface ProviderListOptions {
 }
 
 export function cliProviderListHandler(opts: ProviderListOptions): void {
-  const dir = resolveOpenclawDir({ openclawDir: opts.openclawDir });
-  let file;
-  try { file = readOpenclawConfig(dir); }
-  catch (err) { errLine(`provider list: ${err instanceof Error ? err.message : String(err)}`); process.exitCode = 1; return; }
-  const providers = readProviders(file.content);
+  const agentDir = opts.openclawDir ?? resolveOpenclawDir({ openclawDir: opts.openclawDir });
+  let store;
+  try { store = ensureAuthProfileStore(agentDir); }
+  catch (err) {
+    errLine(`provider list: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  }
 
-  // Per-provider redacted view: never emit the api-key value or OAuth
-  // refresh token; only the metadata that helps the operator decide
-  // whether a provider entry is healthy.
-  const rows = Object.entries(providers).map(([key, entry]) => {
-    const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl : "(unset)";
-    const auth = typeof entry.auth === "string" ? entry.auth : "(unset)";
-    const hasApiKey = typeof entry.apiKey === "string" && entry.apiKey.length > 0;
-    let oauthExpiresAt: string | undefined;
-    if (entry.openclawAudit && typeof entry.openclawAudit === "object" && !Array.isArray(entry.openclawAudit)) {
-      const meta = entry.openclawAudit as Record<string, unknown>;
-      if (meta.oauth && typeof meta.oauth === "object" && !Array.isArray(meta.oauth)) {
-        const oa = meta.oauth as Record<string, unknown>;
-        if (typeof oa.expiresAt === "string") oauthExpiresAt = oa.expiresAt;
-        else if (oa.expiresAt !== undefined) oauthExpiresAt = "(malformed)";
-      }
+  // Walk every provider in the store; openclaw owns the canonical list
+  // of providers, but the audit plugin only knows about OpenAI today.
+  const profileIds = new Set<string>();
+  for (const provider of [OPENAI_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID]) {
+    for (const id of listProfilesForProvider(store, provider)) profileIds.add(id);
+  }
+
+  const rows: Array<{
+    profileId: string;
+    provider: string;
+    type: string;
+    email?: string;
+    displayName?: string;
+    expiresAt?: string;
+  }> = [];
+  for (const id of profileIds) {
+    const cred = store.profiles?.[id];
+    if (!cred) continue;
+    const row: typeof rows[number] = {
+      profileId: id,
+      provider: cred.provider,
+      type: cred.type,
+    };
+    if (cred.email) row.email = cred.email;
+    if (cred.displayName) row.displayName = cred.displayName;
+    if (cred.type === "oauth" && typeof cred.expires === "number") {
+      row.expiresAt = new Date(cred.expires).toISOString();
     }
-    return { key, baseUrl, auth, hasApiKey, oauthExpiresAt };
-  });
+    if (cred.type === "token" && typeof cred.expires === "number") {
+      row.expiresAt = new Date(cred.expires).toISOString();
+    }
+    rows.push(row);
+  }
 
-  if (opts.json) {
-    outLine(JSON.stringify({ providers: rows }));
-    return;
-  }
-  if (rows.length === 0) {
-    outLine("No providers configured.");
-    return;
-  }
+  if (opts.json) { outLine(JSON.stringify({ profiles: rows })); return; }
+  if (rows.length === 0) { outLine("No OpenAI provider profiles configured."); return; }
   for (const r of rows) {
-    const oauth = r.oauthExpiresAt ? `  oauth: token expires ${r.oauthExpiresAt}` : "";
-    outLine(`${r.key}\n  ${r.auth}  ${r.baseUrl}  ${r.hasApiKey ? "[key set]" : "[no key]"}${oauth}`);
+    const extras = [r.email, r.displayName, r.expiresAt ? `expires ${r.expiresAt}` : undefined]
+      .filter(Boolean)
+      .join("  ");
+    outLine(`${r.profileId}  ${r.type}  ${r.provider}${extras ? "  " + extras : ""}`);
   }
 }
 
@@ -68,42 +89,38 @@ export interface ProviderRemoveOptions {
   openclawDir?: string;
 }
 
-export function cliProviderRemoveHandler(providerKey: string, opts: ProviderRemoveOptions): void {
-  const dir = resolveOpenclawDir({ openclawDir: opts.openclawDir });
-  let file;
-  try { file = readOpenclawConfig(dir); }
-  catch (err) { errLine(`provider remove: ${err instanceof Error ? err.message : String(err)}`); process.exitCode = 1; return; }
-  let changes: string[];
-  try { changes = removeProviderEntry(file.content, providerKey); }
-  catch (err) {
+export async function cliProviderRemoveHandler(provider: string, opts: ProviderRemoveOptions): Promise<void> {
+  // Reserved key from the audit-gate broker. The provider config under
+  // `models.providers.gate` is owned by `audit gate install`; refuse
+  // to touch it through the profile-removal path.
+  if (provider === "gate") {
+    errLine("provider remove: the 'gate' provider is managed by `audit gate install`");
+    process.exitCode = 1;
+    return;
+  }
+  const agentDir = opts.openclawDir ?? resolveOpenclawDir({ openclawDir: opts.openclawDir });
+  try {
+    await removeProviderAuthProfilesWithLock({ provider, agentDir });
+  } catch (err) {
     errLine(`provider remove: ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
     return;
   }
-  if (changes.length > 0) writeOpenclawConfig(file.path, file.content);
-  if (opts.json) {
-    outLine(JSON.stringify({ ok: true, changes }));
-    return;
-  }
-  if (changes.length === 0) outLine(`No provider named '${providerKey}'.`);
-  else outLine(`Removed provider '${providerKey}'. Restart openclaw to apply.`);
+  if (opts.json) { outLine(JSON.stringify({ ok: true, provider })); return; }
+  outLine(`Removed all '${provider}' profiles from the auth-profile store.`);
+  outLine("Restart openclaw to apply.");
 }
 
 export interface ProviderAddOpenAIOptions {
   oauth?: boolean;
   apiKey?: string;
   apiKeyStdin?: boolean;
-  /** Override the provider key under models.providers. Defaults to "openai". */
-  providerKey?: string;
-  /** Cap the OAuth wait, in seconds. */
-  oauthTimeoutSec?: string;
   yes?: boolean;
   json?: boolean;
   openclawDir?: string;
 }
 
 export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions): Promise<void> {
-  const providerKey = opts.providerKey?.trim() || "openai";
   const wantOAuth = opts.oauth === true;
   if (wantOAuth && (opts.apiKey || opts.apiKeyStdin)) {
     errLine("provider add openai: pick --oauth OR --api-key, not both");
@@ -116,17 +133,17 @@ export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions
     return;
   }
 
+  const agentDir = opts.openclawDir ?? resolveOpenclawDir({ openclawDir: opts.openclawDir });
+
   if (wantOAuth) {
-    await runOAuthFlow(providerKey, opts);
+    await runOAuthFlow(agentDir, opts);
     return;
   }
 
   // API-key path. Read from --api-key, --api-key-stdin, env var, or
   // interactive prompt (in that order).
   let apiKey = opts.apiKey?.trim();
-  if (!apiKey && opts.apiKeyStdin) {
-    apiKey = (await readStdinLine()).trim();
-  }
+  if (!apiKey && opts.apiKeyStdin) apiKey = (await readStdinLine()).trim();
   if (!apiKey) {
     const env = process.env[API_KEY_ENV];
     if (env && env.length > 0) apiKey = env.trim();
@@ -146,86 +163,130 @@ export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions
     process.exitCode = 1;
     return;
   }
-  persistProvider(providerKey, apiKey, undefined, opts);
-}
 
-async function runOAuthFlow(providerKey: string, opts: ProviderAddOpenAIOptions): Promise<void> {
-  const endpoints = resolveOpenAIOAuthEndpoints();
-  let timeoutMs: number | undefined;
-  if (opts.oauthTimeoutSec !== undefined) {
-    const n = Number(opts.oauthTimeoutSec);
-    if (!Number.isFinite(n) || n <= 0) {
-      errLine(`provider add openai: --oauth-timeout-sec "${opts.oauthTimeoutSec}" is not a positive number`);
-      process.exitCode = 1;
-      return;
-    }
-    timeoutMs = Math.floor(n * 1000);
-  }
-
-  // startOpenAIOAuthFlow returns synchronously; bind errors (notably
-  // EADDRINUSE) surface asynchronously via waitForToken's rejection,
-  // not via a synchronous throw — so the catch belongs around the await.
-  const flow = startOpenAIOAuthFlow({ endpoints, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
-
-  outLine("Open this URL in your browser to sign in with OpenAI:");
-  outLine(`  ${flow.authUrl}`);
-  outLine(`Listening on http://127.0.0.1:${flow.port}/callback (will close automatically).`);
-  tryOpenBrowser(flow.authUrl);
-
+  let profileId: string;
   try {
-    const token = await flow.waitForToken;
-    persistProvider(providerKey, token.accessToken, {
-      issuer: endpoints.issuer,
-      clientId: endpoints.clientId,
-      refreshToken: token.refreshToken,
-      expiresAt: token.expiresAt,
-      scope: token.scope,
-    }, opts);
-    outLine(`Token captured; expires ${token.expiresAt}.`);
-  } catch (err) {
-    flow.cancel();
-    const msg = err instanceof Error ? err.message : String(err);
-    errLine(`provider add openai: OAuth flow failed: ${msg}`);
-    if (/EADDRINUSE/.test(msg)) {
-      errLine(`  → port ${endpoints.redirectPort} is already in use. Wait or set OPENCLAW_OPENAI_OAUTH_PORT.`);
-    }
-    process.exitCode = 1;
-  }
-}
-
-function persistProvider(
-  providerKey: string,
-  apiKey: string,
-  oauth: { issuer: string; clientId: string; refreshToken: string; expiresAt: string; scope?: string } | undefined,
-  opts: ProviderAddOpenAIOptions,
-): void {
-  const dir = resolveOpenclawDir({ openclawDir: opts.openclawDir });
-  let file;
-  try { file = readOpenclawConfig(dir); }
-  catch (err) { errLine(`provider add openai: ${err instanceof Error ? err.message : String(err)}`); process.exitCode = 1; return; }
-  const content: JsonObject = file.content;
-  let changes: string[];
-  try {
-    changes = applyProviderEntryPatch(content, {
-      providerKey,
-      baseUrl: OPENAI_PROVIDER_BASE_URL,
-      apiKey,
-      tokenKind: oauth ? "oauth-access" : "api-key",
-      oauth,
+    profileId = upsertApiKeyProfile({
+      provider: OPENAI_PROVIDER_ID,
+      input: apiKey,
+      agentDir,
     });
   } catch (err) {
     errLine(`provider add openai: ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
     return;
   }
-  if (changes.length > 0) writeOpenclawConfig(file.path, content);
+
+  applyAuthProfileToConfig(agentDir, {
+    profileId,
+    provider: OPENAI_PROVIDER_ID,
+    mode: "api_key",
+  });
+
   if (opts.json) {
-    outLine(JSON.stringify({ ok: true, providerKey, changes, oauth: Boolean(oauth) }));
+    outLine(JSON.stringify({ ok: true, profileId, provider: OPENAI_PROVIDER_ID, mode: "api_key" }));
+  } else {
+    outLine(`Wrote profile '${profileId}' for provider '${OPENAI_PROVIDER_ID}'.`);
+    outLine("Restart openclaw to apply.");
+  }
+}
+
+async function runOAuthFlow(agentDir: string, opts: ProviderAddOpenAIOptions): Promise<void> {
+  const prompter = createReadlineWizardPrompter();
+  const isRemote = detectRemote();
+
+  let creds;
+  try {
+    creds = await loginOpenAICodexOAuth({
+      prompter,
+      runtime: { log: (...a) => process.stderr.write(a.join(" ") + "\n"), error: (...a) => process.stderr.write(a.join(" ") + "\n"), exit: (c) => { process.exitCode = c; } },
+      isRemote,
+      openUrl: openUrlOrPrint,
+      localBrowserMessage: "Sign in to OpenAI in the browser tab that just opened (or copy the URL above).",
+    });
+  } catch (err) {
+    errLine(`provider add openai: OAuth flow failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
     return;
   }
-  outLine(`Wrote ${file.path}`);
-  for (const k of changes) outLine(`  + ${k}`);
-  outLine("Restart openclaw to apply.");
+  if (!creds) {
+    errLine("provider add openai: OAuth flow returned no credentials (cancelled or rejected)");
+    process.exitCode = 1;
+    return;
+  }
+
+  let profileId: string;
+  try {
+    profileId = await writeOAuthCredentials(OPENAI_CODEX_PROVIDER_ID, creds, agentDir);
+  } catch (err) {
+    errLine(`provider add openai: failed to persist OAuth credentials: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  applyAuthProfileToConfig(agentDir, {
+    profileId,
+    provider: OPENAI_PROVIDER_ID,
+    mode: "oauth",
+    email: typeof creds.email === "string" ? creds.email : undefined,
+  });
+
+  if (opts.json) {
+    outLine(JSON.stringify({ ok: true, profileId, provider: OPENAI_PROVIDER_ID, mode: "oauth" }));
+  } else {
+    outLine(`Wrote OAuth profile '${profileId}' for provider '${OPENAI_PROVIDER_ID}'.`);
+    outLine("Restart openclaw to apply.");
+  }
+}
+
+interface ApplyParams {
+  profileId: string;
+  provider: string;
+  mode: "api_key" | "oauth" | "token" | "aws-sdk";
+  email?: string;
+}
+
+function applyAuthProfileToConfig(agentDir: string, params: ApplyParams): void {
+  const dir = resolveOpenclawDir({ openclawDir: agentDir });
+  const file = readOpenclawConfig(dir);
+  const cfg = file.content as unknown as OpenClawConfig;
+  const next = applyAuthProfileConfig(cfg, params);
+  writeOpenclawConfig(file.path, next as unknown as typeof file.content);
+}
+
+function detectRemote(): boolean {
+  // No DISPLAY / WAYLAND_DISPLAY → no local browser. SSH_TTY / SSH_CONNECTION
+  // → likely remote shell. The SDK uses isRemote to switch to a paste-the-
+  // code flow rather than trying to open a browser.
+  if (process.platform === "linux") {
+    if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return true;
+  }
+  if (process.env.SSH_TTY || process.env.SSH_CONNECTION) return true;
+  return false;
+}
+
+/**
+ * Attempt to open the URL via the SDK's browser-open helper; print the
+ * URL to stderr regardless so the operator can copy-paste if the
+ * launch fails or this is a headless box. We deep-import because the
+ * SDK ships `openUrl` at this path but doesn't expose it through a
+ * top-level subpath in package.json — if a future SDK version moves
+ * it, we silently degrade to print-only.
+ */
+async function openUrlOrPrint(url: string): Promise<void> {
+  errLine(`Open this URL in your browser: ${url}`);
+  try {
+    // SDK ships `openUrl` at this path but doesn't expose it through a
+    // top-level subpath. Deep-import via string concat so TypeScript
+    // doesn't try to resolve the missing .d.ts at compile time.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod: any = await import(
+      "openclaw/dist/plugin-sdk/src/plugins/" + "setup-browser.js"
+    ).catch(() => null);
+    if (mod && typeof mod.openUrl === "function") {
+      await mod.openUrl(url);
+    }
+  } catch { /* swallow — URL is already on stderr */ }
 }
 
 async function readStdinLine(): Promise<string> {
@@ -250,24 +311,4 @@ async function readStdinLine(): Promise<string> {
     process.stdin.once("end", onEnd);
     process.stdin.once("error", onError);
   });
-}
-
-/**
- * Best-effort browser launch. Failure is silent — the URL is already on
- * stdout so the operator can copy-paste. We avoid the `open` npm package
- * to keep the dependency surface small.
- */
-function tryOpenBrowser(url: string): void {
-  // Hard-validate the scheme so a maliciously-crafted URL can't shell
-  // out via `xdg-open file://...`. We only ever pass our own
-  // OpenAI authorize URL here, but defense-in-depth.
-  if (!/^https:\/\//i.test(url)) return;
-  const cmd = process.platform === "darwin" ? "open"
-    : process.platform === "win32" ? "start"
-    : "xdg-open";
-  try {
-    const child = spawn(cmd, [url], { stdio: "ignore", detached: true });
-    child.unref();
-    child.on("error", () => { /* swallow — operator can still copy-paste */ });
-  } catch { /* swallow */ }
 }

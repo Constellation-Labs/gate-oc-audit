@@ -21,7 +21,7 @@ import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
 import {GatewayStopCapture} from "./gateway-stop-capture.js";
-import {registerAuditUiRoutes, shutdownOauthSessions} from "./ui/routes.js";
+import {registerAuditUiRoutes} from "./ui/routes.js";
 import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
 
@@ -757,12 +757,6 @@ export default (() => {
                             `running on a shared network.`,
                         );
                     }
-                },
-                stop() {
-                    // Cancel any in-flight OAuth flows so the loopback
-                    // listener + 5-minute timer don't outlive the plugin
-                    // and the next register() doesn't see stale state.
-                    shutdownOauthSessions();
                 },
             });
         },

@@ -500,14 +500,14 @@ describe("/api/gate/test — additional cases", () => {
   });
 });
 
-describe("/api/gate/providers (add / list / remove)", () => {
+describe("/api/gate/providers (add / list / remove) — SDK auth-profile store", () => {
   let rig: Rig;
   beforeEach(async () => { rig = await bootRig(); });
   afterEach(async () => { await rig.destroy(); });
 
-  it("starts empty, then lists an openai provider after add", async () => {
+  it("starts empty, then lists a profile after add", async () => {
     const list1 = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
-    assert.deepEqual(list1, { providers: [] });
+    assert.deepEqual(list1, { profiles: [] });
 
     const addRes = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
       method: "POST",
@@ -515,13 +515,16 @@ describe("/api/gate/providers (add / list / remove)", () => {
       body: JSON.stringify({ kind: "openai", apiKey: "sk-test-aaaa" }),
     });
     assert.equal(addRes.status, 200);
+    const addBody = await addRes.json();
+    assert.equal(addBody.provider, "openai");
+    assert.equal(addBody.mode, "api_key");
+    assert.ok(typeof addBody.profileId === "string");
 
     const list2 = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
-    assert.equal(list2.providers.length, 1);
-    assert.equal(list2.providers[0].key, "openai");
-    assert.equal(list2.providers[0].auth, "api-key");
-    assert.equal(list2.providers[0].hasApiKey, true);
-    // The API key value must NEVER appear in the redacted listing
+    assert.equal(list2.profiles.length, 1);
+    assert.equal(list2.profiles[0].provider, "openai");
+    assert.equal(list2.profiles[0].type, "api_key");
+    // API key value must NEVER appear in the redacted listing
     const text = JSON.stringify(list2);
     assert.equal(text.includes("sk-test-aaaa"), false);
   });
@@ -544,7 +547,7 @@ describe("/api/gate/providers (add / list / remove)", () => {
     assert.equal(res.status, 400);
   });
 
-  it("removes a provider via DELETE", async () => {
+  it("removes all profiles for a provider via DELETE", async () => {
     await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -556,23 +559,17 @@ describe("/api/gate/providers (add / list / remove)", () => {
     });
     assert.equal(delRes.status, 200);
     const list = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`).then((r) => r.json());
-    assert.deepEqual(list, { providers: [] });
+    assert.deepEqual(list, { profiles: [] });
   });
 
   it("refuses to delete the 'gate' broker key", async () => {
-    // Install a real gate broker first
-    await fetch(`${rig.baseUrl}/plugins/audit/api/gate/install`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", skipProbe: true }),
-    });
     const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers/gate`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
     });
     assert.equal(res.status, 400);
     const body = await res.json();
-    assert.match(body.error, /broker/i);
+    assert.match(body.error, /gate.*install/i);
   });
 
   it("CSRF: POST without application/json content-type is rejected", async () => {
@@ -585,194 +582,6 @@ describe("/api/gate/providers (add / list / remove)", () => {
   });
 });
 
-describe("/api/gate/oauth/openai/* — lifecycle", () => {
-  let rig: Rig;
-  let mockProvider: { close: () => Promise<void>; baseUrl: string };
-  beforeEach(async () => { rig = await bootRig(); });
-  afterEach(async () => {
-    if (mockProvider) await mockProvider.close();
-    await rig.destroy();
-    delete process.env.OPENCLAW_OPENAI_OAUTH_BASE_URL;
-    delete process.env.OPENCLAW_OPENAI_OAUTH_CLIENT_ID;
-    delete process.env.OPENCLAW_OPENAI_OAUTH_PORT;
-  });
-
-  async function bootMockOauthProvider(opts: { tokenStatus?: number; tokenBody?: unknown } = {}): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-    const { createServer } = await import("node:http");
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? "/", `http://localhost`);
-      if (url.pathname === "/oauth/authorize") { res.statusCode = 200; res.end("authorize-page-mock"); return; }
-      if (url.pathname === "/oauth/token") {
-        const chunks: Buffer[] = [];
-        for await (const c of req as AsyncIterable<Buffer>) chunks.push(c);
-        const status = opts.tokenStatus ?? 200;
-        res.statusCode = status;
-        res.setHeader("content-type", "application/json");
-        const defaultBody = {
-          access_token: "tok_access_abc",
-          refresh_token: "tok_refresh_xyz",
-          id_token: "id_jwt",
-          token_type: "Bearer",
-          expires_in: 3600,
-          scope: "openid profile email offline_access",
-        };
-        res.end(JSON.stringify(opts.tokenBody ?? defaultBody));
-        return;
-      }
-      res.statusCode = 404; res.end();
-    });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const port = (server.address() as { port: number }).port;
-    return {
-      baseUrl: `http://127.0.0.1:${port}`,
-      close: () => new Promise<void>((r) => server.close(() => r())),
-    };
-  }
-
-  /** Allocate a free loopback port for the OAuth listener. */
-  async function freePort(): Promise<number> {
-    const { createServer } = await import("node:http");
-    return await new Promise<number>((resolve) => {
-      const s = createServer();
-      s.listen(0, "127.0.0.1", () => {
-        const port = (s.address() as { port: number }).port;
-        s.close(() => resolve(port));
-      });
-    });
-  }
-
-  it("start → status (pending) → callback → status (complete) writes provider config", async () => {
-    mockProvider = await bootMockOauthProvider();
-    const port = await freePort();
-    process.env.OPENCLAW_OPENAI_OAUTH_BASE_URL = mockProvider.baseUrl;
-    process.env.OPENCLAW_OPENAI_OAUTH_CLIENT_ID = "test-client";
-    process.env.OPENCLAW_OPENAI_OAUTH_PORT = String(port);
-
-    const startRes = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    assert.equal(startRes.status, 200);
-    const { sessionId, authUrl } = await startRes.json();
-    assert.ok(sessionId);
-    assert.match(authUrl, /^http:\/\/127\.0\.0\.1:\d+\/oauth\/authorize/);
-
-    // Pending check
-    let statusBody = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/${sessionId}/status`).then((r) => r.json());
-    assert.equal(statusBody.kind, "pending");
-
-    // Simulate the operator completing the flow by hitting the loopback
-    // callback with the state parsed from the authorize URL.
-    const state = new URL(authUrl).searchParams.get("state")!;
-    const cb = await fetch(`http://127.0.0.1:${port}/callback?code=test-code&state=${encodeURIComponent(state)}`, { redirect: "manual" });
-    assert.equal(cb.status, 200);
-
-    // Poll until complete (the route's onOauthComplete runs in a then() callback).
-    let kind = "pending";
-    for (let i = 0; i < 30 && kind === "pending"; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-      statusBody = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/${sessionId}/status`).then((r) => r.json());
-      kind = statusBody.kind;
-    }
-    assert.equal(kind, "complete");
-    assert.equal(statusBody.providerKey, "openai");
-    assert.ok(typeof statusBody.expiresAt === "string");
-
-    // The token must NOT appear in the status response
-    const text = JSON.stringify(statusBody);
-    assert.equal(text.includes("tok_access_abc"), false);
-    assert.equal(text.includes("tok_refresh_xyz"), false);
-
-    // And the config file must contain the provider with the access token
-    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
-    assert.equal(cfg.models.providers.openai.apiKey, "tok_access_abc");
-    assert.equal(cfg.models.providers.openai.openclawAudit.oauth.refreshToken, "tok_refresh_xyz");
-  });
-
-  it("rejects a second /start while one is pending (409)", async () => {
-    mockProvider = await bootMockOauthProvider();
-    const port = await freePort();
-    process.env.OPENCLAW_OPENAI_OAUTH_BASE_URL = mockProvider.baseUrl;
-    process.env.OPENCLAW_OPENAI_OAUTH_PORT = String(port);
-
-    const first = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    assert.equal(first.status, 200);
-
-    const second = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    assert.equal(second.status, 409);
-
-    // Cleanup: cancel the pending flow
-    const { sessionId } = await first.json();
-    await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/${sessionId}/cancel`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-    });
-  });
-
-  it("status returns 404 for an unknown sessionId", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/does-not-exist/status`);
-    assert.equal(res.status, 404);
-  });
-
-  it("/cancel rejects without application/json content-type (CSRF)", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/anything/cancel`, {
-      method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: "",
-    });
-    assert.equal(res.status, 415);
-  });
-});
-
-describe("/api/gate/oauth/openai/* — non-loopback gating", () => {
-  let rig: Rig;
-  beforeEach(async () => { rig = await bootRig({ isNonLoopback: () => true, allowGateMutationOnNonLoopback: false }); });
-  afterEach(async () => { await rig.destroy(); });
-
-  it("blocks /start when bound beyond loopback and opt-in off", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    assert.equal(res.status, 403);
-  });
-
-  it("blocks /cancel when bound beyond loopback and opt-in off", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/oauth/openai/any-sid/cancel`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    assert.equal(res.status, 403);
-  });
-});
-
-describe("/api/gate/providers — refuses providerKey: 'gate' (symmetric with remove)", () => {
-  let rig: Rig;
-  beforeEach(async () => { rig = await bootRig(); });
-  afterEach(async () => { await rig.destroy(); });
-
-  it("POST returns 400 when providerKey is 'gate'", async () => {
-    const res = await fetch(`${rig.baseUrl}/plugins/audit/api/gate/providers`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind: "openai", providerKey: "gate", apiKey: "sk-x" }),
-    });
-    assert.equal(res.status, 400);
-    const body = await res.json();
-    assert.match(body.error, /broker|reserved/i);
-  });
-});
 
 describe("/api/gate/status — populated shape", () => {
   let rig: Rig;
