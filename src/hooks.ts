@@ -29,8 +29,8 @@ const TRUNCATE_SUFFIX = "…[truncated]";
 
 function truncateString(s: string, max: number, label: string): string {
   if (s.length <= max) return s;
-  console.warn(
-    `[audit-plugin] truncating ${label}: ${s.length} → ${max} chars (gateway cap)`,
+  log.warn(
+    `truncating ${label}: ${s.length} → ${max} chars (gateway cap)`,
   );
   let end = max - TRUNCATE_SUFFIX.length;
   if (end < 1) end = max;
@@ -71,8 +71,8 @@ function resolveConfiguredUserId(config: Record<string, unknown>): string | unde
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
     if (trimmed.length > USER_ID_MAX_LEN) {
-      console.warn(
-        `[audit-plugin] WARN ${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating. Gateway would otherwise reject every batch on validation.`,
+      log.warn(
+        `${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating. Gateway would otherwise reject every batch on validation.`,
       );
       return trimmed.slice(0, USER_ID_MAX_LEN);
     }
