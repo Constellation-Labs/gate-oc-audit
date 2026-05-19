@@ -552,6 +552,16 @@ Running `openclaw security audit --deep` may report a `potential-exfiltration` w
 
 ## Upgrade notes
 
+### v0.2.5 — `audit report anomalies` tamper scan was silently skipped on 0.2.0–0.2.4
+
+On versions 0.2.0–0.2.4, `openclaw audit report anomalies` constructed the SMT service for the CLI but never restored it from disk, so `integrityViolations.tamperedEvents` was always `[]` and the report carried the note `"SMT has no checkpointed leaves yet — tamper scan skipped."` even when the on-disk SMT was populated. The skip was visibly flagged by that note (and by the related `unverifiedAnchored` list), but no tampered-event detection actually ran from the CLI.
+
+Other integrity paths were unaffected:
+- `openclaw audit verify` calls `ensureReady()` itself and has always run the full replay.
+- The control-UI `/api/verify` endpoint runs inside the gateway process, where the SMT is restored during boot, and also has always been correct.
+
+To re-scan historical windows after upgrading, re-run `openclaw audit report anomalies --since <window>` against the relevant time ranges; the note will now be `null` whenever the on-disk SMT has checkpointed leaves, and any tampered events will be enumerated in `integrityViolations.tamperedEvents`.
+
 ### v0.2.0 — SMT checkpoint format
 
 SMT checkpoint persistence moved from LevelDB to `node:sqlite`. On-disk layout changed from `<checkpointDir>/<treeKey>/` (a LevelDB directory) to `<checkpointDir>/<treeKey>.db` (a single sqlite file).

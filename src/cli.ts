@@ -477,14 +477,17 @@ export interface AuditAnomaliesOptions {
   dropThreshold?: string;
 }
 
-export function cliAnomaliesHandler(
+export async function cliAnomaliesHandler(
   store: AuditStore,
   smtService: SmtService,
   opts: AuditAnomaliesOptions = {},
-): void {
+): Promise<void> {
   if (store.isDegraded()) {
     console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
   }
+  // Restore the SMT cursor from disk so getLastCheckpointedSequence() reflects
+  // the on-disk state; without this the tamper scan is unconditionally skipped.
+  await smtService.ensureReady();
   const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
   const window = parseSince(opts.since ?? "24h", opts.until, tz);
 

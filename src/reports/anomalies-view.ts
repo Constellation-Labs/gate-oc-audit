@@ -204,10 +204,20 @@ function collectIntegrityViolations(
       }
     }
   }
+  let note: string | null = null;
+  if (!smtCheckpointed) {
+    // A restore failure and a never-checkpointed SMT both leave smtLastSeq
+    // at 0; the operator-actionable distinction is whether the on-disk
+    // state could not be loaded vs. simply doesn't exist yet.
+    const restoreError = smtService.getRestoreError();
+    note = restoreError
+      ? `SMT restore failed (${restoreError}) — tamper scan skipped.`
+      : "SMT has no checkpointed leaves yet — tamper scan skipped.";
+  }
   return {
     unverifiedAnchored,
     tamperedEvents,
-    note: smtCheckpointed ? null : "SMT has no checkpointed leaves yet — tamper scan skipped.",
+    note,
   };
 }
 

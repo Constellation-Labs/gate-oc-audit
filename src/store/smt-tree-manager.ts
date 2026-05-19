@@ -169,7 +169,10 @@ export class TreeManager {
 
       let db: DatabaseSync;
       try {
-        db = new DatabaseSync(dbPath);
+        // Restore only reads; opening read-only avoids creating the DB on a
+        // read-only filesystem and keeps the audit-CLI path free of write
+        // capabilities by construction.
+        db = new DatabaseSync(dbPath, { readOnly: true });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
         smtTreeManagerLog.error(`Failed to open sqlite checkpoint at ${dbPath}: ${msg}`);
