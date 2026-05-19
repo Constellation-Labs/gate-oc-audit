@@ -12,6 +12,46 @@ Requires `openclaw >= 2026.4.24` as a peer dependency and Node.js ≥ 22.13 (use
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 
+### Quick setup: `audit gate install`
+
+If you have a Gate (swarm-deck) URL and API key already, the plugin can write the required config for you, including the two opt-ins below:
+
+```bash
+# Interactive — prompts for URL and key (key entry is not echoed):
+openclaw audit gate install
+
+# Non-interactive (CI / scripts). Prefer --api-key-stdin or the env var
+# over the --api-key flag; flag values land in `ps`/argv and shell history.
+echo "$GATE_API_KEY" | openclaw audit gate install \
+  --url https://gate.example.com \
+  --api-key-stdin \
+  --yes
+
+# Or via env var:
+OPENCLAW_GATE_API_KEY=sk-gw-… openclaw audit gate install \
+  --url https://gate.example.com \
+  --yes
+```
+
+This writes `~/.openclaw/config.json` atomically (a `.bak` is kept) with:
+
+- `plugins.allow` ← appends `constellation-audit-plugin`
+- `plugins.entries.constellation-audit-plugin.enabled` ← `true`
+- `plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess` ← `true`
+- `plugins.entries.constellation-audit-plugin.config.gatewayUrl` / `gatewayApiKey`
+- `models.providers.gate.{baseUrl,auth,apiKey,models}` — registers Gate as an LLM provider (omit with `--no-broker` for audit-only mode)
+
+Before writing, the installer probes the URL/key by POSTing an empty `events: []` batch to `<gateUrl>/api/v1/audit/ingest`. Skip with `--skip-probe` if the operator already trusts the inputs.
+
+Related commands:
+
+```bash
+openclaw audit gate status     # read-only view of current config
+openclaw audit gate test       # re-probe the configured URL/key
+```
+
+If you'd rather edit config by hand, the manual instructions below are still authoritative.
+
 ### Required openclaw config (openclaw ≥ 2026.4.24)
 
 Two operator-policy opt-ins are required for full functionality. Both are decisions openclaw forces on the operator — the plugin cannot self-grant either.

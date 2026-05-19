@@ -3,6 +3,7 @@ import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
 import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions} from "./cli.js";
+import {cliGateInstallHandler, cliGateStatusHandler, cliGateTestHandler, type AuditGateInstallOptions, type AuditGateStatusOptions, type AuditGateTestOptions} from "./cli-gate.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -248,6 +249,39 @@ export default (() => {
                     .action((conversationId: string, opts) =>
                         cliSmtHandler(getSmtService(), "chain", {...opts, conversationId}),
                     );
+
+                // Gate (swarm-deck) install + diagnostics
+                const gate = audit.command("gate").description("Set up and verify the connection to a Constellation Gate (swarm-deck)");
+
+                gate
+                    .command("install")
+                    .description("Install/update the Gate connection in ~/.openclaw/config.json")
+                    .option("--url <url>", "Gate base URL (https://…)")
+                    .option("--api-key <key>", "Gate API key (sk-gw-…). Prefer --api-key-stdin or $OPENCLAW_GATE_API_KEY in CI; flag values leak to ps/argv and shell history.")
+                    .option("--api-key-stdin", "Read the API key from stdin (one line)")
+                    .option("--no-broker", "Skip registering Gate as an LLM provider under models.providers.gate")
+                    .option("--allow-private-host", "Allow https:// URLs to private/link-local hosts")
+                    .option("--skip-probe", "Skip the live connection check before writing config")
+                    .option("--yes", "Non-interactive mode — fail on missing inputs instead of prompting")
+                    .option("--json", "Emit a single-line JSON result")
+                    .action((opts: AuditGateInstallOptions) => cliGateInstallHandler(opts));
+
+                gate
+                    .command("status")
+                    .description("Show the current Gate connection from openclaw config (no network calls)")
+                    .option("--json", "Emit the status as JSON")
+                    .action((opts: AuditGateStatusOptions) => cliGateStatusHandler(opts));
+
+                gate
+                    .command("test")
+                    .description("Probe the configured Gate URL with the saved API key")
+                    .option("--url <url>", "Override the configured URL for this probe. When set, --api-key (or --api-key-stdin / $OPENCLAW_GATE_API_KEY) is required — the saved key is never sent to a non-configured URL.")
+                    .option("--api-key <key>", "Override the configured API key for this probe")
+                    .option("--api-key-stdin", "Read the override API key from stdin (one line)")
+                    .option("--allow-private-host", "Allow https:// URLs to private/link-local hosts")
+                    .option("--timeout-ms <n>", "Per-request timeout (default 10000)")
+                    .option("--json", "Emit the probe result as JSON")
+                    .action((opts: AuditGateTestOptions) => cliGateTestHandler(opts));
             }, {
                 descriptors: [
                     {name: "audit", description: "View and manage audit trail", hasSubcommands: true},
