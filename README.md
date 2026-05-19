@@ -263,7 +263,7 @@ This is independent of `redactPromptText` / `redactToolArgs`, which govern only 
 
 ### Digital Evidence anchoring
 
-Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.constellationnetwork.io) network for independent, tamper-proof verification. Two authentication methods are supported:
+Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.constellationnetwork.io) network for independent, tamper-proof verification. Follow the [Digital Evidence setup guide](https://digitalevidence.constellationnetwork.io/get-started) to provision an account, generate API credentials, and fund a wallet for x402 micropayments. Two authentication methods are supported:
 
 **Option 1 — API key**
 
