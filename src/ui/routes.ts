@@ -938,7 +938,7 @@ async function handleApi(
 /** Read config → applyAuthProfileConfig → write back. */
 function applyProviderProfileToConfig(
   agentDir: string,
-  params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token" | "aws-sdk"; email?: string },
+  params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token"; email?: string },
 ): void {
   const file = readOpenclawConfig(agentDir);
   const cfg = file.content as unknown as OpenClawConfig;

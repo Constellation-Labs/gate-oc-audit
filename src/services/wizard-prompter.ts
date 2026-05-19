@@ -1,4 +1,3 @@
-import { StringDecoder } from "node:string_decoder";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
 
 import type {
@@ -57,7 +56,6 @@ export function createReadlineWizardPrompter(): WizardPrompter {
       if (title) out(`[${title}]`);
       out(message);
     },
-    plain: async (message) => out(message),
     select: async <T>(params: WizardSelectParams<T>): Promise<T> => {
       const r = ensureRl();
       out(params.message);
@@ -91,9 +89,9 @@ export function createReadlineWizardPrompter(): WizardPrompter {
       return out2;
     },
     text: async (params: WizardTextParams): Promise<string> => {
-      if (params.sensitive) {
-        return await readSecret(params.message);
-      }
+      // The SDK no longer exposes a `sensitive` flag on text params;
+      // the dedicated secret-prompt path is gone. If a future SDK
+      // version brings it back, branch here on the new field name.
       const r = ensureRl();
       const placeholder = params.placeholder ? ` [${params.placeholder}]` : "";
       while (true) {
@@ -123,41 +121,3 @@ export function createReadlineWizardPrompter(): WizardPrompter {
   };
 }
 
-/**
- * Read a single line of input without echoing — used by `text(... sensitive: true)`.
- * Falls back to a plain readline read when stdin is not a TTY.
- */
-async function readSecret(prompt: string): Promise<string> {
-  const stdin = process.stdin;
-  if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
-    const r = createInterface({ input: process.stdin, output: process.stderr });
-    try { return trimEnd(await r.question(`${prompt}: `)); }
-    finally { r.close(); }
-  }
-  process.stderr.write(`${prompt}: `);
-  stdin.setRawMode(true);
-  stdin.resume();
-  const decoder = new StringDecoder("utf8");
-  return await new Promise<string>((resolve, reject) => {
-    let buf = "";
-    const onData = (chunk: Buffer): void => {
-      const s = decoder.write(chunk);
-      for (const ch of s) {
-        const code = ch.charCodeAt(0);
-        if (code === 0x03) { finish(); process.stderr.write("\n"); reject(new Error("aborted (Ctrl-C)")); return; }
-        if (code === 0x0d || code === 0x0a) { finish(); process.stderr.write("\n"); resolve(buf.trim()); return; }
-        if (code === 0x7f || code === 0x08) { buf = buf.slice(0, -1); continue; }
-        buf += ch;
-      }
-    };
-    const onEnd = (): void => { finish(); reject(new Error("aborted (stdin closed)")); };
-    const finish = (): void => {
-      try { stdin.setRawMode(false); } catch { /* swallow */ }
-      stdin.pause();
-      stdin.off("data", onData);
-      stdin.off("end", onEnd);
-    };
-    stdin.on("data", onData);
-    stdin.once("end", onEnd);
-  });
-}

@@ -242,7 +242,7 @@ async function runOAuthFlow(agentDir: string, opts: ProviderAddOpenAIOptions): P
 interface ApplyParams {
   profileId: string;
   provider: string;
-  mode: "api_key" | "oauth" | "token" | "aws-sdk";
+  mode: "api_key" | "oauth" | "token";
   email?: string;
 }
 
