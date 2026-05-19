@@ -227,6 +227,51 @@ describe("openai-oauth: startOpenAIOAuthFlow", () => {
     }
   });
 
+  it("cancel() rejects waitForToken so awaiting callers don't deadlock", async () => {
+    const port = await freeLoopbackPort();
+    const mock = await bootMockProvider();
+    try {
+      const flow = startOpenAIOAuthFlow({ endpoints: mock.endpoints(port), timeoutMs: 30_000 });
+      const asserted = assert.rejects(flow.waitForToken, /cancelled/i);
+      flow.cancel();
+      await asserted;
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("isLoopbackHostHeader rejects forged Host: evil.com[::1]", async () => {
+    const port = await freeLoopbackPort();
+    const mock = await bootMockProvider();
+    try {
+      const flow = startOpenAIOAuthFlow({ endpoints: mock.endpoints(port), timeoutMs: 5_000 });
+      // Manually craft a callback that has a forged Host header — the
+      // server should refuse it with 400 and the flow should stay
+      // pending. Use raw http to control headers.
+      const http = await import("node:http");
+      const reject = await new Promise<{ status: number; body: string }>((resolve) => {
+        const req = http.request({
+          host: "127.0.0.1",
+          port,
+          path: "/callback?code=x&state=y",
+          method: "GET",
+          headers: { Host: "evil.com[::1]" },
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c as Buffer));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+        });
+        req.end();
+      });
+      assert.equal(reject.status, 400);
+      assert.match(reject.body, /loopback/);
+      flow.cancel();
+      await assert.rejects(flow.waitForToken);
+    } finally {
+      await mock.close();
+    }
+  });
+
   it("EADDRINUSE when the loopback port is already bound", async () => {
     const port = await freeLoopbackPort();
     const blocker = createServer();
@@ -244,17 +289,27 @@ describe("openai-oauth: startOpenAIOAuthFlow", () => {
 });
 
 describe("openai-oauth: refreshOpenAIToken", () => {
-  it("surfaces a clear error when the response omits required fields", async () => {
-    // The current normalize requires refresh_token; a server that
-    // doesn't include one yields a clean "missing required fields"
-    // error rather than a silently broken token struct.
+  it("reuses the prior refresh token when the server doesn't rotate (RFC 6749 §6)", async () => {
     const mock = await bootMockProvider({
       tokenBody: {
         access_token: "tok_new_access",
+        // no refresh_token field — server did not rotate
         token_type: "Bearer",
         expires_in: 3600,
       },
     });
+    try {
+      const endpoints = mock.endpoints(0);
+      const token = await refreshOpenAIToken("rt-prior", { endpoints });
+      assert.equal(token.accessToken, "tok_new_access");
+      assert.equal(token.refreshToken, "rt-prior", "must preserve the prior refresh token");
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("still rejects when the response omits both access_token and refresh_token", async () => {
+    const mock = await bootMockProvider({ tokenBody: { token_type: "Bearer", expires_in: 3600 } });
     try {
       const endpoints = mock.endpoints(0);
       await assert.rejects(

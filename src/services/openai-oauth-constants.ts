@@ -22,7 +22,15 @@
  * and tying production deployments to it is fragile.
  */
 
+/** Provider base URL for OpenAI's chat-completions API. Single source
+ * of truth for the value persisted into `models.providers.openai.baseUrl`. */
+export const OPENAI_PROVIDER_BASE_URL = "https://api.openai.com/v1";
+
 const DEFAULT_BASE_URL = "https://auth.openai.com";
+// TODO(codex-cli-client-id): this client_id is reverse-engineered from the
+// public codex-cli project (github.com/openai/codex auth.ts). It is NOT an
+// officially-documented stable OpenAI API and may be revoked or rotated by
+// OpenAI at any time. Re-verify against the upstream source on each release.
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_PORT = 1455;
 const DEFAULT_SCOPES = "openid profile email offline_access";
@@ -30,6 +38,9 @@ const DEFAULT_SCOPES = "openid profile email offline_access";
 export interface OpenAIOAuthEndpoints {
   authorizeUrl: string;
   tokenUrl: string;
+  /** OAuth issuer (origin of authorizeUrl). Exposed so callers don't
+   * have to re-parse `authorizeUrl` to get the same value. */
+  issuer: string;
   clientId: string;
   /** Loopback port the redirect_uri points at. Must match a value the
    * upstream OAuth provider has on its allowlist for the client_id. */
@@ -48,6 +59,7 @@ export function resolveOpenAIOAuthEndpoints(env: NodeJS.ProcessEnv = process.env
   return {
     authorizeUrl: `${baseUrl}/oauth/authorize`,
     tokenUrl: `${baseUrl}/oauth/token`,
+    issuer: baseUrl,
     clientId,
     redirectPort: port,
     scopes,

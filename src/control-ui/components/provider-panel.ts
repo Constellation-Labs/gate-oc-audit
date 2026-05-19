@@ -12,6 +12,8 @@ import {
 } from "../api.ts";
 
 const POLL_INTERVAL_MS = 1500;
+const POLL_BACKOFF_CAP_MS = 15_000;
+const MAX_POLL_FAILURES = 5;
 
 @customElement("provider-panel")
 export class ProviderPanel extends LitElement {
@@ -106,6 +108,9 @@ export class ProviderPanel extends LitElement {
   @state() private oauthStatus?: OAuthSessionStatus;
   @state() private oauthError?: string;
   private oauthPollTimer?: number;
+  /** Count of consecutive `getOpenAIOAuthStatus` failures. Used to
+   *  back off transient errors instead of giving up on the first one. */
+  private oauthPollFailures = 0;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -150,6 +155,7 @@ export class ProviderPanel extends LitElement {
   private async startOauth(): Promise<void> {
     this.oauthError = undefined;
     this.submitOk = undefined;
+    this.oauthPollFailures = 0;
     try {
       const start = await startOpenAIOAuth("openai");
       this.oauthSessionId = start.sessionId;
@@ -164,13 +170,23 @@ export class ProviderPanel extends LitElement {
     }
   }
 
-  private scheduleOauthPoll(): void {
+  /**
+   * Re-arm the OAuth status poll. We keep polling while the session is
+   * `pending` (the only state the server-side flow can settle out of).
+   * Transient network errors (plugin restart, brief CORS preflight
+   * race, etc.) bump a failure counter with exponential backoff; we
+   * only give up after MAX_POLL_FAILURES consecutive failures so a
+   * single blip doesn't abandon the flow.
+   */
+  private scheduleOauthPoll(delayMs: number = POLL_INTERVAL_MS): void {
     this.clearOauthPoll();
     const sid = this.oauthSessionId;
     if (!sid) return;
     this.oauthPollTimer = window.setTimeout(async () => {
       try {
         const status = await getOpenAIOAuthStatus(sid);
+        this.oauthPollFailures = 0;
+        this.oauthError = undefined;
         this.oauthStatus = status;
         if (status.kind === "pending") {
           this.scheduleOauthPoll();
@@ -178,11 +194,18 @@ export class ProviderPanel extends LitElement {
           this.submitOk = `OpenAI OAuth complete. Token expires ${status.expiresAt}.`;
           await this.refresh();
         }
-        // On `error` we stop polling and show the message.
+        // kind === "error" → stop polling; UI shows the message.
       } catch (err) {
-        this.oauthError = err instanceof Error ? err.message : String(err);
+        this.oauthPollFailures += 1;
+        if (this.oauthPollFailures >= MAX_POLL_FAILURES) {
+          this.oauthError = `Lost contact with the OAuth status endpoint after ${MAX_POLL_FAILURES} attempts: ${err instanceof Error ? err.message : String(err)}`;
+          return;
+        }
+        // Exponential backoff capped at POLL_BACKOFF_CAP_MS.
+        const backoff = Math.min(POLL_INTERVAL_MS * 2 ** this.oauthPollFailures, POLL_BACKOFF_CAP_MS);
+        this.scheduleOauthPoll(backoff);
       }
-    }, POLL_INTERVAL_MS);
+    }, delayMs);
   }
 
   private clearOauthPoll(): void {

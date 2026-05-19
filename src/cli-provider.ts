@@ -10,10 +10,9 @@ import {
   type JsonObject,
 } from "./util/openclaw-config-writer.js";
 import { resolveOpenclawDir } from "./util/openclaw-paths.js";
-import { resolveOpenAIOAuthEndpoints } from "./services/openai-oauth-constants.js";
+import { OPENAI_PROVIDER_BASE_URL, resolveOpenAIOAuthEndpoints } from "./services/openai-oauth-constants.js";
 import { startOpenAIOAuthFlow } from "./services/openai-oauth.js";
 
-const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const API_KEY_ENV = "OPENCLAW_OPENAI_API_KEY";
 
 function outLine(s: string): void { process.stdout.write(`${s}\n`); }
@@ -44,6 +43,7 @@ export function cliProviderListHandler(opts: ProviderListOptions): void {
       if (meta.oauth && typeof meta.oauth === "object" && !Array.isArray(meta.oauth)) {
         const oa = meta.oauth as Record<string, unknown>;
         if (typeof oa.expiresAt === "string") oauthExpiresAt = oa.expiresAt;
+        else if (oa.expiresAt !== undefined) oauthExpiresAt = "(malformed)";
       }
     }
     return { key, baseUrl, auth, hasApiKey, oauthExpiresAt };
@@ -103,10 +103,15 @@ export interface ProviderAddOpenAIOptions {
 }
 
 export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions): Promise<void> {
-  const providerKey = (opts.providerKey ?? "openai").trim() || "openai";
+  const providerKey = opts.providerKey?.trim() || "openai";
   const wantOAuth = opts.oauth === true;
   if (wantOAuth && (opts.apiKey || opts.apiKeyStdin)) {
     errLine("provider add openai: pick --oauth OR --api-key, not both");
+    process.exitCode = 1;
+    return;
+  }
+  if (opts.apiKey && opts.apiKeyStdin) {
+    errLine("provider add openai: pick --api-key OR --api-key-stdin, not both");
     process.exitCode = 1;
     return;
   }
@@ -146,23 +151,21 @@ export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions
 
 async function runOAuthFlow(providerKey: string, opts: ProviderAddOpenAIOptions): Promise<void> {
   const endpoints = resolveOpenAIOAuthEndpoints();
-  const timeoutSec = opts.oauthTimeoutSec ? Number(opts.oauthTimeoutSec) : undefined;
-  const timeoutMs = Number.isFinite(timeoutSec) && timeoutSec! > 0
-    ? Math.floor(timeoutSec! * 1000)
-    : undefined;
-
-  let flow;
-  try {
-    flow = startOpenAIOAuthFlow({ endpoints, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    errLine(`provider add openai: failed to start OAuth listener on port ${endpoints.redirectPort}: ${msg}`);
-    if (/EADDRINUSE/.test(msg)) {
-      errLine(`  → another OAuth flow is already running on this port. Wait or set OPENCLAW_OPENAI_OAUTH_PORT.`);
+  let timeoutMs: number | undefined;
+  if (opts.oauthTimeoutSec !== undefined) {
+    const n = Number(opts.oauthTimeoutSec);
+    if (!Number.isFinite(n) || n <= 0) {
+      errLine(`provider add openai: --oauth-timeout-sec "${opts.oauthTimeoutSec}" is not a positive number`);
+      process.exitCode = 1;
+      return;
     }
-    process.exitCode = 1;
-    return;
+    timeoutMs = Math.floor(n * 1000);
   }
+
+  // startOpenAIOAuthFlow returns synchronously; bind errors (notably
+  // EADDRINUSE) surface asynchronously via waitForToken's rejection,
+  // not via a synchronous throw — so the catch belongs around the await.
+  const flow = startOpenAIOAuthFlow({ endpoints, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
 
   outLine("Open this URL in your browser to sign in with OpenAI:");
   outLine(`  ${flow.authUrl}`);
@@ -172,7 +175,7 @@ async function runOAuthFlow(providerKey: string, opts: ProviderAddOpenAIOptions)
   try {
     const token = await flow.waitForToken;
     persistProvider(providerKey, token.accessToken, {
-      issuer: new URL(endpoints.authorizeUrl).origin,
+      issuer: endpoints.issuer,
       clientId: endpoints.clientId,
       refreshToken: token.refreshToken,
       expiresAt: token.expiresAt,
@@ -181,7 +184,11 @@ async function runOAuthFlow(providerKey: string, opts: ProviderAddOpenAIOptions)
     outLine(`Token captured; expires ${token.expiresAt}.`);
   } catch (err) {
     flow.cancel();
-    errLine(`provider add openai: OAuth flow failed: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    errLine(`provider add openai: OAuth flow failed: ${msg}`);
+    if (/EADDRINUSE/.test(msg)) {
+      errLine(`  → port ${endpoints.redirectPort} is already in use. Wait or set OPENCLAW_OPENAI_OAUTH_PORT.`);
+    }
     process.exitCode = 1;
   }
 }
@@ -197,13 +204,20 @@ function persistProvider(
   try { file = readOpenclawConfig(dir); }
   catch (err) { errLine(`provider add openai: ${err instanceof Error ? err.message : String(err)}`); process.exitCode = 1; return; }
   const content: JsonObject = file.content;
-  const changes = applyProviderEntryPatch(content, {
-    providerKey,
-    baseUrl: OPENAI_BASE_URL,
-    apiKey,
-    tokenKind: oauth ? "oauth-access" : "api-key",
-    oauth,
-  });
+  let changes: string[];
+  try {
+    changes = applyProviderEntryPatch(content, {
+      providerKey,
+      baseUrl: OPENAI_PROVIDER_BASE_URL,
+      apiKey,
+      tokenKind: oauth ? "oauth-access" : "api-key",
+      oauth,
+    });
+  } catch (err) {
+    errLine(`provider add openai: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  }
   if (changes.length > 0) writeOpenclawConfig(file.path, content);
   if (opts.json) {
     outLine(JSON.stringify({ ok: true, providerKey, changes, oauth: Boolean(oauth) }));

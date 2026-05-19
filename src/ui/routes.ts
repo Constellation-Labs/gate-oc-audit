@@ -38,7 +38,7 @@ import {
 } from "../util/openclaw-config-writer.js";
 import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 import { startOpenAIOAuthFlow, type OAuthToken } from "../services/openai-oauth.js";
-import { resolveOpenAIOAuthEndpoints } from "../services/openai-oauth-constants.js";
+import { OPENAI_PROVIDER_BASE_URL, resolveOpenAIOAuthEndpoints } from "../services/openai-oauth-constants.js";
 import { randomBytes } from "node:crypto";
 
 const ROUTE_BASE = "/plugins/audit";
@@ -178,12 +178,26 @@ interface OAuthSession {
 
 const openaiOauthSessions = new Map<string, OAuthSession>();
 const OAUTH_SESSION_GRACE_MS = 60_000; // keep terminal sessions around so the UI can poll once more
+const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000; // mirrors src/services/openai-oauth.ts DEFAULT_TIMEOUT_MS
 
 function reapOauthSessions(): void {
   const now = Date.now();
   for (const [sid, s] of openaiOauthSessions.entries()) {
     if (s.reapAt <= now) openaiOauthSessions.delete(sid);
   }
+}
+
+/**
+ * Tear down every in-flight OAuth flow. Called from the plugin's
+ * shutdown hook so the loopback listener and 5-minute timer don't
+ * outlive a hot reload — and so the next `register()` doesn't see a
+ * stale `pending` session that 409s subsequent operator attempts.
+ */
+export function shutdownOauthSessions(): void {
+  for (const session of openaiOauthSessions.values()) {
+    try { session.cancel(); } catch { /* swallow — best-effort */ }
+  }
+  openaiOauthSessions.clear();
 }
 
 /**
@@ -885,6 +899,7 @@ async function handleApi(
         if (oa && typeof oa === "object" && !Array.isArray(oa)) {
           const v = (oa as Record<string, unknown>).expiresAt;
           if (typeof v === "string") oauthExpiresAt = v;
+          else if (v !== undefined) oauthExpiresAt = "(malformed)";
         }
       }
       return { key, baseUrl, auth, hasApiKey, oauthExpiresAt };
@@ -923,12 +938,18 @@ async function handleApi(
     let file;
     try { file = readOpenclawConfig(dir); }
     catch (err) { sendError(res, 500, err instanceof Error ? err.message : "config read error"); return true; }
-    const changes = applyProviderEntryPatch(file.content, {
-      providerKey,
-      baseUrl: "https://api.openai.com/v1",
-      apiKey,
-      tokenKind: "api-key",
-    });
+    let changes: string[];
+    try {
+      changes = applyProviderEntryPatch(file.content, {
+        providerKey,
+        baseUrl: OPENAI_PROVIDER_BASE_URL,
+        apiKey,
+        tokenKind: "api-key",
+      });
+    } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "patch failed");
+      return true;
+    }
     if (changes.length > 0) writeOpenclawConfig(file.path, file.content);
     sendJson(res, 200, { configPath: file.path, providerKey, changes });
     return true;
@@ -979,25 +1000,27 @@ async function handleApi(
     const providerKey = bodyStr(b, "providerKey") ?? "openai";
 
     const endpoints = resolveOpenAIOAuthEndpoints();
-    let flow;
-    try { flow = startOpenAIOAuthFlow({ endpoints }); }
-    catch (err) {
-      sendError(res, 500, `failed to start OAuth listener on port ${endpoints.redirectPort}: ${err instanceof Error ? err.message : String(err)}`);
-      return true;
-    }
+    // startOpenAIOAuthFlow returns synchronously; listen errors
+    // (EADDRINUSE) surface asynchronously through onOauthError, where
+    // we map the message to a more helpful one.
+    const flow = startOpenAIOAuthFlow({ endpoints });
 
     const sessionId = randomBytes(16).toString("hex");
+    const startedAt = Date.now();
     const session: OAuthSession = {
       providerKey,
-      status: { kind: "pending", authUrl: flow.authUrl, startedAt: Date.now() },
+      status: { kind: "pending", authUrl: flow.authUrl, startedAt },
       cancel: flow.cancel,
-      reapAt: Date.now() + 6 * 60_000, // 5min timeout + 1min grace
+      // Default flow timeout is 5min; +1min grace so a /status poll
+      // right after timeout still sees the error state. onOauthError /
+      // onOauthComplete reset this on settle.
+      reapAt: startedAt + DEFAULT_OAUTH_TIMEOUT_MS + OAUTH_SESSION_GRACE_MS,
     };
     openaiOauthSessions.set(sessionId, session);
 
     flow.waitForToken.then(
-      (token) => onOauthComplete(sessionId, session, token, ctx),
-      (err) => onOauthError(sessionId, session, err),
+      (token) => onOauthComplete(session, token, ctx),
+      (err) => onOauthError(session, err, endpoints.redirectPort),
     );
 
     sendJson(res, 200, { sessionId, authUrl: flow.authUrl, port: flow.port });
@@ -1017,6 +1040,10 @@ async function handleApi(
 
   // POST /api/gate/oauth/openai/<sid>/cancel — tear down a pending flow.
   if (apiPath.startsWith("gate/oauth/openai/") && apiPath.endsWith("/cancel") && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate oauth cancel disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
     if (!requireSameOriginJsonPost(req, res)) return true;
     const sid = apiPath.slice("gate/oauth/openai/".length, -"/cancel".length);
     const session = openaiOauthSessions.get(sid);
@@ -1034,7 +1061,6 @@ async function handleApi(
 }
 
 function onOauthComplete(
-  sessionId: string,
   session: OAuthSession,
   token: OAuthToken,
   ctx: AuditUiContext,
@@ -1042,14 +1068,15 @@ function onOauthComplete(
   try {
     const dir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
     const file = readOpenclawConfig(dir);
+    const endpoints = resolveOpenAIOAuthEndpoints();
     applyProviderEntryPatch(file.content, {
       providerKey: session.providerKey,
-      baseUrl: "https://api.openai.com/v1",
+      baseUrl: OPENAI_PROVIDER_BASE_URL,
       apiKey: token.accessToken,
       tokenKind: "oauth-access",
       oauth: {
-        issuer: new URL(resolveOpenAIOAuthEndpoints().authorizeUrl).origin,
-        clientId: resolveOpenAIOAuthEndpoints().clientId,
+        issuer: endpoints.issuer,
+        clientId: endpoints.clientId,
         refreshToken: token.refreshToken,
         expiresAt: token.expiresAt,
         scope: token.scope,
@@ -1066,15 +1093,16 @@ function onOauthComplete(
     session.status = { kind: "error", message: err instanceof Error ? err.message : String(err) };
   }
   session.reapAt = Date.now() + OAUTH_SESSION_GRACE_MS;
-  // sessionId reference is kept by callers; this fn just updates the
-  // session entry that was inserted by the route handler.
-  void sessionId;
 }
 
-function onOauthError(sessionId: string, session: OAuthSession, err: unknown): void {
-  session.status = { kind: "error", message: err instanceof Error ? err.message : String(err) };
+function onOauthError(session: OAuthSession, err: unknown, port: number): void {
+  let message = err instanceof Error ? err.message : String(err);
+  // Map the raw async listen error to an operator-actionable message.
+  if (/EADDRINUSE/.test(message)) {
+    message = `port ${port} is already in use — wait for the other flow to finish or set OPENCLAW_OPENAI_OAUTH_PORT`;
+  }
+  session.status = { kind: "error", message };
   session.reapAt = Date.now() + OAUTH_SESSION_GRACE_MS;
-  void sessionId;
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {

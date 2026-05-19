@@ -79,65 +79,74 @@ export function startOpenAIOAuthFlow(opts: StartOAuthFlowOptions = {}): ActiveOA
   let server: Server | undefined;
   let timeoutHandle: NodeJS.Timeout | undefined;
   let settled = false;
+  let resolveToken!: (t: OAuthToken) => void;
+  let rejectToken!: (err: Error) => void;
 
   const tokenPromise = new Promise<OAuthToken>((resolve, reject) => {
-    const finish = (fn: () => void): void => {
-      if (settled) return;
-      settled = true;
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      if (server) server.close();
-      fn();
-    };
-
-    timeoutHandle = setTimeout(() => {
-      finish(() => reject(new Error(`OAuth flow timed out after ${timeoutMs}ms — no callback received`)));
-    }, timeoutMs);
-
-    server = createServer(async (req, res) => {
-      try {
-        const handled = await handleCallback(req, res, {
-          endpoints,
-          expectedState: state,
-          verifier,
-          fetchImpl,
-        });
-        if (handled.kind === "wrong-path") {
-          res.statusCode = 404;
-          res.end("not found");
-          return;
-        }
-        if (handled.kind === "non-loopback") {
-          res.statusCode = 400;
-          res.end("only loopback callbacks are accepted");
-          return;
-        }
-        if (handled.kind === "error") {
-          res.statusCode = 400;
-          res.setHeader("content-type", "text/plain; charset=utf-8");
-          res.end(`OAuth callback error: ${handled.message}`);
-          finish(() => reject(new Error(handled.message)));
-          return;
-        }
-        // success path
-        res.statusCode = 200;
-        res.setHeader("content-type", "text/html; charset=utf-8");
-        res.end(SUCCESS_HTML);
-        finish(() => resolve(handled.token));
-      } catch (err) {
-        if (!res.headersSent) {
-          res.statusCode = 500;
-          res.end("internal error");
-        }
-        finish(() => reject(err instanceof Error ? err : new Error(String(err))));
-      }
-    });
-
-    server.on("error", (err) => {
-      finish(() => reject(err));
-    });
-
-    server.listen(endpoints.redirectPort, "127.0.0.1");
+    resolveToken = resolve;
+    rejectToken = reject;
   });
+
+  // Hoisted so `cancel()` can settle the promise itself rather than
+  // tearing down resources without notifying awaiting callers — a
+  // bare `server.close()` would leave anyone holding `waitForToken`
+  // hanging forever.
+  const finish = (fn: () => void): void => {
+    if (settled) return;
+    settled = true;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (server) server.close();
+    fn();
+  };
+
+  timeoutHandle = setTimeout(() => {
+    finish(() => rejectToken(new Error(`OAuth flow timed out after ${timeoutMs}ms — no callback received`)));
+  }, timeoutMs);
+
+  server = createServer(async (req, res) => {
+    try {
+      const handled = await handleCallback(req, res, {
+        endpoints,
+        expectedState: state,
+        verifier,
+        fetchImpl,
+      });
+      if (handled.kind === "wrong-path") {
+        res.statusCode = 404;
+        res.end("not found");
+        return;
+      }
+      if (handled.kind === "non-loopback") {
+        res.statusCode = 400;
+        res.end("only loopback callbacks are accepted");
+        return;
+      }
+      if (handled.kind === "error") {
+        res.statusCode = 400;
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.end(`OAuth callback error: ${handled.message}`);
+        finish(() => rejectToken(new Error(handled.message)));
+        return;
+      }
+      // success path
+      res.statusCode = 200;
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.end(SUCCESS_HTML);
+      finish(() => resolveToken(handled.token));
+    } catch (err) {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end("internal error");
+      }
+      finish(() => rejectToken(err instanceof Error ? err : new Error(String(err))));
+    }
+  });
+
+  server.on("error", (err) => {
+    finish(() => rejectToken(err));
+  });
+
+  server.listen(endpoints.redirectPort, "127.0.0.1");
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -150,15 +159,15 @@ export function startOpenAIOAuthFlow(opts: StartOAuthFlowOptions = {}): ActiveOA
   });
   const authUrl = `${endpoints.authorizeUrl}?${params.toString()}`;
 
+  // Pre-attach a no-op rejection handler so an unawaited `cancel()`
+  // doesn't surface as an unhandled-rejection warning. Callers that
+  // care attach their own handler via `await waitForToken`.
+  tokenPromise.catch(() => { /* swallow — callers opt in via waitForToken */ });
+
   return {
     authUrl,
     waitForToken: tokenPromise,
-    cancel: () => {
-      if (settled) return;
-      settled = true;
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      if (server) server.close();
-    },
+    cancel: () => finish(() => rejectToken(new Error("OAuth flow cancelled"))),
     port: endpoints.redirectPort,
   };
 }
@@ -240,17 +249,22 @@ async function handleCallback(
   return { kind: "ok", token };
 }
 
-function normalizeTokenResponse(raw: unknown): OAuthToken | undefined {
+/** When `allowMissingRefreshToken` is true, callers must supply a
+ * prior refresh token to fold into the result — used by the refresh
+ * flow where some OAuth servers legitimately omit `refresh_token` and
+ * expect the client to reuse the prior one (RFC 6749 §6). */
+function normalizeTokenResponse(raw: unknown, opts: { allowMissingRefreshToken?: boolean } = {}): OAuthToken | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const r = raw as Record<string, unknown>;
   const accessToken = typeof r.access_token === "string" ? r.access_token : undefined;
   const refreshToken = typeof r.refresh_token === "string" ? r.refresh_token : undefined;
   const expiresIn = typeof r.expires_in === "number" ? r.expires_in : undefined;
-  if (!accessToken || !refreshToken || expiresIn === undefined) return undefined;
+  if (!accessToken || expiresIn === undefined) return undefined;
+  if (!refreshToken && !opts.allowMissingRefreshToken) return undefined;
   const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   return {
     accessToken,
-    refreshToken,
+    refreshToken: refreshToken ?? "",
     idToken: typeof r.id_token === "string" ? r.id_token : undefined,
     expiresIn,
     expiresAt,
@@ -259,15 +273,30 @@ function normalizeTokenResponse(raw: unknown): OAuthToken | undefined {
   };
 }
 
+/**
+ * Accept only Host header values whose effective host is loopback.
+ * Browsers and the upstream OAuth provider always send one of:
+ *   - `localhost[:port]`
+ *   - `127.0.0.1[:port]` (or any 127.x.x.x)
+ *   - `[::1][:port]` (bracketed IPv6 — RFC 7230 §5.4)
+ *
+ * Anchored matches only; substring tricks like `evil.com[::1]` are
+ * rejected. This is belt-and-braces — the listener itself binds to
+ * `127.0.0.1`, so a forged Host header can't reach it remotely. But
+ * the guard guards against a future change that lets the listener
+ * bind beyond loopback (e.g. an operator override).
+ */
 function isLoopbackHostHeader(h: string): boolean {
-  // Strip port, lowercase, accept 127.x / localhost / ::1 / [::1].
-  const stripped = h.toLowerCase().split(":")[0].replace(/^\[|\]$/g, "");
-  if (stripped === "localhost") return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(stripped)) return true;
-  // IPv6 loopback shows up in Host as "[::1]:port" → port-strip above
-  // leaves the bracketed form, so accept both raw "::1" and after
-  // bracket-strip.
-  if (stripped === "::1" || h.includes("[::1]")) return true;
+  const lower = h.toLowerCase();
+  // localhost[:port]
+  if (/^localhost(:\d+)?$/.test(lower)) return true;
+  // 127.x.x.x[:port]
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(lower)) return true;
+  // [::1][:port] — RFC 7230 bracketed-IPv6 form
+  if (/^\[::1\](:\d+)?$/.test(lower)) return true;
+  // Bare ::1 — non-standard for Host headers, but accept defensively
+  // since some test harnesses (and curl --resolve) emit it.
+  if (lower === "::1") return true;
   return false;
 }
 
@@ -321,9 +350,9 @@ export async function refreshOpenAIToken(
     throw new Error(`refresh failed: HTTP ${res.status}: ${text}`);
   }
   const parsed = await res.json();
-  const token = normalizeTokenResponse(parsed);
+  const token = normalizeTokenResponse(parsed, { allowMissingRefreshToken: true });
   if (!token) throw new Error("refresh response missing required fields");
-  // Some OAuth servers don't rotate refresh tokens; reuse the existing one
-  // when the response omits it.
-  return token.refreshToken ? token : { ...token, refreshToken };
+  // RFC 6749 §6: refresh token rotation is optional. Reuse the existing
+  // refresh token when the server doesn't include a new one.
+  return token.refreshToken !== "" ? token : { ...token, refreshToken };
 }

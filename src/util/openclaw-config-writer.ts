@@ -300,8 +300,16 @@ export function applyBrokerProviderPatch(content: JsonObject, patch: BrokerProvi
   return changes;
 }
 
+/** Conventional broker provider key. Owned by `audit gate install`;
+ * other paths (provider add / remove) refuse to touch it so a stray
+ * `--provider-key gate` can't clobber the broker config. */
+export const BROKER_PROVIDER_KEY = "gate";
+
 export interface ProviderEntryPatch {
-  /** Key under `models.providers.*` — e.g. "openai", "anthropic". */
+  /** Key under `models.providers.*` — e.g. "openai", "anthropic".
+   * The value "gate" is reserved (BROKER_PROVIDER_KEY); the helper
+   * throws to keep the broker config under `audit gate install`'s
+   * exclusive control. */
   providerKey: string;
   /** Provider base URL (e.g. https://api.openai.com/v1). */
   baseUrl: string;
@@ -321,13 +329,17 @@ export interface ProviderEntryPatch {
    * can refresh expired tokens in-place without round-tripping the
    * operator through the flow again. The openclaw SDK ignores
    * unknown plugin-namespaced fields.
+   *
+   * Set `scope: null` to clear a previously-recorded scope (e.g.
+   * when a refresh response no longer advertises one). Leaving it
+   * `undefined` preserves the existing value.
    */
   oauth?: {
     issuer: string;
     clientId: string;
     refreshToken: string;
     expiresAt: string; // ISO-8601
-    scope?: string;
+    scope?: string | null;
   };
 }
 
@@ -339,6 +351,9 @@ export interface ProviderEntryPatch {
  */
 export function applyProviderEntryPatch(content: JsonObject, patch: ProviderEntryPatch): string[] {
   const k = patch.providerKey;
+  if (k === BROKER_PROVIDER_KEY) {
+    throw new Error(`the '${BROKER_PROVIDER_KEY}' provider key is reserved for the audit broker — use \`audit gate install\` to manage it`);
+  }
   const changes: string[] = [];
   const models = ensureObject(content, "models");
   const providers = ensureObject(models, "providers");
@@ -369,7 +384,13 @@ export function applyProviderEntryPatch(content: JsonObject, patch: ProviderEntr
     if (oauth.clientId !== patch.oauth.clientId) { oauth.clientId = patch.oauth.clientId; touched = true; }
     if (oauth.refreshToken !== patch.oauth.refreshToken) { oauth.refreshToken = patch.oauth.refreshToken; touched = true; }
     if (oauth.expiresAt !== patch.oauth.expiresAt) { oauth.expiresAt = patch.oauth.expiresAt; touched = true; }
-    if (patch.oauth.scope !== undefined && oauth.scope !== patch.oauth.scope) {
+    // scope: undefined → preserve; null → clear; string → set
+    if (patch.oauth.scope === null) {
+      if (oauth.scope !== undefined) {
+        delete oauth.scope;
+        touched = true;
+      }
+    } else if (patch.oauth.scope !== undefined && oauth.scope !== patch.oauth.scope) {
       oauth.scope = patch.oauth.scope;
       touched = true;
     }
@@ -394,8 +415,8 @@ export function applyProviderEntryPatch(content: JsonObject, patch: ProviderEntr
  * removal — that's owned by `audit gate install`, not this helper.
  */
 export function removeProviderEntry(content: JsonObject, providerKey: string): string[] {
-  if (providerKey === "gate") {
-    throw new Error("the 'gate' broker provider is managed by `audit gate install` — refusing to remove via provider CLI");
+  if (providerKey === BROKER_PROVIDER_KEY) {
+    throw new Error(`the '${BROKER_PROVIDER_KEY}' broker provider is managed by \`audit gate install\` — refusing to remove via provider CLI`);
   }
   const models = content.models;
   if (!isJsonObject(models)) return [];

@@ -21,7 +21,7 @@ import {ToolScanner} from "./scanner.js";
 import {RateLimiter} from "./rate-limiter.js";
 import {FileWatcher} from "./services/file-watcher.js";
 import {GatewayStopCapture} from "./gateway-stop-capture.js";
-import {registerAuditUiRoutes} from "./ui/routes.js";
+import {registerAuditUiRoutes, shutdownOauthSessions} from "./ui/routes.js";
 import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
 
@@ -293,8 +293,13 @@ export default (() => {
                     .option("--json", "Emit as JSON")
                     .action((opts: ProviderListOptions) => cliProviderListHandler(opts));
 
-                provider
-                    .command("add openai")
+                // Nested `add` → `openai` so commander binds the action handler
+                // with `(opts)` rather than `(positional, opts)` — `command("add openai")`
+                // would parse `openai` as a positional argument and the action
+                // would receive the literal string instead of the parsed flags.
+                const providerAdd = provider.command("add").description("Add or update a provider entry");
+                providerAdd
+                    .command("openai")
                     .description("Add or update the OpenAI provider entry under models.providers.openai")
                     .option("--oauth", "Run the OpenAI ChatGPT-account OAuth (PKCE) flow to obtain a token")
                     .option("--api-key <key>", "Use a pre-existing OpenAI API key (sk-…)")
@@ -752,6 +757,12 @@ export default (() => {
                             `running on a shared network.`,
                         );
                     }
+                },
+                stop() {
+                    // Cancel any in-flight OAuth flows so the loopback
+                    // listener + 5-minute timer don't outlive the plugin
+                    // and the next register() doesn't see stale state.
+                    shutdownOauthSessions();
                 },
             });
         },
