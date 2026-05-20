@@ -577,7 +577,7 @@ export default (() => {
                     log.info("Service smt start() called");
                     await activeSmt.start();
                     // Replay events the SMT hasn't seen yet (delta since last checkpoint)
-                    const lastSeq = activeSmt.getLastCheckpointedSequence();
+                    const lastSeq = activeSmt.getLastInsertedSequence();
                     const pending = activeStore.countSince(lastSeq + 1);
                     if (pending > 0) {
                         const replayed = activeSmt.replayEvents(

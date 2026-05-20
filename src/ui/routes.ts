@@ -164,12 +164,17 @@ function classifyEvent(
   const treeKey = ctx.smtService.findContainingTreeKey(rawHash);
   if (!treeKey) {
     // Absence of the leaf is only evidence of tampering when the SMT has
-    // already processed this sequence. If the SMT's high-water mark is
-    // below this event's sequence, the row simply hasn't been replayed in
-    // yet (e.g., gateway.stop captured via the SIGINT/SIGTERM signal path,
-    // which bypasses the rate-limiter and only enters the SMT on the next
-    // plugin start).
-    return { status: event.sequence > smtLastSeq ? "untracked" : "tampered" };
+    // already processed this sequence AND chose to track it. Three cases
+    // are NOT tampering:
+    //  - event.sequence > smtLastSeq: not yet replayed (e.g., gateway.stop
+    //    captured via the SIGINT/SIGTERM signal path, which bypasses the
+    //    rate-limiter and only enters the SMT on the next plugin start).
+    //  - smtService.wasSkipped: the SMT looked at this seq and skipped it
+    //    by policy (frozen leaf or insertEntry rejected).
+    if (event.sequence > smtLastSeq || ctx.smtService.wasSkipped(event.sequence)) {
+      return { status: "untracked" };
+    }
+    return { status: "tampered" };
   }
   return {
     status: event.sequence <= anchoredSeq ? "verified" : "pending",
@@ -217,7 +222,7 @@ function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[
 
   const events = ctx.store.query(opts);
   const anchoredSeq = lastAnchoredSequence(ctx);
-  const smtLastSeq = ctx.smtService.getLastCheckpointedSequence();
+  const smtLastSeq = ctx.smtService.getLastInsertedSequence();
   const enriched: EnrichedEvent[] = events.map((event) => {
     const verification = classifyEvent(ctx, event, anchoredSeq, smtLastSeq);
     const trimmed = event.content !== undefined && event.content.length > CONTENT_PREVIEW_CHARS

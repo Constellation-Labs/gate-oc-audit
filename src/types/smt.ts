@@ -62,5 +62,4 @@ export interface SmtConfig {
   checkpointIntervalMs: number;
   epochDurationMs: number;
   pruneAfterEpochs: number;
-  storageCapBytes: number;
 }

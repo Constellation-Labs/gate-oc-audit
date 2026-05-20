@@ -236,7 +236,7 @@ export class Verifier {
   // whose current content no longer matches a stored leaf. Mirrors the
   // per-row rule classifyEvent applies on /api/events.
   private findTamperedRange(): { start: number; end: number } | undefined {
-    const smtLastSeq = this.smtService.getLastCheckpointedSequence();
+    const smtLastSeq = this.smtService.getLastInsertedSequence();
     let min: number | undefined;
     let max: number | undefined;
     let afterSeq = 0;
@@ -254,6 +254,12 @@ export class Verifier {
           // tampered. Stop here; subsequent events are all beyond smtLastSeq.
           if (min === undefined || max === undefined) return undefined;
           return { start: min, end: max };
+        }
+        // Sequences the SMT intentionally skipped (frozen leaf, insert
+        // rejected) are missing-by-design, not tampered.
+        if (this.smtService.wasSkipped(event.sequence)) {
+          afterSeq = event.sequence;
+          continue;
         }
         const rawHash = this.smtService.computeRawHash(event);
         const found = this.smtService.findContainingTreeKey(rawHash);

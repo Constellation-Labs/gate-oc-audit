@@ -46,8 +46,6 @@ const sdk = require2("@constellation-network/digital-evidence-sdk") as {
   hashDocument: (content: string | Buffer) => string;
 };
 
-const BYTES_PER_NODE = 128;
-
 function resolveConfig(config: Record<string, unknown>): SmtConfig {
   const smt =
     typeof config.smt === "object" && config.smt !== null
@@ -71,10 +69,6 @@ function resolveConfig(config: Record<string, unknown>): SmtConfig {
         : EPOCH_DURATION_MS,
     pruneAfterEpochs:
       typeof smt.pruneAfterEpochs === "number" ? smt.pruneAfterEpochs : 0,
-    storageCapBytes:
-      typeof smt.storageCapBytes === "number"
-        ? smt.storageCapBytes
-        : 500 * 1024 * 1024,
   };
 }
 
@@ -90,6 +84,12 @@ export class SmtService {
   private leafValues: LeafValues = new Map();
 
   private lastInsertedSeq = 0;
+  // Sequences the SMT chose not to track (leaf already frozen or
+  // insertEntry rejected). Consulted by classifyEvent so these aren't
+  // misreported as "tampered" once a later seq advances lastInsertedSeq past
+  // them — they have no leaf and seq ≤ lastInsertedSeq, but the absence is
+  // expected policy, not evidence of tampering.
+  private skippedSeqs = new Set<number>();
 
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -214,23 +214,12 @@ export class SmtService {
     return this.machineId;
   }
 
-  private estimateStorageBytes(): number {
-    return this.manager.totalNodeCount() * BYTES_PER_NODE;
-  }
-
   /**
    * Called after each successful audit store append.
    * Computes dual hashes and inserts into the SMT. Fail-open.
    */
   onEventAppended(event: AuditEvent): void {
     try {
-      if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        smtLog.warn(
-          "Storage cap reached, skipping insert",
-        );
-        return;
-      }
-
       const treeKey = this.getTreeKey();
       const store = this.manager.getOrCreate(treeKey);
       const timestamp = Math.floor(new Date(event.createdAt).getTime() / 1000);
@@ -243,6 +232,7 @@ export class SmtService {
         store.isFrozen(rawHash) ||
         (censoredHash && store.isFrozen(censoredHash))
       ) {
+        this.skippedSeqs.add(event.sequence);
         return;
       }
 
@@ -262,12 +252,16 @@ export class SmtService {
 
       if ("error" in result) {
         smtLog.warn(`Insert rejected: ${result.error}`);
+        this.skippedSeqs.add(event.sequence);
         return;
       }
 
       if (event.sequence > this.lastInsertedSeq) {
         this.lastInsertedSeq = event.sequence;
       }
+      // A retry that succeeds clears any prior skip record so the classifier
+      // doesn't keep treating this seq as untracked.
+      this.skippedSeqs.delete(event.sequence);
 
       if (this.needsFirstCheckpoint && !this.suppressCheckpoints) {
         this.needsFirstCheckpoint = false;
@@ -583,9 +577,26 @@ export class SmtService {
     return replayed;
   }
 
-  /** Highest audit event sequence number that was inserted into the SMT and checkpointed. */
-  getLastCheckpointedSequence(): number {
+  /**
+   * Highest audit event sequence the SMT has accepted as a leaf so far.
+   *
+   * NOTE: this is updated in-memory the moment `onEventAppended` succeeds,
+   * before any checkpoint runs. After a crash between insert and checkpoint
+   * the in-memory value is lost; on next start the restored value is older
+   * than what was actually in memory. Callers that need a durability
+   * guarantee should not use this value.
+   *
+   * Sequences below this value that have no leaf may have been
+   * intentionally skipped by the SMT (frozen leaf, insert rejected) — check
+   * `wasSkipped(seq)` before concluding tampering.
+   */
+  getLastInsertedSequence(): number {
     return this.lastInsertedSeq;
+  }
+
+  /** True if the SMT chose not to track this sequence (frozen leaf or insert rejected). */
+  wasSkipped(seq: number): boolean {
+    return this.skippedSeqs.has(seq);
   }
 
   getCurrentSmtRoot(treeKey?: string): string | null {
@@ -608,6 +619,7 @@ export class SmtService {
           ([tk, epochs]) => [tk, Array.from(epochs)] as const,
         ),
         lastInsertedSeq: this.lastInsertedSeq,
+        skippedSeqs: Array.from(this.skippedSeqs),
       };
       const filePath = join(this.config.checkpointDir, "_metadata.json");
       const tmpPath = filePath + ".tmp";
@@ -620,14 +632,27 @@ export class SmtService {
   }
 
   private async restoreMetadata(): Promise<void> {
+    const filePath = join(this.config.checkpointDir, "_metadata.json");
     let raw: string;
     try {
-      raw = await readFile(
-        join(this.config.checkpointDir, "_metadata.json"),
-        "utf-8",
-      );
-    } catch {
-      return; // No metadata file yet
+      raw = await readFile(filePath, "utf-8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        smtLog.warn(
+          `Metadata file at ${filePath} could not be read (${code ?? "unknown"}); starting from empty state — every event below the next checkpoint will appear "untracked" until the SMT catches up.`,
+        );
+        return;
+      }
+      // ENOENT is expected on a fresh install, but suspicious if the
+      // checkpoint dir already contains tree state (upgrade path that
+      // orphaned the metadata file, or a corrupt half-restore).
+      if (this.manager.listTrees().length > 0) {
+        smtLog.warn(
+          `Metadata file missing at ${filePath} but tree state is present. lastInsertedSeq will start at 0 and every prior event will appear "untracked" until replay catches up — this is the symptom of a checkpointDir change or a partial upgrade.`,
+        );
+      }
+      return;
     }
 
     try {
@@ -669,10 +694,23 @@ export class SmtService {
       const savedSeq = data.lastInsertedSeq ?? data.lastCheckpointedSeq;
       if (typeof savedSeq === "number") {
         this.lastInsertedSeq = savedSeq;
+      } else {
+        smtLog.warn(
+          `Metadata at ${filePath} is missing lastInsertedSeq; starting from 0 — every prior event will appear "untracked" until replay catches up.`,
+        );
+      }
+      if (Array.isArray(data.skippedSeqs)) {
+        this.skippedSeqs = new Set(
+          (data.skippedSeqs as unknown[]).filter(
+            (n): n is number => typeof n === "number",
+          ),
+        );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      smtLog.error(`Metadata restore failed: ${msg}`);
+      smtLog.warn(
+        `Metadata restore failed (${msg}) — starting from empty state. Existing events will appear "untracked" until replay catches up. File: ${filePath}`,
+      );
     }
   }
 
