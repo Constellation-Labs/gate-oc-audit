@@ -1,5 +1,6 @@
 import type { AuditProjection } from "./projection.js";
 import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
+import { formatCronSchedule } from "../services/cron-manifests.js";
 
 /**
  * Self-contained HTML rendering — no external assets, no scripts. The
@@ -55,8 +56,18 @@ function activitySection(p: AuditProjection): string {
 }
 
 function cronSection(p: AuditProjection): string {
-  if (p.cron.byEventType.length === 0) return `<p class="empty">No cron activity.</p>`;
-  return `<p>Executed: <strong>${p.cron.executed}</strong>, failed: <strong>${p.cron.failed}</strong></p>`;
+  const configured = p.cron.configured.length > 0
+    ? `<p>Configured:</p><ul class="cron-configured">${p.cron.configured
+        .map(
+          (c) =>
+            `<li><code>${escape(c.name)}</code> &mdash; <code>${escape(formatCronSchedule(c.schedule))}</code></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="empty">No configured cron manifests found.</p>`;
+  const activity = p.cron.byEventType.length === 0
+    ? `<p class="empty">No cron activity in window.</p>`
+    : `<p>Executed: <strong>${p.cron.executed}</strong>, failed: <strong>${p.cron.failed}</strong></p>`;
+  return configured + activity;
 }
 
 function topToolsSection(p: AuditProjection): string {

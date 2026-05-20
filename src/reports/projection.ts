@@ -1,6 +1,7 @@
 import type { AuditStore } from "../store/audit-store.js";
 import { subtractCalendarDays, type DailyWindow, type WeeklyWindow } from "./time-window.js";
 import { detectDuplicateOutbound, detectFirstSeenTools, type DuplicateOutboundFinding, type MessageSentRow } from "./detectors.js";
+import { listConfiguredCrons, type ConfiguredCron } from "../services/cron-manifests.js";
 
 /**
  * Bumped on any incompatible shape change. The JSON Schema published at
@@ -30,6 +31,10 @@ export interface CronSection {
   executed: number;
   failed: number;
   byEventType: Array<{ eventType: string; count: number }>;
+  /** Openclaw cron manifests (`<jobId>.cron.*.json`) found on the machine
+   *  the report was generated on. Empty when no `openclawDir` is supplied
+   *  or no manifests exist. */
+  configured: ConfiguredCron[];
 }
 
 export interface TopTool {
@@ -115,6 +120,9 @@ export interface BuildProjectionOptions {
   firstSeenLookbackDays?: number;
   /** Cap for the top-N tools section. Default 10. */
   topToolsLimit?: number;
+  /** When supplied, the openclaw root whose `<jobId>.cron.*.json` manifests
+   *  populate `cron.configured`. Omit to render an empty configured list. */
+  openclawDir?: string;
 }
 
 export function buildProjection(
@@ -136,6 +144,7 @@ export function buildProjection(
   const cronByType = store.aggregateCronByEventTypeInWindow(fromIso, toIso);
   const executed = cronByType.find((r) => r.eventType === "cron.executed")?.count ?? 0;
   const failed = cronByType.find((r) => r.eventType === "cron.failed")?.count ?? 0;
+  const configuredCrons = opts.openclawDir ? listConfiguredCrons(opts.openclawDir) : [];
 
   // --- Top tools -------------------------------------------------------
   const allTools = store.aggregateToolInvocationsInWindow(fromIso, toIso);
@@ -227,7 +236,7 @@ export function buildProjection(
       firstSeenLookbackDays: lookbackDays,
     },
     activity: { totalEvents, byCategory },
-    cron: { executed, failed, byEventType: cronByType },
+    cron: { executed, failed, byEventType: cronByType, configured: configuredCrons },
     topTools,
     llmSpend: { totalCalls, totalCostUsd, byModel: llmRows },
     outboundMessaging: { totalSent, byChannel },

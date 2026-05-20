@@ -1,5 +1,6 @@
 import type { AuditProjection } from "./projection.js";
 import { padRight as pad } from "./text-utils.js";
+import { formatCronSchedule } from "../services/cron-manifests.js";
 
 /**
  * Human-readable rendering of an AuditProjection — one screen worth of
@@ -27,6 +28,14 @@ export function formatProjectionText(p: AuditProjection): string {
   lines.push("");
 
   lines.push("=== Cron schedule ===");
+  if (p.cron.configured.length > 0) {
+    lines.push("Configured:");
+    for (const c of p.cron.configured) {
+      lines.push(`  ${pad(c.name, 24)}  ${formatCronSchedule(c.schedule)}`);
+    }
+  } else {
+    lines.push("Configured: (none found)");
+  }
   lines.push(`Executed: ${p.cron.executed}    Failed: ${p.cron.failed}`);
   if (p.cron.byEventType.length === 0) lines.push("  (no cron activity)");
   lines.push("");

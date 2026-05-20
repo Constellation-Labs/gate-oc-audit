@@ -64,7 +64,7 @@
     },
     "cron": {
       "type": "object",
-      "required": ["executed", "failed", "byEventType"],
+      "required": ["executed", "failed", "byEventType", "configured"],
       "additionalProperties": false,
       "properties": {
         "executed": { "type": "integer", "minimum": 0 },
@@ -78,6 +78,61 @@
             "properties": {
               "eventType": { "type": "string" },
               "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "configured": {
+          "type": "array",
+          "description": "Openclaw cron manifests (`<jobId>.cron.*.json`) found in the openclaw root on the machine that generated the report. Empty when the report was generated without filesystem access.",
+          "items": {
+            "type": "object",
+            "required": ["name", "schedule"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "schedule": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": ["kind", "at"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "const": "at" },
+                      "at": { "type": "string" }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "everyMs"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "const": "every" },
+                      "everyMs": { "type": "integer", "minimum": 0 },
+                      "anchorMs": { "type": "integer", "minimum": 0 }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "expr"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "const": "cron" },
+                      "expr": { "type": "string" },
+                      "tz": { "type": "string" },
+                      "staggerMs": { "type": "integer", "minimum": 0 }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "raw"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "const": "unknown" },
+                      "raw": { "type": "string" }
+                    }
+                  }
+                ]
+              }
             }
           }
         }

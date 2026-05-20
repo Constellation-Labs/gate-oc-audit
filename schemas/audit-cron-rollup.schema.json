@@ -4,7 +4,7 @@
   "title": "AuditCronRollup",
   "description": "Per-cron rollup produced by `openclaw audit report cron <job-id>`. One row per cron.executed event for the supplied jobId, paired with its matching agent.end and per-execution activity counters.",
   "type": "object",
-  "required": ["schemaVersion", "generatedAt", "jobId", "truncated", "rows"],
+  "required": ["schemaVersion", "generatedAt", "jobId", "truncated", "rows", "manifest"],
   "additionalProperties": false,
   "properties": {
     "schemaVersion": { "const": 1 },
@@ -64,6 +64,63 @@
           }
         }
       }
+    },
+    "manifest": {
+      "description": "Matching `<jobId>.cron.*.json` manifest from the openclaw root, or null when none was found / no openclawDir was supplied.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["name", "schedule"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "schedule": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["kind", "at"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": { "const": "at" },
+                    "at": { "type": "string" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "everyMs"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": { "const": "every" },
+                    "everyMs": { "type": "integer", "minimum": 0 },
+                    "anchorMs": { "type": "integer", "minimum": 0 }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "expr"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": { "const": "cron" },
+                    "expr": { "type": "string" },
+                    "tz": { "type": "string" },
+                    "staggerMs": { "type": "integer", "minimum": 0 }
+                  }
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "raw"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": { "const": "unknown" },
+                    "raw": { "type": "string" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
   }
 }
