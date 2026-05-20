@@ -1,5 +1,6 @@
 import type { AuditEvent } from "../types/events.js";
 import {gatewayPublisherLog} from "../util/logger.js";
+import { INGEST_PATH } from "./gate-endpoints.js";
 
 const DEFAULT_BATCH_SIZE = 50;
 const MIN_BATCH_SIZE = 1;
@@ -27,8 +28,6 @@ const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
  * success/failure (which are unthrottled) will refresh it sooner if active.
  */
 const DROP_HEALTH_EMIT_MIN_MS = 1000;
-
-const INGEST_PATH = "/v1/audit/ingest";
 
 /**
  * Strip control chars (CR/LF/tab/escape/DEL) and cap to `maxBytes` bytes so

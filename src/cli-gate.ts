@@ -10,17 +10,12 @@ import {
   validateApiKeyOrThrow,
 } from "./services/gate-installer.js";
 import { probeGate } from "./services/gate-client.js";
+import { STAGING_GATE_URL, STAGING_GATE_KEYS_URL } from "./services/gate-endpoints.js";
 import { cliProviderAddOpenAIHandler } from "./cli-provider.js";
 
 /** Env-var fallback for the API key — preferred over `--api-key` in CI
  * since flag values land in `ps`/argv and shell history. */
 const API_KEY_ENV = "OPENCLAW_GATE_API_KEY";
-
-/** Pinned Gate endpoint while the broker is in staging. The interactive
- * wizard no longer prompts for a URL; `--url` remains as an escape hatch
- * for CI / overrides. */
-const STAGING_GATE_URL = "https://api-staging.constellationgate.ai";
-const STAGING_GATE_KEYS_URL = "https://staging.constellationgate.ai/";
 
 /** Write a line to stdout directly. Mirrors `outLine` in cli.ts; see the
  * note there about why we bypass console.log in the CLI dispatch path. */

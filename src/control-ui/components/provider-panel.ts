@@ -122,7 +122,11 @@ export class ProviderPanel extends LitElement {
     }
   }
 
-  private async remove(provider: string): Promise<void> {
+  private async remove(provider: string | undefined): Promise<void> {
+    if (!provider) {
+      this.loadError = "Cannot remove — provider id missing from listing";
+      return;
+    }
     if (!confirm(`Remove all profiles for provider '${provider}'? This is destructive.`)) return;
     try {
       await removeProvider(provider);

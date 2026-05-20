@@ -222,7 +222,7 @@ describe("/api/gate/test", () => {
   it("probes the saved Gate when called with no body", async () => {
     const mock = await bootMockGate((req, res) => {
       assert.equal(req.method, "POST");
-      assert.equal(req.url, "/api/v1/audit/ingest");
+      assert.equal(req.url, "/v1/audit/ingest");
       res.statusCode = 200;
       res.end('{"accepted":0}');
     });

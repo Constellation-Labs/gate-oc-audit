@@ -8,12 +8,7 @@ import {
   type GateProbeResult,
   type GateStatus,
 } from "../api.ts";
-
-/** Pinned Gate endpoint while the broker is in staging. Mirrors the CLI's
- * STAGING_GATE_URL in src/cli-gate.ts — keep them in sync. */
-const STAGING_GATE_URL = "https://api-staging.constellationgate.ai";
-/** Where operators issue API keys for the staging Gate. */
-const STAGING_GATE_KEYS_URL = "https://staging.constellationgate.ai/";
+import { STAGING_GATE_URL, STAGING_GATE_KEYS_URL } from "../../services/gate-endpoints.js";
 
 @customElement("gate-setup")
 export class GateSetup extends LitElement {

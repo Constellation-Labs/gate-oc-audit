@@ -42,9 +42,15 @@ export function cliProviderListHandler(opts: ProviderListOptions): void {
 
   // Walk every provider in the store; openclaw owns the canonical list
   // of providers, but the audit plugin only knows about OpenAI today.
-  const profileIds = new Set<string>();
+  // Track the provider each id was found under — the SDK doesn't always
+  // stamp `cred.provider` on the credential itself (OAuth profiles are
+  // indexed by provider, not labelled), so falling back to the lookup
+  // key keeps the output usable instead of printing `undefined`.
+  const providerById = new Map<string, string>();
   for (const provider of [OPENAI_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID]) {
-    for (const id of listProfilesForProvider(store, provider)) profileIds.add(id);
+    for (const id of listProfilesForProvider(store, provider)) {
+      if (!providerById.has(id)) providerById.set(id, provider);
+    }
   }
 
   const rows: Array<{
@@ -55,12 +61,12 @@ export function cliProviderListHandler(opts: ProviderListOptions): void {
     displayName?: string;
     expiresAt?: string;
   }> = [];
-  for (const id of profileIds) {
+  for (const [id, provider] of providerById) {
     const cred = store.profiles?.[id];
     if (!cred) continue;
     const row: typeof rows[number] = {
       profileId: id,
-      provider: cred.provider,
+      provider: typeof cred.provider === "string" && cred.provider.length > 0 ? cred.provider : provider,
       type: cred.type,
     };
     if (cred.email) row.email = cred.email;

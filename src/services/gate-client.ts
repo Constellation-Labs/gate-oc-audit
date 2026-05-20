@@ -1,7 +1,7 @@
 import { getMachineId } from "../util/machine-id.js";
+import { INGEST_PATH } from "./gate-endpoints.js";
 import { sanitizeForLog } from "./gateway-publisher.js";
 
-const INGEST_PATH = "/api/v1/audit/ingest";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export interface ProbeOptions {
@@ -27,7 +27,7 @@ export type ProbeResult =
  * One HTTP request, no retries, hard timeout — this is a fast confidence
  * check during install, not a long-running poller. The probe POSTs
  * `{ machineId, events: [] }` (matching what the runtime gateway
- * publisher will send) to `<baseUrl>/api/v1/audit/ingest`. swarm-deck's
+ * publisher will send) to `<baseUrl>/v1/audit/ingest`. swarm-deck's
  * audit-ingest controller treats an empty `events` array as a no-op —
  * the API key and URL round-trip without writing anything server-side.
  *

@@ -927,15 +927,25 @@ async function handleApi(
     let store;
     try { store = ensureAuthProfileStore(agentDir); }
     catch (err) { sendError(res, 500, err instanceof Error ? err.message : "auth-profile store error"); return true; }
-    const profileIds = new Set<string>();
+    // Track which provider each profile was discovered under. The SDK
+    // doesn't always stamp `cred.provider` (OAuth credentials in
+    // particular are looked up *by* provider, not labelled), so trusting
+    // the credential's own field surfaces `undefined` in the UI.
+    const providerById = new Map<string, string>();
     for (const provider of ["openai", "openai-codex"]) {
-      for (const id of listProfilesForProvider(store, provider)) profileIds.add(id);
+      for (const id of listProfilesForProvider(store, provider)) {
+        if (!providerById.has(id)) providerById.set(id, provider);
+      }
     }
     const profiles = [];
-    for (const id of profileIds) {
+    for (const [id, provider] of providerById) {
       const cred = store.profiles?.[id];
       if (!cred) continue;
-      const row: Record<string, unknown> = { profileId: id, provider: cred.provider, type: cred.type };
+      const row: Record<string, unknown> = {
+        profileId: id,
+        provider: typeof cred.provider === "string" && cred.provider.length > 0 ? cred.provider : provider,
+        type: cred.type,
+      };
       if (cred.email) row.email = cred.email;
       if (cred.displayName) row.displayName = cred.displayName;
       if ((cred.type === "oauth" || cred.type === "token") && typeof cred.expires === "number") {
