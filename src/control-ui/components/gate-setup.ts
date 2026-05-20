@@ -9,6 +9,12 @@ import {
   type GateStatus,
 } from "../api.ts";
 
+/** Pinned Gate endpoint while the broker is in staging. Mirrors the CLI's
+ * STAGING_GATE_URL in src/cli-gate.ts — keep them in sync. */
+const STAGING_GATE_URL = "https://api-staging.constellationgate.ai";
+/** Where operators issue API keys for the staging Gate. */
+const STAGING_GATE_KEYS_URL = "https://staging.constellationgate.ai/";
+
 @customElement("gate-setup")
 export class GateSetup extends LitElement {
   static styles = css`
@@ -117,7 +123,7 @@ export class GateSetup extends LitElement {
       color: var(--fg-dim);
       line-height: 1.5;
     }
-    .help code {
+    .help code, .result code {
       font-family: var(--mono);
       background: var(--bg-elev2);
       padding: 1px 4px;
@@ -129,7 +135,7 @@ export class GateSetup extends LitElement {
   @state() private statusError?: string;
   @state() private loadingStatus = false;
 
-  @state() private url = "";
+  @state() private url = STAGING_GATE_URL;
   @state() private apiKey = "";
   @state() private registerBroker = true;
   @state() private allowPrivateHost = false;
@@ -203,10 +209,10 @@ export class GateSetup extends LitElement {
   }
 
   private async runInstall() {
-    const url = this.url.trim();
+    const url = this.url.trim() || STAGING_GATE_URL;
     const apiKey = this.apiKey.trim();
-    if (!url || !apiKey) {
-      this.installError = "URL and API key are both required";
+    if (!apiKey) {
+      this.installError = "API key is required";
       return;
     }
     this.installing = true;
@@ -237,12 +243,16 @@ export class GateSetup extends LitElement {
       <h2>Install / update connection</h2>
       <section>
         <form @submit=${(e: Event) => { e.preventDefault(); void this.runInstall(); }}>
-          <label>Gate URL
-            <input type="text" placeholder="https://gate.example.com"
-              .value=${this.url}
-              autocomplete="off"
-              @input=${(e: Event) => { this.url = (e.target as HTMLInputElement).value; }} />
-          </label>
+          <div class="row">
+            <span class="k">Gate URL</span>
+            <span class="v">${STAGING_GATE_URL}</span>
+          </div>
+          <p class="hint">
+            Staging is the only supported Gate endpoint right now. Create an
+            API key at
+            <a href=${STAGING_GATE_KEYS_URL} target="_blank" rel="noopener noreferrer">${STAGING_GATE_KEYS_URL}</a>
+            and paste it below.
+          </p>
           <label>Gate API key
             <input type="password" placeholder="sk-gw-…"
               .value=${this.apiKey}
@@ -319,6 +329,13 @@ export class GateSetup extends LitElement {
           ? html`<p>Config already up to date — no changes.</p>`
           : html`<ul class="changes">${r.changes.map((c) => html`<li>+ ${c}</li>`)}</ul>`}
         <p style="margin-top:6px">Probe: ${r.probe}</p>
+        <p style="margin-top:10px">
+          Next: configure an OpenAI provider.
+          <a href="#/providers">Open the Providers tab</a>
+          to add an API key, or run
+          <code>openclaw audit gate provider add openai --oauth</code>
+          from a terminal for ChatGPT sign-in.
+        </p>
       </div>
     `;
   }

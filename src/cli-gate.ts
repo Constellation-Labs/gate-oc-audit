@@ -10,10 +10,17 @@ import {
   validateApiKeyOrThrow,
 } from "./services/gate-installer.js";
 import { probeGate } from "./services/gate-client.js";
+import { cliProviderAddOpenAIHandler } from "./cli-provider.js";
 
 /** Env-var fallback for the API key — preferred over `--api-key` in CI
  * since flag values land in `ps`/argv and shell history. */
 const API_KEY_ENV = "OPENCLAW_GATE_API_KEY";
+
+/** Pinned Gate endpoint while the broker is in staging. The interactive
+ * wizard no longer prompts for a URL; `--url` remains as an escape hatch
+ * for CI / overrides. */
+const STAGING_GATE_URL = "https://api-staging.constellationgate.ai";
+const STAGING_GATE_KEYS_URL = "https://staging.constellationgate.ai/";
 
 /** Write a line to stdout directly. Mirrors `outLine` in cli.ts; see the
  * note there about why we bypass console.log in the CLI dispatch path. */
@@ -49,10 +56,14 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
   // Default broker on; --no-broker sets broker=false explicitly.
   const registerBroker = opts.broker !== false;
 
-  if ((!url || !apiKey) && !interactive) {
+  // While the broker is in staging the wizard pins the URL. CI / scripted
+  // callers can still override via --url; only the URL prompt is gone.
+  if (!url) url = STAGING_GATE_URL;
+
+  if (!apiKey && !interactive) {
     errLine(
       `audit gate install: missing inputs in non-interactive mode. ` +
-      `Provide --url and one of --api-key / --api-key-stdin / $${API_KEY_ENV}.`,
+      `Provide one of --api-key / --api-key-stdin / $${API_KEY_ENV}.`,
     );
     process.exitCode = 1;
     return;
@@ -61,8 +72,11 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
   if (interactive) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      if (!url) url = (await rl.question("Gate URL (https://…): ")).trim();
-      if (!apiKey) apiKey = await promptSecret(rl, "Gate API key: ");
+      if (!apiKey) {
+        outLine(`Gate URL: ${url}`);
+        outLine(`Create an API key at ${STAGING_GATE_KEYS_URL} and paste it below.`);
+        apiKey = await promptSecret(rl, "Gate API key: ");
+      }
     } catch (err) {
       // Ctrl-C / stdin EOF inside the prompt — exit clean with the
       // shell-conventional 130 code, no stack trace, no unhandled
@@ -78,8 +92,8 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
     }
   }
 
-  if (!url || !apiKey) {
-    errLine("audit gate install: missing URL or API key");
+  if (!apiKey) {
+    errLine("audit gate install: missing API key");
     process.exitCode = 1;
     return;
   }
@@ -116,9 +130,37 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
       outLine("Probe: skipped");
     }
     outLine("Restart openclaw for changes to take effect.");
+
+    if (interactive) {
+      await maybeRunOpenAIOAuthFollowup(opts.openclawDir);
+    }
   } catch (err) {
     handleError(err, opts.json === true);
   }
+}
+
+/** Post-install nudge: offer to configure OpenAI OAuth so the operator
+ * doesn't have to remember `audit gate provider add openai --oauth` as a
+ * separate step. Skipped in --yes / --json / non-TTY paths to keep the
+ * scripted contract unchanged. */
+async function maybeRunOpenAIOAuthFollowup(openclawDir: string | undefined): Promise<void> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let answer: string;
+  try {
+    answer = (await rl.question("Configure OpenAI (ChatGPT) OAuth now? [y/N]: ")).trim().toLowerCase();
+  } catch {
+    // Ctrl-C / EOF at the follow-up prompt — treat as "skip", install
+    // already succeeded.
+    rl.close();
+    return;
+  } finally {
+    rl.close();
+  }
+  if (answer !== "y" && answer !== "yes") {
+    outLine("Skipped. Run `openclaw audit gate provider add openai --oauth` later if you change your mind.");
+    return;
+  }
+  await cliProviderAddOpenAIHandler({ oauth: true, openclawDir });
 }
 
 export interface AuditGateStatusOptions {
