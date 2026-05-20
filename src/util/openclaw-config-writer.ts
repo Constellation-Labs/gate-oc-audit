@@ -299,3 +299,4 @@ export function applyBrokerProviderPatch(content: JsonObject, patch: BrokerProvi
   }
   return changes;
 }
+

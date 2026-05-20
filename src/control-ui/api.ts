@@ -168,3 +168,105 @@ export function verifyRange(from: string, to: string): Promise<VerifyResult> {
     body: JSON.stringify({ from, to }),
   });
 }
+
+export interface GateStatus {
+  configPath: string;
+  configured: boolean;
+  url?: string;
+  hasApiKey: boolean;
+  allowlisted: boolean;
+  conversationAccess: boolean;
+  enabled?: boolean;
+  brokerProviderKey?: string;
+}
+
+export function getGateStatus(): Promise<GateStatus> {
+  return fetchJson<GateStatus>("gate/status");
+}
+
+export type GateProbeResult =
+  | { kind: "ok"; status: number }
+  | { kind: "unauthorized"; status: number; body: string }
+  | { kind: "http-error"; status: number; body: string }
+  | { kind: "network-error"; message: string };
+
+export interface GateTestRequest {
+  url?: string;
+  apiKey?: string;
+  /** Allow probing a saved Gate whose URL is on a private/link-local
+   * host. Mirrors the install-time flag. */
+  allowPrivateHost?: boolean;
+}
+
+export function testGate(req: GateTestRequest = {}): Promise<{ url: string; result: GateProbeResult }> {
+  return fetchJson("gate/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export interface GateInstallRequest {
+  url: string;
+  apiKey: string;
+  registerBroker?: boolean;
+  allowPrivateHost?: boolean;
+  skipProbe?: boolean;
+}
+
+export interface GateInstallResponse {
+  configPath: string;
+  changes: string[];
+  /** Install converts every non-ok probe outcome into a 400 (the
+   * installer throws), so the success response can only carry these
+   * two values. */
+  probe: "ok" | "skipped";
+}
+
+export function installGate(req: GateInstallRequest): Promise<GateInstallResponse> {
+  return fetchJson<GateInstallResponse>("gate/install", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+export interface ProviderRow {
+  /** Profile ID inside the SDK auth-profile store. */
+  profileId: string;
+  /** Provider this profile authenticates against (e.g. "openai"). */
+  provider: string;
+  /** Credential type. */
+  type: "api_key" | "oauth" | "token";
+  email?: string;
+  displayName?: string;
+  /** ISO-8601 expiry when the credential is an oauth/token. */
+  expiresAt?: string;
+}
+
+export function listProviders(): Promise<{ profiles: ProviderRow[] }> {
+  return fetchJson<{ profiles: ProviderRow[] }>("gate/providers");
+}
+
+export interface AddOpenAIProviderRequest {
+  kind: "openai";
+  apiKey: string;
+}
+
+export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ ok: true; profileId: string; provider: string; mode: "api_key" }> {
+  return fetchJson("gate/providers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+/** Removes ALL profiles for the given provider. The SDK doesn't expose
+ * per-profile removal; the API key form re-adds an OpenAI profile in
+ * one click if you change your mind. */
+export function removeProvider(provider: string): Promise<{ ok: true; provider: string }> {
+  return fetchJson(`gate/providers/${encodeURIComponent(provider)}`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+  });
+}

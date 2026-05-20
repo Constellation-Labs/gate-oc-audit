@@ -67,6 +67,29 @@ openclaw audit gate status     # read-only view of current config
 openclaw audit gate test       # re-probe the configured URL/key
 ```
 
+The same flow is available in the control UI under the **Gate** tab (`/plugins/audit/#/gate`). The browser form posts to `/api/gate/install` and `/api/gate/test`; `GET /api/gate/status` returns the same shape as `audit gate status --json` (and never includes the API-key value — only `hasApiKey: boolean`). The two mutation endpoints are disabled when the gateway binds beyond loopback unless the operator sets `allowGateMutationOnNonLoopback: true`, and reject cross-origin requests via a Content-Type + Origin + Sec-Fetch-Site check so a malicious browser tab on the same machine can't forge an install. The UI also sends `X-Frame-Options: DENY` to defeat iframe-based UI-redress.
+
+### LLM providers
+
+Configure OpenAI as a model provider that openclaw can route to. The plugin delegates credential storage to the openclaw SDK's auth-profile store — refresh, rotation, and discovery are handled by openclaw itself.
+
+```bash
+# API key (sk-…). Pipe via stdin or env var to keep it out of argv:
+echo "$OPENAI_API_KEY" | openclaw audit gate provider add openai --api-key-stdin
+OPENCLAW_OPENAI_API_KEY=sk-… openclaw audit gate provider add openai
+
+# OAuth (ChatGPT-account sign-in — CLI wizard with browser launch):
+openclaw audit gate provider add openai --oauth
+
+# Inspect / remove:
+openclaw audit gate provider list
+openclaw audit gate provider remove openai      # removes all 'openai' profiles
+```
+
+The OAuth flow runs as a CLI wizard backed by openclaw's own `loginOpenAICodexOAuth` helper — the same flow `openclaw` uses internally for Codex sign-in. The plugin attempts to launch your browser via the SDK's `openUrl` helper; if that fails (headless host, no `DISPLAY`, etc.) the URL is printed for copy-paste. Sign in, OAuth credentials are written to the openclaw auth-profile store, and the provider entry in `models.providers.openai` is updated to resolve through that profile.
+
+The control UI under the **Providers** tab (`/plugins/audit/#/providers`) handles the API-key path and lists configured profiles. OAuth sign-in is CLI-only because the SDK's flow is wizard-driven, not HTTP-pollable; run `openclaw audit gate provider add openai --oauth` from a terminal on the same machine.
+
 If you'd rather edit config by hand, the manual instructions below are still authoritative.
 
 ### Required openclaw config (openclaw ≥ 2026.4.24)

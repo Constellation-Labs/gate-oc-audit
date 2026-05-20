@@ -20,6 +20,28 @@ import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from
 import { buildProjection } from "../reports/projection.js";
 import { formatProjectionHtml } from "../reports/format-html.js";
 import { buildCronRollup, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "../reports/cron-rollup.js";
+import {
+  GateInstallError,
+  installGate,
+  normalizeAndValidateUrl,
+  readGateStatus,
+  readSavedGatewayApiKey,
+  validateApiKeyOrThrow,
+} from "../services/gate-installer.js";
+import { probeGate } from "../services/gate-client.js";
+import {
+  readOpenclawConfig,
+  writeOpenclawConfig,
+} from "../util/openclaw-config-writer.js";
+import {
+  applyAuthProfileConfig,
+  ensureAuthProfileStore,
+  listProfilesForProvider,
+  removeProviderAuthProfilesWithLock,
+  upsertApiKeyProfile,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/provider-auth";
+import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -64,6 +86,15 @@ interface AuditUiContext {
    * from the HTTP response.
    */
   openclawDir?: string;
+  /**
+   * Operator opt-in to keep the mutation endpoints `/api/gate/install`
+   * and `/api/gate/test` enabled when the gateway binds beyond loopback.
+   * Off by default — these endpoints write the operator's Gate API key
+   * to ~/.openclaw/config.json (install) and emit outbound HTTP probes
+   * with that key (test); both are credential-handling paths that
+   * shouldn't accept arbitrary network input.
+   */
+  allowGateMutationOnNonLoopback: boolean;
 }
 
 /**
@@ -111,6 +142,16 @@ function setSecurityHeaders(res: ServerResponse): void {
   res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
 }
 
+/** Clickjacking + framing defense: refuse to be embedded in a cross-
+ * origin iframe. Set on every JSON response and on static HTML so a
+ * malicious page can't overlay the Gate setup form with a transparent
+ * UI-redress attack. CSP is the modern equivalent; both are sent
+ * because older proxies sometimes drop one or the other. */
+function setSecurityHeaders(res: ServerResponse): void {
+  res.setHeader("x-frame-options", "DENY");
+  res.setHeader("content-security-policy", "frame-ancestors 'none'");
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
   res.statusCode = status;
@@ -118,6 +159,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-length", String(buf.length));
   res.setHeader("cache-control", "no-store");
+  setSecurityHeaders(res);
   res.end(buf);
 }
 
@@ -159,6 +201,89 @@ function parseUrl(req: IncomingMessage): URL | undefined {
 }
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+/**
+ * Origin-bind CSRF defense for mutating / IO-driving routes. The audit
+ * UI is served from the same loopback origin as the gateway, so a
+ * legitimate POST from the SPA carries:
+ *   - `Content-Type: application/json` (Lit fetch in api.ts always sets it)
+ *   - `Origin` matching the request's `Host`
+ *   - `Sec-Fetch-Site: same-origin` or `none` (set by all modern browsers)
+ *
+ * A cross-origin tab cannot reproduce all three without a CORS
+ * preflight (which we never honor). Returns true to continue, false
+ * after writing a 403 — short-circuit the route on false.
+ *
+ * Not applied to GET endpoints. The browser SOP already prevents a
+ * cross-origin tab from reading their responses; the only residual
+ * exposure (heavy CPU/DB work triggered by a forged GET) is gated
+ * behind the existing `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback`
+ * opt-ins.
+ */
+function requireSameOriginJsonPost(req: IncomingMessage, res: ServerResponse): boolean {
+  const ct = req.headers["content-type"];
+  if (typeof ct !== "string" || !ct.toLowerCase().split(";", 1)[0].trim().startsWith("application/json")) {
+    sendError(res, 415, "Content-Type must be application/json");
+    return false;
+  }
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && origin.length > 0 && origin !== "null") {
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch {
+      sendError(res, 403, "Origin header is malformed");
+      return false;
+    }
+    const host = req.headers.host;
+    if (typeof host !== "string" || parsed.host !== host) {
+      sendError(res, 403, "cross-origin request rejected (Origin does not match Host)");
+      return false;
+    }
+  }
+  // Sec-Fetch-Site is set by Chromium/Firefox/Safari for all fetch+XHR
+  // requests since 2020. `same-origin` (Lit UI) and `none` (curl,
+  // server-side) are acceptable; `cross-site` / `same-site` are not.
+  const sfs = req.headers["sec-fetch-site"];
+  if (typeof sfs === "string" && sfs !== "same-origin" && sfs !== "none") {
+    sendError(res, 403, "cross-site request rejected (Sec-Fetch-Site)");
+    return false;
+  }
+  return true;
+}
+
+/** Parse a JSON body or write 400 and return null. Collapses the
+ * repeated try/catch+typeof prologue used by every POST handler. */
+async function readJsonOr400(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+    return null;
+  }
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+  return {};
+}
+
+/** Read a string field from a parsed body, trimming whitespace and
+ * treating empty / missing / non-string as undefined. */
+function bodyStr(b: Record<string, unknown>, key: string): string | undefined {
+  const v = b[key];
+  if (typeof v !== "string") return undefined;
+  const trimmed = v.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/** Strict-boolean read: only literal `true` / `false` pass through;
+ * everything else is `undefined`. Caller picks the default explicitly. */
+function bodyBool(b: Record<string, unknown>, key: string): boolean | undefined {
+  const v = b[key];
+  return v === true || v === false ? v : undefined;
+}
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -437,6 +562,7 @@ async function handleApi(
       );
       return true;
     }
+    if (!requireSameOriginJsonPost(req, res)) return true;
     if (ctx.concurrency.verifies >= MAX_CONCURRENT_VERIFIES) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_VERIFIES} concurrent verifies allowed`);
@@ -664,7 +790,240 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/gate/status — redacted summary of the operator's Gate config.
+  // Never returns the API key value; only `hasApiKey: boolean`.
+  if (apiPath === "gate/status" && req.method === "GET") {
+    const status = readGateStatus(ctx.openclawDir);
+    sendJson(res, 200, status);
+    return true;
+  }
+
+  // POST /api/gate/test — body { url?, apiKey?, allowPrivateHost? }.
+  // If url+apiKey are not both supplied, fall back to the saved config.
+  // PR-1 exfil guard: when only `url` is supplied, refuse to load the
+  // saved key (or it'd get POSTed to the request-supplied URL).
+  if (apiPath === "gate/test" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit gate test is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowGateMutationOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+
+    const urlOverride = bodyStr(b, "url");
+    let apiKey = bodyStr(b, "apiKey");
+    let url = urlOverride;
+    const allowPrivateHost = bodyBool(b, "allowPrivateHost") === true;
+
+    if (urlOverride && !apiKey) {
+      sendError(
+        res,
+        400,
+        "url override requires apiKey; the saved API key is never sent to a non-configured URL",
+      );
+      return true;
+    }
+    if (!url || !apiKey) {
+      const status = readGateStatus(ctx.openclawDir);
+      if (!status.configured) {
+        sendError(res, 400, "Gate is not configured. POST /api/gate/install first.");
+        return true;
+      }
+      url = url ?? status.url;
+      if (!apiKey) {
+        try {
+          apiKey = readSavedGatewayApiKey(ctx.openclawDir);
+        } catch (err) {
+          sendError(res, 500, err instanceof Error ? err.message : "config read error");
+          return true;
+        }
+      }
+    }
+    if (!url || !apiKey) {
+      // Should be unreachable given the branches above, but keeps the
+      // type narrowing honest and avoids a silent 200 with a probe of
+      // undefined values if a future refactor breaks an invariant.
+      sendError(res, 500, "could not resolve URL or API key");
+      return true;
+    }
+    try {
+      url = normalizeAndValidateUrl(url, allowPrivateHost);
+      apiKey = validateApiKeyOrThrow(apiKey);
+    } catch (err) {
+      if (err instanceof GateInstallError) {
+        sendError(res, 400, err.message);
+        return true;
+      }
+      throw err;
+    }
+    const result = await probeGate(url, apiKey);
+    sendJson(res, 200, { url, result });
+    return true;
+  }
+
+  // POST /api/gate/install — body { url, apiKey, registerBroker?,
+  // allowPrivateHost?, skipProbe? }. Writes Gate config to disk.
+  if (apiPath === "gate/install" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit gate install is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowGateMutationOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+
+    const url = bodyStr(b, "url");
+    const apiKey = bodyStr(b, "apiKey");
+    if (!url || !apiKey) {
+      sendError(res, 400, "url and apiKey are required (non-empty strings)");
+      return true;
+    }
+    try {
+      const report = await installGate({
+        url,
+        apiKey,
+        // Strict boolean: only explicit `false` opts out. Truthy
+        // non-bool values (null, "false", 0) are ignored.
+        registerBroker: bodyBool(b, "registerBroker") !== false,
+        allowPrivateHost: bodyBool(b, "allowPrivateHost") === true,
+        skipProbe: bodyBool(b, "skipProbe") === true,
+        openclawDir: ctx.openclawDir,
+      });
+      sendJson(res, 200, {
+        configPath: report.configPath,
+        changes: report.changes,
+        // installGate throws on every non-ok probe outcome, so the
+        // only values we can actually send here are "ok" and "skipped".
+        // The client union is narrowed to match.
+        probe: report.probe?.kind === "ok" ? "ok" : "skipped",
+      });
+    } catch (err) {
+      if (err instanceof GateInstallError) {
+        sendError(res, 400, err.message);
+        return true;
+      }
+      throw err;
+    }
+    return true;
+  }
+
+  // GET /api/gate/providers — list configured OpenAI auth profiles.
+  // Returns profile metadata only (type / email / displayName / expiry);
+  // never echoes the API key value or the OAuth refresh token. The
+  // SDK's auth-profile store is the single source of truth.
+  if (apiPath === "gate/providers" && req.method === "GET") {
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let store;
+    try { store = ensureAuthProfileStore(agentDir); }
+    catch (err) { sendError(res, 500, err instanceof Error ? err.message : "auth-profile store error"); return true; }
+    const profileIds = new Set<string>();
+    for (const provider of ["openai", "openai-codex"]) {
+      for (const id of listProfilesForProvider(store, provider)) profileIds.add(id);
+    }
+    const profiles = [];
+    for (const id of profileIds) {
+      const cred = store.profiles?.[id];
+      if (!cred) continue;
+      const row: Record<string, unknown> = { profileId: id, provider: cred.provider, type: cred.type };
+      if (cred.email) row.email = cred.email;
+      if (cred.displayName) row.displayName = cred.displayName;
+      if ((cred.type === "oauth" || cred.type === "token") && typeof cred.expires === "number") {
+        row.expiresAt = new Date(cred.expires).toISOString();
+      }
+      profiles.push(row);
+    }
+    sendJson(res, 200, { profiles });
+    return true;
+  }
+
+  // POST /api/gate/providers — body { kind: "openai", apiKey }.
+  // OAuth sign-in is intentionally CLI-only (the SDK's flow is a TUI
+  // wizard, not HTTP-pollable). API-key entry goes through
+  // upsertApiKeyProfile → applyAuthProfileConfig.
+  if (apiPath === "gate/providers" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+    const kind = bodyStr(b, "kind");
+    if (kind !== "openai") {
+      sendError(res, 400, "only kind: 'openai' is supported in this release");
+      return true;
+    }
+    const apiKey = bodyStr(b, "apiKey");
+    if (!apiKey) { sendError(res, 400, "apiKey is required (non-empty string)"); return true; }
+    if (/\s/.test(apiKey)) { sendError(res, 400, "apiKey contains whitespace"); return true; }
+
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let profileId: string;
+    try {
+      profileId = upsertApiKeyProfile({ provider: "openai", input: apiKey, agentDir });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "upsert failed");
+      return true;
+    }
+    try {
+      applyProviderProfileToConfig(agentDir, { profileId, provider: "openai", mode: "api_key" });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "config write failed");
+      return true;
+    }
+    sendJson(res, 200, { ok: true, profileId, provider: "openai", mode: "api_key" });
+    return true;
+  }
+
+  // DELETE /api/gate/providers/<provider> — remove all profiles for a
+  // provider. Refuses the conventional 'gate' broker key (owned by
+  // `audit gate install`).
+  if (apiPath.startsWith("gate/providers/") && req.method === "DELETE") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const provider = decodeURIComponent(apiPath.slice("gate/providers/".length));
+    if (!provider) { sendError(res, 400, "missing provider id"); return true; }
+    if (provider === "gate") {
+      sendError(res, 400, "the 'gate' provider is managed by `audit gate install`");
+      return true;
+    }
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    try {
+      await removeProviderAuthProfilesWithLock({ provider, agentDir });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "remove failed");
+      return true;
+    }
+    sendJson(res, 200, { ok: true, provider });
+    return true;
+  }
+
   return false;
+}
+
+/** Read config → applyAuthProfileConfig → write back. */
+function applyProviderProfileToConfig(
+  agentDir: string,
+  params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token"; email?: string },
+): void {
+  const file = readOpenclawConfig(agentDir);
+  const cfg = file.content as unknown as OpenClawConfig;
+  const next = applyAuthProfileConfig(cfg, params);
+  writeOpenclawConfig(file.path, next as unknown as typeof file.content);
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {
@@ -679,6 +1038,7 @@ async function handleStatic(
   res: ServerResponse,
   uiPath: string,
 ): Promise<boolean> {
+  setSecurityHeaders(res);
   // Strip leading slash; empty path => index.html
   const requestPath = uiPath.replace(/^\/+/, "") || "index.html";
   const served = await serveStaticFile(req, res, STATIC_ROOT, requestPath);
@@ -709,6 +1069,8 @@ export interface AuditUiOptions {
   allowExportOnNonLoopback?: boolean;
   /** Operator opt-in to keep /api/verify available when bound beyond loopback. */
   allowVerifyOnNonLoopback?: boolean;
+  /** Operator opt-in to keep /api/gate/{install,test} available when bound beyond loopback. */
+  allowGateMutationOnNonLoopback?: boolean;
   /** Openclaw root used to populate `cron.configured` in /api/report. */
   openclawDir?: string;
 }
@@ -731,6 +1093,7 @@ export function registerAuditUiRoutes(
     isNonLoopback: opts.isNonLoopback ?? (() => false),
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
+    allowGateMutationOnNonLoopback: opts.allowGateMutationOnNonLoopback === true,
     openclawDir: opts.openclawDir,
   };
 

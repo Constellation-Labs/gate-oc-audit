@@ -252,3 +252,26 @@ export function readGateStatus(openclawDirOverride?: string): StatusReport {
     brokerProviderKey,
   };
 }
+
+/**
+ * Re-read the on-disk gateway API key for the test/probe fallback path.
+ * `readGateStatus` reports `hasApiKey: boolean` only to keep the key out
+ * of status output — callers that need the actual value (CLI `audit
+ * gate test`, HTTP `/api/gate/test`) go through this helper. Errors
+ * propagate so callers can surface a clear "config is broken"
+ * diagnostic instead of a misleading "could not resolve" message.
+ */
+export function readSavedGatewayApiKey(openclawDirOverride?: string): string | undefined {
+  const dir = resolveOpenclawDir({ openclawDir: openclawDirOverride });
+  const file = readOpenclawConfig(dir);
+  const plugins = file.content.plugins;
+  if (!isJsonObject(plugins)) return undefined;
+  const entries = plugins.entries;
+  if (!isJsonObject(entries)) return undefined;
+  const entry = entries[PLUGIN_ID];
+  if (!isJsonObject(entry)) return undefined;
+  const cfg = entry.config;
+  if (!isJsonObject(cfg)) return undefined;
+  const key = cfg.gatewayApiKey;
+  return typeof key === "string" ? key : undefined;
+}
