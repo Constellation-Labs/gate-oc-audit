@@ -29,6 +29,19 @@ import {
   validateApiKeyOrThrow,
 } from "../services/gate-installer.js";
 import { probeGate } from "../services/gate-client.js";
+import {
+  readOpenclawConfig,
+  writeOpenclawConfig,
+} from "../util/openclaw-config-writer.js";
+import {
+  applyAuthProfileConfig,
+  ensureAuthProfileStore,
+  listProfilesForProvider,
+  removeProviderAuthProfilesWithLock,
+  upsertApiKeyProfile,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/provider-auth";
+import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -825,7 +838,112 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/gate/providers — list configured OpenAI auth profiles.
+  // Returns profile metadata only (type / email / displayName / expiry);
+  // never echoes the API key value or the OAuth refresh token. The
+  // SDK's auth-profile store is the single source of truth.
+  if (apiPath === "gate/providers" && req.method === "GET") {
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let store;
+    try { store = ensureAuthProfileStore(agentDir); }
+    catch (err) { sendError(res, 500, err instanceof Error ? err.message : "auth-profile store error"); return true; }
+    const profileIds = new Set<string>();
+    for (const provider of ["openai", "openai-codex"]) {
+      for (const id of listProfilesForProvider(store, provider)) profileIds.add(id);
+    }
+    const profiles = [];
+    for (const id of profileIds) {
+      const cred = store.profiles?.[id];
+      if (!cred) continue;
+      const row: Record<string, unknown> = { profileId: id, provider: cred.provider, type: cred.type };
+      if (cred.email) row.email = cred.email;
+      if (cred.displayName) row.displayName = cred.displayName;
+      if ((cred.type === "oauth" || cred.type === "token") && typeof cred.expires === "number") {
+        row.expiresAt = new Date(cred.expires).toISOString();
+      }
+      profiles.push(row);
+    }
+    sendJson(res, 200, { profiles });
+    return true;
+  }
+
+  // POST /api/gate/providers — body { kind: "openai", apiKey }.
+  // OAuth sign-in is intentionally CLI-only (the SDK's flow is a TUI
+  // wizard, not HTTP-pollable). API-key entry goes through
+  // upsertApiKeyProfile → applyAuthProfileConfig.
+  if (apiPath === "gate/providers" && req.method === "POST") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const b = await readJsonOr400(req, res);
+    if (!b) return true;
+    const kind = bodyStr(b, "kind");
+    if (kind !== "openai") {
+      sendError(res, 400, "only kind: 'openai' is supported in this release");
+      return true;
+    }
+    const apiKey = bodyStr(b, "apiKey");
+    if (!apiKey) { sendError(res, 400, "apiKey is required (non-empty string)"); return true; }
+    if (/\s/.test(apiKey)) { sendError(res, 400, "apiKey contains whitespace"); return true; }
+
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    let profileId: string;
+    try {
+      profileId = upsertApiKeyProfile({ provider: "openai", input: apiKey, agentDir });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "upsert failed");
+      return true;
+    }
+    try {
+      applyProviderProfileToConfig(agentDir, { profileId, provider: "openai", mode: "api_key" });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "config write failed");
+      return true;
+    }
+    sendJson(res, 200, { ok: true, profileId, provider: "openai", mode: "api_key" });
+    return true;
+  }
+
+  // DELETE /api/gate/providers/<provider> — remove all profiles for a
+  // provider. Refuses the conventional 'gate' broker key (owned by
+  // `audit gate install`).
+  if (apiPath.startsWith("gate/providers/") && req.method === "DELETE") {
+    if (ctx.isNonLoopback() && !ctx.allowGateMutationOnNonLoopback) {
+      sendError(res, 403, "audit gate provider mutation disabled when bound beyond loopback. Set 'allowGateMutationOnNonLoopback: true' to opt in.");
+      return true;
+    }
+    if (!requireSameOriginJsonPost(req, res)) return true;
+    const provider = decodeURIComponent(apiPath.slice("gate/providers/".length));
+    if (!provider) { sendError(res, 400, "missing provider id"); return true; }
+    if (provider === "gate") {
+      sendError(res, 400, "the 'gate' provider is managed by `audit gate install`");
+      return true;
+    }
+    const agentDir = resolveOpenclawDir({ openclawDir: ctx.openclawDir });
+    try {
+      await removeProviderAuthProfilesWithLock({ provider, agentDir });
+    } catch (err) {
+      sendError(res, 500, err instanceof Error ? err.message : "remove failed");
+      return true;
+    }
+    sendJson(res, 200, { ok: true, provider });
+    return true;
+  }
+
   return false;
+}
+
+/** Read config → applyAuthProfileConfig → write back. */
+function applyProviderProfileToConfig(
+  agentDir: string,
+  params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token"; email?: string },
+): void {
+  const file = readOpenclawConfig(agentDir);
+  const cfg = file.content as unknown as OpenClawConfig;
+  const next = applyAuthProfileConfig(cfg, params);
+  writeOpenclawConfig(file.path, next as unknown as typeof file.content);
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {

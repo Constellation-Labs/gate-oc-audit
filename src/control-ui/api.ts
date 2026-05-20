@@ -230,3 +230,43 @@ export function installGate(req: GateInstallRequest): Promise<GateInstallRespons
     body: JSON.stringify(req),
   });
 }
+
+export interface ProviderRow {
+  /** Profile ID inside the SDK auth-profile store. */
+  profileId: string;
+  /** Provider this profile authenticates against (e.g. "openai"). */
+  provider: string;
+  /** Credential type. */
+  type: "api_key" | "oauth" | "token";
+  email?: string;
+  displayName?: string;
+  /** ISO-8601 expiry when the credential is an oauth/token. */
+  expiresAt?: string;
+}
+
+export function listProviders(): Promise<{ profiles: ProviderRow[] }> {
+  return fetchJson<{ profiles: ProviderRow[] }>("gate/providers");
+}
+
+export interface AddOpenAIProviderRequest {
+  kind: "openai";
+  apiKey: string;
+}
+
+export function addOpenAIProvider(req: AddOpenAIProviderRequest): Promise<{ ok: true; profileId: string; provider: string; mode: "api_key" }> {
+  return fetchJson("gate/providers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+}
+
+/** Removes ALL profiles for the given provider. The SDK doesn't expose
+ * per-profile removal; the API key form re-adds an OpenAI profile in
+ * one click if you change your mind. */
+export function removeProvider(provider: string): Promise<{ ok: true; provider: string }> {
+  return fetchJson(`gate/providers/${encodeURIComponent(provider)}`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+  });
+}

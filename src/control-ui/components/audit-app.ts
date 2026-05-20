@@ -4,12 +4,13 @@ import "./event-table.ts";
 import "./trees-overview.ts";
 import "./verify-panel.ts";
 import "./gate-setup.ts";
+import "./provider-panel.ts";
 
-type Route = "events" | "trees" | "verify" | "gate";
+type Route = "events" | "trees" | "verify" | "gate" | "providers";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-  if (hash === "trees" || hash === "verify" || hash === "gate") return hash;
+  if (hash === "trees" || hash === "verify" || hash === "gate" || hash === "providers") return hash;
   return "events";
 }
 
@@ -92,6 +93,7 @@ export class AuditApp extends LitElement {
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
           <a href="#/gate" class=${this.route === "gate" ? "active" : ""}>Gate</a>
+          <a href="#/providers" class=${this.route === "providers" ? "active" : ""}>Providers</a>
         </nav>
       </header>
       <main>
@@ -101,7 +103,9 @@ export class AuditApp extends LitElement {
             ? html`<trees-overview></trees-overview>`
             : this.route === "verify"
               ? html`<verify-panel></verify-panel>`
-              : html`<gate-setup></gate-setup>`}
+              : this.route === "gate"
+                ? html`<gate-setup></gate-setup>`
+                : html`<provider-panel></provider-panel>`}
       </main>
     `;
   }

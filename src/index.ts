@@ -4,6 +4,7 @@ import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
 import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions} from "./cli.js";
 import {cliGateInstallHandler, cliGateStatusHandler, cliGateTestHandler, type AuditGateInstallOptions, type AuditGateStatusOptions, type AuditGateTestOptions} from "./cli-gate.js";
+import {cliProviderAddOpenAIHandler, cliProviderListHandler, cliProviderRemoveHandler, type ProviderAddOpenAIOptions, type ProviderListOptions, type ProviderRemoveOptions} from "./cli-provider.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -282,6 +283,38 @@ export default (() => {
                     .option("--timeout-ms <n>", "Per-request timeout (default 10000)")
                     .option("--json", "Emit the probe result as JSON")
                     .action((opts: AuditGateTestOptions) => cliGateTestHandler(opts));
+
+                // Provider management (LLM providers under models.providers.*)
+                const provider = gate.command("provider").description("Manage LLM provider connections (OpenAI, …) under models.providers.*");
+
+                provider
+                    .command("list")
+                    .description("List configured providers (redacted — never includes API-key values)")
+                    .option("--json", "Emit as JSON")
+                    .action((opts: ProviderListOptions) => cliProviderListHandler(opts));
+
+                // Nested `add` → `openai` so commander binds the action handler
+                // with `(opts)` rather than `(positional, opts)` — `command("add openai")`
+                // would parse `openai` as a positional argument and the action
+                // would receive the literal string instead of the parsed flags.
+                const providerAdd = provider.command("add").description("Add or update a provider entry");
+                providerAdd
+                    .command("openai")
+                    .description("Add or update the OpenAI provider entry under models.providers.openai")
+                    .option("--oauth", "Run the OpenAI ChatGPT-account OAuth (PKCE) flow to obtain a token")
+                    .option("--api-key <key>", "Use a pre-existing OpenAI API key (sk-…)")
+                    .option("--api-key-stdin", "Read the API key from stdin (one line)")
+                    .option("--provider-key <key>", "Override the dotted-path key under models.providers (default: 'openai')")
+                    .option("--oauth-timeout-sec <n>", "Cap the OAuth wait in seconds (default 300)")
+                    .option("--yes", "Non-interactive — fail on missing inputs instead of prompting")
+                    .option("--json", "Emit a single-line JSON result")
+                    .action((opts: ProviderAddOpenAIOptions) => cliProviderAddOpenAIHandler(opts));
+
+                provider
+                    .command("remove <key>")
+                    .description("Remove a configured provider entry (the 'gate' broker is managed by `audit gate install`)")
+                    .option("--json", "Emit as JSON")
+                    .action((key: string, opts: ProviderRemoveOptions) => cliProviderRemoveHandler(key, opts));
             }, {
                 descriptors: [
                     {name: "audit", description: "View and manage audit trail", hasSubcommands: true},
