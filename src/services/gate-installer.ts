@@ -2,13 +2,11 @@ import { validateGatewayUrl, validateGatewayApiKey } from "./gateway-publisher.j
 import {
   applyBrokerProviderPatch,
   applyGateInstallPatch,
-  configFilePath,
   isJsonObject,
-  readOpenclawConfig,
-  writeOpenclawConfig,
+  mutateOpenclawConfig,
+  readOpenclawConfigSnapshot,
   type JsonObject,
 } from "../util/openclaw-config-writer.js";
-import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 import { probeGate, type ProbeResult } from "./gate-client.js";
 
 export interface InstallInput {
@@ -17,15 +15,13 @@ export interface InstallInput {
   /** Also register Gate as a model broker under `models.providers.gate`. */
   registerBroker: boolean;
   /** Allow `https://` URLs to private/link-local hosts (RFC1918/CGNAT).
-   * When set AND the URL actually needs it, the installer also persists
+   * When set AND the URL needs it, the installer also persists
    * `gatewayAllowPrivateHost: true` so the runtime publisher accepts the
    * same URL at startup. */
   allowPrivateHost: boolean;
   /** Skip the live probe — used in non-interactive setups where the
    * operator already knows the connection works (e.g. CI). */
   skipProbe: boolean;
-  /** Override openclaw config dir; defaults to `~/.openclaw`. */
-  openclawDir?: string;
 }
 
 export interface InstallReport {
@@ -99,9 +95,10 @@ function urlNeedsAllowPrivateHost(url: string): boolean {
 
 /**
  * Run the full Gate install: validate inputs, probe the connection, and
- * (on success) merge new keys into `~/.openclaw/config.json`. Returns a
- * report describing exactly which dotted-path keys were written so the
- * caller can show the user "wrote: a.b, c.d" instead of "wrote config".
+ * (on success) merge new keys into the openclaw config file (path
+ * resolved by the SDK). Returns a report describing exactly which
+ * dotted-path keys were written so the caller can show the user
+ * "wrote: a.b, c.d" instead of "wrote config".
  */
 export async function installGate(input: InstallInput): Promise<InstallReport> {
   const url = normalizeAndValidateUrl(input.url, input.allowPrivateHost);
@@ -130,39 +127,31 @@ export async function installGate(input: InstallInput): Promise<InstallReport> {
     }
   }
 
-  const openclawDir = resolveOpenclawDir({ openclawDir: input.openclawDir });
-  const file = readOpenclawConfig(openclawDir);
-  const content: JsonObject = file.content;
-
-  const changes: string[] = [];
-  changes.push(
-    ...applyGateInstallPatch(content, {
-      gatewayUrl: url,
-      gatewayApiKey: apiKey,
-      addToAllowlist: true,
-      grantConversationAccess: true,
-      allowPrivateHost: input.allowPrivateHost && urlNeedsAllowPrivateHost(url),
-      enable: true,
-    }),
-  );
-
-  if (input.registerBroker) {
-    changes.push(
-      ...applyBrokerProviderPatch(content, {
-        baseUrl: url,
-        apiKey,
+  const { path: configPath, changes } = await mutateOpenclawConfig((draft) => {
+    const out: string[] = [];
+    out.push(
+      ...applyGateInstallPatch(draft, {
+        gatewayUrl: url,
+        gatewayApiKey: apiKey,
+        addToAllowlist: true,
+        grantConversationAccess: true,
+        allowPrivateHost: input.allowPrivateHost && urlNeedsAllowPrivateHost(url),
+        enable: true,
       }),
     );
-  }
-
-  // Only write when something actually changed. Re-running install is a
-  // legitimate "verify connection" flow; we don't want to spam .bak files.
-  if (changes.length > 0) {
-    writeOpenclawConfig(file.path, content);
-  }
+    if (input.registerBroker) {
+      out.push(
+        ...applyBrokerProviderPatch(draft, {
+          baseUrl: url,
+          apiKey,
+        }),
+      );
+    }
+    return out;
+  });
 
   return {
-    configPath: file.path,
+    configPath,
     changes,
     probe,
   };
@@ -186,19 +175,17 @@ const DEFAULT_BROKER_KEY = "gate";
  * Read-only summary of the operator's current Gate config. Does not
  * touch the network. Used by `audit gate status`.
  */
-export function readGateStatus(openclawDirOverride?: string): StatusReport {
-  const openclawDir = resolveOpenclawDir({ openclawDir: openclawDirOverride });
-  const path = configFilePath(openclawDir);
-  let file: { path: string; content: JsonObject };
+export async function readGateStatus(): Promise<StatusReport> {
+  let snapshot: { path: string; content: JsonObject };
   try {
-    file = readOpenclawConfig(openclawDir);
-  } catch {
-    // Malformed JSON is a real problem but `status` should still answer
-    // truthfully ("nothing configured") rather than crash. The CLI test
-    // handler surfaces the parse error via the explicit read in
-    // readApiKeyFromConfig — status is the "soft" read.
+    snapshot = await readOpenclawConfigSnapshot();
+  } catch (err) {
+    // Malformed JSON / unreadable file — status should still answer
+    // truthfully ("nothing configured") rather than crash. Callers that
+    // need to surface the underlying error go through
+    // readSavedGatewayApiKey, which propagates.
     return {
-      configPath: path,
+      configPath: err instanceof Error ? (err as { path?: string }).path ?? "" : "",
       configured: false,
       hasApiKey: false,
       allowlisted: false,
@@ -206,7 +193,8 @@ export function readGateStatus(openclawDirOverride?: string): StatusReport {
     };
   }
 
-  const plugins = isJsonObject(file.content.plugins) ? file.content.plugins : {};
+  const content = snapshot.content;
+  const plugins = isJsonObject(content.plugins) ? content.plugins : {};
   const allow = Array.isArray(plugins.allow) ? plugins.allow : [];
   const allowlisted = allow.includes(PLUGIN_ID);
 
@@ -220,7 +208,7 @@ export function readGateStatus(openclawDirOverride?: string): StatusReport {
   const conversationAccess = hooks.allowConversationAccess === true;
   const enabled = typeof entry.enabled === "boolean" ? entry.enabled : undefined;
 
-  const models = isJsonObject(file.content.models) ? file.content.models : {};
+  const models = isJsonObject(content.models) ? content.models : {};
   const providers = isJsonObject(models.providers) ? models.providers : {};
   // Prefer the conventional "gate" key when it matches the configured URL;
   // only fall back to scanning when an operator hand-named the provider
@@ -242,7 +230,7 @@ export function readGateStatus(openclawDirOverride?: string): StatusReport {
   }
 
   return {
-    configPath: file.path,
+    configPath: snapshot.path,
     configured: Boolean(url && hasApiKey),
     url,
     hasApiKey,
@@ -261,10 +249,9 @@ export function readGateStatus(openclawDirOverride?: string): StatusReport {
  * propagate so callers can surface a clear "config is broken"
  * diagnostic instead of a misleading "could not resolve" message.
  */
-export function readSavedGatewayApiKey(openclawDirOverride?: string): string | undefined {
-  const dir = resolveOpenclawDir({ openclawDir: openclawDirOverride });
-  const file = readOpenclawConfig(dir);
-  const plugins = file.content.plugins;
+export async function readSavedGatewayApiKey(): Promise<string | undefined> {
+  const { content } = await readOpenclawConfigSnapshot();
+  const plugins = content.plugins;
   if (!isJsonObject(plugins)) return undefined;
   const entries = plugins.entries;
   if (!isJsonObject(entries)) return undefined;

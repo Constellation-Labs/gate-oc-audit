@@ -290,7 +290,7 @@ export default (() => {
 
                 gate
                     .command("install")
-                    .description("Install/update the Gate connection in ~/.openclaw/config.json")
+                    .description("Install/update the Gate connection in ~/.openclaw/openclaw.json")
                     .option("--url <url>", "Gate base URL (https://…)")
                     .option("--api-key <key>", "Gate API key (sk-gw-…). Prefer --api-key-stdin or $OPENCLAW_GATE_API_KEY in CI; flag values leak to ps/argv and shell history.")
                     .option("--api-key-stdin", "Read the API key from stdin (one line)")

@@ -1,39 +1,24 @@
-import { randomBytes } from "node:crypto";
 import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  writeFileSync,
-  writeSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+  loadConfig,
+  readConfigFileSnapshotForWrite,
+  replaceConfigFile,
+} from "openclaw/plugin-sdk/config-runtime";
 
 /**
- * Atomic read-merge-write helper for the operator's `~/.openclaw/config.json`.
+ * Config-file IO for the audit plugin's Gate install / status flows.
  *
- * The audit plugin needs to mutate three regions of this file during Gate
- * install:
- *   - `plugins.allow`              (trust the plugin)
- *   - `plugins.entries.<id>.*`     (plugin config + conversation-access opt-in)
- *   - `models.providers.*`         (Gate broker provider + per-provider entries)
- *
- * The openclaw SDK does not expose a plugin-side mutator for the root
- * config, so we read-merge-write the JSON file directly. Writes are
- * staged through a sibling tempfile + `fsyncSync` + `renameSync` so a
- * crash mid-write never leaves a half-written config behind, and a
- * `.bak` snapshot of the prior content (also mode 0o600) is kept for
- * one-step rollback.
+ * Historically this module hand-rolled the read / merge / atomic-write
+ * against a hardcoded `~/.openclaw/config.json` path. That filename was
+ * wrong — the SDK's canonical default is `openclaw.json`, with
+ * `$OPENCLAW_CONFIG_PATH` as an override and JSON5 support — so the
+ * wizard was creating an orphan `config.json` sibling that the runtime
+ * never read. The IO layer now defers to the SDK's `mutateConfigFile` /
+ * `writeConfigFile`, which gets us the right filename, env-var override,
+ * Nix-mode write guard, optimistic-concurrency hash check, and atomic
+ * crash-safe write for free. Only the patch shape is still ours.
  */
 
 const PLUGIN_ID = "constellation-audit-plugin";
-const SECRET_MODE = 0o600;
-const PRIVATE_DIR_MODE = 0o700;
 
 export type JsonValue =
   | string
@@ -44,110 +29,79 @@ export type JsonValue =
   | { [k: string]: JsonValue };
 export type JsonObject = { [k: string]: JsonValue };
 
-export interface OpenclawConfigFile {
-  path: string;
-  content: JsonObject;
-}
-
 /** Single shared "is plain JSON object" predicate. Reused by readers in
  * gate-installer / cli-gate so we don't carry three near-identical copies. */
 export function isJsonObject(v: unknown): v is JsonObject {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-export function configFilePath(openclawDir: string): string {
-  return join(openclawDir, "config.json");
+export interface OpenclawConfigSnapshot {
+  path: string;
+  content: JsonObject;
 }
 
-export function readOpenclawConfig(openclawDir: string): OpenclawConfigFile {
-  const path = configFilePath(openclawDir);
-  if (!existsSync(path)) return { path, content: {} };
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch (e) {
-    throw new Error(`failed to read ${path}: ${(e as Error).message}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`${path} is not valid JSON: ${(e as Error).message}`);
-  }
-  if (!isJsonObject(parsed)) {
-    throw new Error(`${path} must contain a JSON object at the top level`);
-  }
-  return { path, content: parsed };
+/** Read the openclaw config file via the SDK. Returns the active config
+ * path (`OPENCLAW_CONFIG_PATH` override, or the canonical default) and
+ * the source contents as a plain JSON object. */
+export async function readOpenclawConfigSnapshot(): Promise<OpenclawConfigSnapshot> {
+  const { snapshot } = await readConfigFileSnapshotForWrite();
+  return {
+    path: snapshot.path,
+    content: (snapshot.sourceConfig ?? {}) as unknown as JsonObject,
+  };
 }
 
-/**
- * Write `content` to `path` atomically with a `.bak` snapshot of the prior
- * file (if any). Crash-safety: the new content is written + fsync'd to a
- * sibling tempfile, then `rename`d over the target — POSIX guarantees the
- * rename is atomic on the same filesystem — and finally the parent dir
- * is fsync'd so the rename itself becomes durable. Both the .bak and
- * tempfile are created mode 0o600 so the prior API key cannot be read by
- * other local users on rotation.
+/** Sync, read-only snapshot of the live config — for code paths where
+ * the wider runtime is already loaded and we just need to peek at the
+ * current values. No path is returned (the SDK's sync loader doesn't
+ * expose one); callers that need to display the path use the async
+ * snapshot reader above. */
+export function loadOpenclawConfig(): JsonObject {
+  return (loadConfig() ?? {}) as unknown as JsonObject;
+}
+
+export interface MutateResult {
+  path: string;
+  changes: string[];
+}
+
+/** Read-modify-write the openclaw config via the SDK. The `mutate`
+ * callback receives a draft to mutate in place and returns the list of
+ * dotted-path keys it changed; an empty list short-circuits the write,
+ * which preserves the wizard's "re-run is cheap, no .bak churn" property.
  *
- * If `path` is a symlink (e.g. dotfile-managed), the rename writes through
- * to the symlink target rather than replacing the symlink with a regular
- * file.
- */
-export function writeOpenclawConfig(path: string, content: JsonObject): void {
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
-
-  // Resolve symlink targets so dotfile-managed config files (~/.openclaw
-  // → ~/.dotfiles/openclaw) are written through, not replaced.
-  let targetPath = path;
-  try {
-    if (lstatSync(path).isSymbolicLink()) {
-      targetPath = realpathSync(path);
-    }
-  } catch {
-    // file doesn't exist yet — that's fine, just use `path`
+ * Built on `readConfigFileSnapshotForWrite` + `replaceConfigFile` rather
+ * than the higher-level `mutateConfigFile` — the latter always writes
+ * (it bumps `meta.lastTouchedAt`), which would make every re-install
+ * rotate the `.bak` file. */
+export async function mutateOpenclawConfig(
+  mutate: (draft: JsonObject) => string[],
+): Promise<MutateResult> {
+  const { snapshot } = await readConfigFileSnapshotForWrite();
+  const draft = structuredClone(snapshot.sourceConfig ?? {}) as unknown as JsonObject;
+  const changes = mutate(draft);
+  if (changes.length === 0) {
+    return { path: snapshot.path, changes };
   }
-
-  if (existsSync(targetPath)) {
-    try {
-      const prior = readFileSync(targetPath);
-      writeFileSync(`${targetPath}.bak`, prior, { mode: SECRET_MODE });
-    } catch (e) {
-      throw new Error(`failed to snapshot ${targetPath} before write: ${(e as Error).message}`);
-    }
-  }
-
-  // crypto-random suffix + O_EXCL (`wx`) defeats a local attacker who
-  // pre-creates the tempfile (potentially as a symlink redirect) on a
-  // mis-permissioned ~/.openclaw.
-  const suffix = randomBytes(8).toString("hex");
-  const tmp = `${targetPath}.tmp-${suffix}`;
-  const serialized = `${JSON.stringify(content, null, 2)}\n`;
-  let fd = -1;
-  try {
-    fd = openSync(tmp, "wx", SECRET_MODE);
-    writeSync(fd, serialized);
-    fsyncSync(fd);
-  } catch (e) {
-    if (fd >= 0) {
-      try { closeSync(fd); } catch { /* swallow — primary error wins */ }
-    }
-    throw new Error(`failed to write ${tmp}: ${(e as Error).message}`);
-  }
-  try { closeSync(fd); } catch { /* swallow — close failure is not actionable here */ }
-
-  try {
-    renameSync(tmp, targetPath);
-  } catch (e) {
-    throw new Error(`failed to rename ${tmp} to ${targetPath}: ${(e as Error).message}`);
-  }
-
-  // fsync the directory so the rename itself is durable across power loss.
-  // Failure here is non-fatal — best-effort durability.
-  try {
-    const dirFd = openSync(dirname(targetPath), "r");
-    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
-  } catch { /* swallow — dir fsync is best-effort */ }
+  const result = await replaceConfigFile({
+    nextConfig: draft as never,
+    snapshot,
+    // The SDK validates plugin-config blocks against schemas discovered
+    // from installed plugin manifests. In CLI / setup contexts (where
+    // the audit plugin's own manifest hasn't been registered with the
+    // openclaw runtime that's running this code), the validator falls
+    // back to the strict `additionalProperties: false` policy and
+    // rejects our `gatewayUrl` / `gatewayApiKey` keys. We own this
+    // plugin's config block, so skipping plugin-aware validation here
+    // is safe — the base schema check still runs.
+    writeOptions: {
+      skipPluginValidation: true,
+      // The SDK otherwise logs human-readable overwrite/anomaly notices
+      // to stdout, which corrupts the wizard's `--json` output.
+      skipOutputLogs: true,
+    },
+  });
+  return { path: result.path, changes };
 }
 
 function ensureObject(parent: JsonObject, key: string): JsonObject {
@@ -180,7 +134,7 @@ export interface GateInstallPatch {
    * When true, persist `gatewayAllowPrivateHost: true` so the runtime
    * gateway publisher accepts the same private/link-local URL that
    * passed install-time validation. Should be set whenever the URL was
-   * validated with `allowPrivateHost: true` and actually points at a
+   * validated with `allowPrivateHost: true` and points at a
    * private/link-local host (loopback URLs don't need the flag).
    */
   allowPrivateHost: boolean;
@@ -194,12 +148,12 @@ export interface GateInstallPatch {
 }
 
 /**
- * Apply a Gate install patch to an in-memory config object. Pure mutation
- * — callers persist via `writeOpenclawConfig`. Idempotent: re-applying
- * the same patch is a no-op.
+ * Apply a Gate install patch to an in-memory config object. Pure
+ * mutation — callers persist via `mutateOpenclawConfig`. Idempotent:
+ * re-applying the same patch returns an empty change list.
  *
- * Returns a list of the dotted-path keys that actually changed, so the
- * CLI can show "wrote: a.b, c.d" instead of "wrote config".
+ * Returns a list of the dotted-path keys that changed, so the CLI can
+ * show "wrote: a.b, c.d" instead of "wrote config".
  */
 export function applyGateInstallPatch(content: JsonObject, patch: GateInstallPatch): string[] {
   const changes: string[] = [];
@@ -225,9 +179,6 @@ export function applyGateInstallPatch(content: JsonObject, patch: GateInstallPat
   if (patch.enable && entry.enabled !== true && entry.enabled !== false) {
     entry.enabled = true;
     changes.push(`plugins.entries.${PLUGIN_ID}.enabled`);
-  } else if (patch.enable && entry.enabled === false) {
-    // No-op, but flag in the changes list so operator sees it was intentional.
-    // (Suppressed: we don't add to changes because nothing was written.)
   }
 
   if (patch.grantConversationAccess) {
@@ -299,4 +250,3 @@ export function applyBrokerProviderPatch(content: JsonObject, patch: BrokerProvi
   }
   return changes;
 }
-

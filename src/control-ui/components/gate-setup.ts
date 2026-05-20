@@ -290,7 +290,7 @@ export class GateSetup extends LitElement {
 
       <div class="help">
         Same flow as the CLI: <code>openclaw audit gate install</code>. The
-        install writes <code>~/.openclaw/config.json</code> atomically and
+        install writes <code>~/.openclaw/openclaw.json</code> atomically and
         a <code>.bak</code> snapshot of the prior file is kept (mode 0600).
         API key entry is never echoed back and the saved key is never
         included in <code>/api/gate/status</code> responses.

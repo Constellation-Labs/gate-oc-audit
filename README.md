@@ -50,7 +50,7 @@ OPENCLAW_GATE_API_KEY=sk-gw-… openclaw audit gate install \
   --yes
 ```
 
-This writes `~/.openclaw/config.json` atomically (a `.bak` is kept) with:
+This writes `~/.openclaw/openclaw.json` atomically (a `.bak` is kept) with:
 
 - `plugins.allow` ← appends `constellation-audit-plugin`
 - `plugins.entries.constellation-audit-plugin.enabled` ← `true`

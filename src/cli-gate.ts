@@ -100,7 +100,6 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
       registerBroker,
       allowPrivateHost: opts.allowPrivateHost === true,
       skipProbe: opts.skipProbe === true,
-      openclawDir: opts.openclawDir,
     });
 
     if (opts.json) {
@@ -163,8 +162,8 @@ export interface AuditGateStatusOptions {
   openclawDir?: string;
 }
 
-export function cliGateStatusHandler(opts: AuditGateStatusOptions): void {
-  const status = readGateStatus(opts.openclawDir);
+export async function cliGateStatusHandler(opts: AuditGateStatusOptions): Promise<void> {
+  const status = await readGateStatus();
 
   if (opts.json) {
     outLine(JSON.stringify(status));
@@ -216,7 +215,7 @@ export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<vo
   if (!url || !apiKey) {
     let status;
     try {
-      status = readGateStatus(opts.openclawDir);
+      status = await readGateStatus();
     } catch (err) {
       handleError(err, opts.json === true);
       return;
@@ -229,7 +228,7 @@ export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<vo
     url = url ?? status.url;
     if (!apiKey) {
       try {
-        apiKey = readSavedGatewayApiKey(opts.openclawDir);
+        apiKey = await readSavedGatewayApiKey();
       } catch (err) {
         handleError(err, opts.json === true);
         return;

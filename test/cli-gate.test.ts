@@ -9,6 +9,7 @@ import {
   cliGateStatusHandler,
   cliGateTestHandler,
 } from "../src/cli-gate.js";
+import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
 
 function captureStdoutStderr(): {
   stop: () => { stdout: string; stderr: string };
@@ -18,11 +19,17 @@ function captureStdoutStderr(): {
   const origOut = process.stdout.write.bind(process.stdout);
   const origErr = process.stderr.write.bind(process.stderr);
   process.stdout.write = ((chunk: string | Uint8Array) => {
-    stdoutChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+    // Only collect string writes. The node:test --test runner emits its
+    // worker protocol as Buffer chunks on the same stream; passing those
+    // through unchanged keeps the runner functional and keeps the capture
+    // free of binary garbage.
+    if (typeof chunk === "string") stdoutChunks.push(chunk);
+    else return origOut(chunk);
     return true;
   }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: string | Uint8Array) => {
-    stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+    if (typeof chunk === "string") stderrChunks.push(chunk);
+    else return origErr(chunk);
     return true;
   }) as typeof process.stderr.write;
   return {
@@ -36,8 +43,17 @@ function captureStdoutStderr(): {
 
 describe("cliGateInstallHandler — --json --skip-probe happy path", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-gate-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); process.exitCode = 0; });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
+  });
 
   it("emits a JSON report listing the keys it wrote", async () => {
     const cap = captureStdoutStderr();
@@ -47,10 +63,9 @@ describe("cliGateInstallHandler — --json --skip-probe happy path", () => {
       skipProbe: true,
       yes: true,
       json: true,
-      openclawDir: dir,
     });
     const { stdout } = cap.stop();
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.ok, true);
     assert.equal(parsed.probe, "skipped");
     assert.ok(parsed.changes.length > 0);
@@ -66,10 +81,9 @@ describe("cliGateInstallHandler — --json --skip-probe happy path", () => {
       skipProbe: true,
       yes: true,
       json: true,
-      openclawDir: dir,
     });
     const { stdout } = cap.stop();
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.ok(!parsed.changes.some((c: string) => c.startsWith("models.providers")));
   });
 
@@ -77,7 +91,6 @@ describe("cliGateInstallHandler — --json --skip-probe happy path", () => {
     const cap = captureStdoutStderr();
     await cliGateInstallHandler({
       yes: true,
-      openclawDir: dir,
     });
     cap.stop();
     assert.equal(process.exitCode, 1);
@@ -87,10 +100,16 @@ describe("cliGateInstallHandler — --json --skip-probe happy path", () => {
 
 describe("cliGateInstallHandler — env var", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-gate-")); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     delete process.env.OPENCLAW_GATE_API_KEY;
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
     process.exitCode = 0;
   });
 
@@ -102,24 +121,31 @@ describe("cliGateInstallHandler — env var", () => {
       skipProbe: true,
       yes: true,
       json: true,
-      openclawDir: dir,
     });
     const { stdout } = cap.stop();
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.ok, true);
   });
 });
 
 describe("cliGateStatusHandler", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-gate-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+  });
 
-  it("emits JSON not-configured state for an empty dir", () => {
+  it("emits JSON not-configured state for an empty dir", async () => {
     const cap = captureStdoutStderr();
-    cliGateStatusHandler({ json: true, openclawDir: dir });
+    await cliGateStatusHandler({ json: true });
     const { stdout } = cap.stop();
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.configured, false);
     assert.equal(parsed.hasApiKey, false);
   });
@@ -132,25 +158,30 @@ describe("cliGateStatusHandler", () => {
       skipProbe: true,
       yes: true,
       json: true,
-      openclawDir: dir,
     });
     cap.stop();
 
     const cap2 = captureStdoutStderr();
-    cliGateStatusHandler({ json: true, openclawDir: dir });
+    await cliGateStatusHandler({ json: true });
     const { stdout } = cap2.stop();
     assert.ok(!stdout.includes("sk-gw-aaaa"), "status JSON must not include the API key value");
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.hasApiKey, true);
   });
 });
 
 describe("cliGateTestHandler — --url-without-key exfil guard", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-gate-")); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     delete process.env.OPENCLAW_GATE_API_KEY;
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
     process.exitCode = 0;
   });
 
@@ -161,14 +192,12 @@ describe("cliGateTestHandler — --url-without-key exfil guard", () => {
       apiKey: "sk-gw-saved",
       skipProbe: true,
       yes: true,
-      openclawDir: dir,
     });
     process.exitCode = 0;
 
     const cap = captureStdoutStderr();
     await cliGateTestHandler({
       url: "https://attacker.example.com",
-      openclawDir: dir,
     });
     const { stderr } = cap.stop();
 
@@ -186,7 +215,6 @@ describe("cliGateTestHandler — --url-without-key exfil guard", () => {
       url: "https://gate.example.com",
       apiKey: "bad key with space",
       json: true,
-      openclawDir: dir,
     });
     const { stdout, stderr } = cap.stop();
     // We did *not* hit the --url-without-key guard

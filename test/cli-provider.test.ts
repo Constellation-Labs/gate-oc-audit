@@ -11,6 +11,7 @@ import {
   cliProviderListHandler,
   cliProviderRemoveHandler,
 } from "../src/cli-provider.js";
+import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
 
 /**
  * The CLI under test now writes through the SDK's auth-profile store
@@ -28,8 +29,16 @@ function captureStdoutStderr(): { stop: () => { stdout: string; stderr: string }
   const err: string[] = [];
   const origOut = process.stdout.write.bind(process.stdout);
   const origErr = process.stderr.write.bind(process.stderr);
-  process.stdout.write = ((c: string | Uint8Array) => { out.push(typeof c === "string" ? c : Buffer.from(c).toString()); return true; }) as typeof process.stdout.write;
-  process.stderr.write = ((c: string | Uint8Array) => { err.push(typeof c === "string" ? c : Buffer.from(c).toString()); return true; }) as typeof process.stderr.write;
+  process.stdout.write = ((c: string | Uint8Array) => {
+    if (typeof c === "string") out.push(c);
+    else return origOut(c);
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((c: string | Uint8Array) => {
+    if (typeof c === "string") err.push(c);
+    else return origErr(c);
+    return true;
+  }) as typeof process.stderr.write;
   return {
     stop() {
       process.stdout.write = origOut;
@@ -41,8 +50,17 @@ function captureStdoutStderr(): { stop: () => { stdout: string; stderr: string }
 
 describe("cliProviderListHandler", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-provider-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); process.exitCode = 0; });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-provider-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
+  });
 
   it("emits 'No OpenAI provider profiles configured.' on a fresh dir", () => {
     const cap = captureStdoutStderr();
@@ -55,7 +73,7 @@ describe("cliProviderListHandler", () => {
     const cap = captureStdoutStderr();
     cliProviderListHandler({ openclawDir: dir, json: true });
     const { stdout } = cap.stop();
-    assert.deepEqual(JSON.parse(stdout.trim()), { profiles: [] });
+    assert.deepEqual(JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? ""), { profiles: [] });
   });
 
   it("does not include the API key value in the listing", async () => {
@@ -65,7 +83,7 @@ describe("cliProviderListHandler", () => {
     cliProviderListHandler({ openclawDir: dir, json: true });
     const { stdout } = cap.stop();
     assert.equal(stdout.includes("sk-test-aaaa"), false);
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.profiles.length, 1);
     assert.equal(parsed.profiles[0].provider, "openai");
     assert.equal(parsed.profiles[0].type, "api_key");
@@ -75,8 +93,17 @@ describe("cliProviderListHandler", () => {
 
 describe("cliProviderRemoveHandler", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-provider-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); process.exitCode = 0; });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-provider-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
+  });
 
   it("removes all profiles for a provider", async () => {
     await cliProviderAddOpenAIHandler({ apiKey: "sk-test", yes: true, openclawDir: dir });
@@ -100,18 +127,24 @@ describe("cliProviderRemoveHandler", () => {
 
 describe("cliProviderAddOpenAIHandler — API-key path", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "cli-provider-")); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-provider-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
-    process.exitCode = 0;
     delete process.env.OPENCLAW_OPENAI_API_KEY;
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
   });
 
   it("writes a profile via the SDK auth-profile store", async () => {
     const cap = captureStdoutStderr();
     await cliProviderAddOpenAIHandler({ apiKey: "sk-test-aaaa", yes: true, json: true, openclawDir: dir });
     const { stdout } = cap.stop();
-    const parsed = JSON.parse(stdout.trim());
+    const parsed = JSON.parse(stdout.split("\n").find((l) => l.trim().startsWith("{")) ?? "");
     assert.equal(parsed.ok, true);
     assert.equal(parsed.provider, "openai");
     assert.equal(parsed.mode, "api_key");

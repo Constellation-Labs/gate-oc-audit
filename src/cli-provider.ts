@@ -11,10 +11,7 @@ import {
 } from "openclaw/plugin-sdk/provider-auth";
 import { loginOpenAICodexOAuth } from "openclaw/plugin-sdk/provider-auth-login";
 
-import {
-  readOpenclawConfig,
-  writeOpenclawConfig,
-} from "./util/openclaw-config-writer.js";
+import { mutateOpenclawConfig } from "./util/openclaw-config-writer.js";
 import { resolveOpenclawDir } from "./util/openclaw-paths.js";
 import { createReadlineWizardPrompter } from "./services/wizard-prompter.js";
 
@@ -183,7 +180,7 @@ export async function cliProviderAddOpenAIHandler(opts: ProviderAddOpenAIOptions
     return;
   }
 
-  applyAuthProfileToConfig(agentDir, {
+  await applyAuthProfileToConfig({
     profileId,
     provider: OPENAI_PROVIDER_ID,
     mode: "api_key",
@@ -230,7 +227,7 @@ async function runOAuthFlow(agentDir: string, opts: ProviderAddOpenAIOptions): P
     return;
   }
 
-  applyAuthProfileToConfig(agentDir, {
+  await applyAuthProfileToConfig({
     profileId,
     provider: OPENAI_PROVIDER_ID,
     mode: "oauth",
@@ -252,12 +249,21 @@ interface ApplyParams {
   email?: string;
 }
 
-function applyAuthProfileToConfig(agentDir: string, params: ApplyParams): void {
-  const dir = resolveOpenclawDir({ openclawDir: agentDir });
-  const file = readOpenclawConfig(dir);
-  const cfg = file.content as unknown as OpenClawConfig;
-  const next = applyAuthProfileConfig(cfg, params);
-  writeOpenclawConfig(file.path, next as unknown as typeof file.content);
+async function applyAuthProfileToConfig(params: ApplyParams): Promise<void> {
+  // Read-modify-write the openclaw config via the SDK so we hit the
+  // canonical `openclaw.json` (with $OPENCLAW_CONFIG_PATH override) and
+  // pick up the Nix-mode write guard / atomic write for free. The pure
+  // `applyAuthProfileConfig` from the SDK does the actual edit.
+  await mutateOpenclawConfig((draft) => {
+    const cfg = draft as unknown as OpenClawConfig;
+    const next = applyAuthProfileConfig(cfg, params);
+    for (const key of Object.keys(draft)) delete (draft as Record<string, unknown>)[key];
+    Object.assign(draft, next as unknown as Record<string, unknown>);
+    // Returning a non-empty changes list ensures the wizard prints the
+    // "applied" line; the SDK's writer always rewrites on call so we
+    // don't need granular dotted-path tracking here.
+    return [`models.providers.${params.provider}`];
+  });
 }
 
 function detectRemote(): boolean {

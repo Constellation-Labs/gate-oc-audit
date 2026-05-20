@@ -29,10 +29,7 @@ import {
   validateApiKeyOrThrow,
 } from "../services/gate-installer.js";
 import { probeGate } from "../services/gate-client.js";
-import {
-  readOpenclawConfig,
-  writeOpenclawConfig,
-} from "../util/openclaw-config-writer.js";
+import { mutateOpenclawConfig } from "../util/openclaw-config-writer.js";
 import {
   applyAuthProfileConfig,
   ensureAuthProfileStore,
@@ -90,7 +87,7 @@ interface AuditUiContext {
    * Operator opt-in to keep the mutation endpoints `/api/gate/install`
    * and `/api/gate/test` enabled when the gateway binds beyond loopback.
    * Off by default — these endpoints write the operator's Gate API key
-   * to ~/.openclaw/config.json (install) and emit outbound HTTP probes
+   * to ~/.openclaw/openclaw.json (install) and emit outbound HTTP probes
    * with that key (test); both are credential-handling paths that
    * shouldn't accept arbitrary network input.
    */
@@ -793,7 +790,7 @@ async function handleApi(
   // GET /api/gate/status — redacted summary of the operator's Gate config.
   // Never returns the API key value; only `hasApiKey: boolean`.
   if (apiPath === "gate/status" && req.method === "GET") {
-    const status = readGateStatus(ctx.openclawDir);
+    const status = await readGateStatus();
     sendJson(res, 200, status);
     return true;
   }
@@ -830,7 +827,7 @@ async function handleApi(
       return true;
     }
     if (!url || !apiKey) {
-      const status = readGateStatus(ctx.openclawDir);
+      const status = await readGateStatus();
       if (!status.configured) {
         sendError(res, 400, "Gate is not configured. POST /api/gate/install first.");
         return true;
@@ -838,7 +835,7 @@ async function handleApi(
       url = url ?? status.url;
       if (!apiKey) {
         try {
-          apiKey = readSavedGatewayApiKey(ctx.openclawDir);
+          apiKey = await readSavedGatewayApiKey();
         } catch (err) {
           sendError(res, 500, err instanceof Error ? err.message : "config read error");
           return true;
@@ -898,7 +895,6 @@ async function handleApi(
         registerBroker: bodyBool(b, "registerBroker") !== false,
         allowPrivateHost: bodyBool(b, "allowPrivateHost") === true,
         skipProbe: bodyBool(b, "skipProbe") === true,
-        openclawDir: ctx.openclawDir,
       });
       sendJson(res, 200, {
         configPath: report.configPath,
@@ -987,7 +983,7 @@ async function handleApi(
       return true;
     }
     try {
-      applyProviderProfileToConfig(agentDir, { profileId, provider: "openai", mode: "api_key" });
+      await applyProviderProfileToConfig({ profileId, provider: "openai", mode: "api_key" });
     } catch (err) {
       sendError(res, 500, err instanceof Error ? err.message : "config write failed");
       return true;
@@ -1025,15 +1021,17 @@ async function handleApi(
   return false;
 }
 
-/** Read config → applyAuthProfileConfig → write back. */
-function applyProviderProfileToConfig(
-  agentDir: string,
+/** Read config → applyAuthProfileConfig → write back via the SDK. */
+async function applyProviderProfileToConfig(
   params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token"; email?: string },
-): void {
-  const file = readOpenclawConfig(agentDir);
-  const cfg = file.content as unknown as OpenClawConfig;
-  const next = applyAuthProfileConfig(cfg, params);
-  writeOpenclawConfig(file.path, next as unknown as typeof file.content);
+): Promise<void> {
+  await mutateOpenclawConfig((draft) => {
+    const cfg = draft as unknown as OpenClawConfig;
+    const next = applyAuthProfileConfig(cfg, params);
+    for (const key of Object.keys(draft)) delete (draft as Record<string, unknown>)[key];
+    Object.assign(draft, next as unknown as Record<string, unknown>);
+    return [`models.providers.${params.provider}`];
+  });
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {

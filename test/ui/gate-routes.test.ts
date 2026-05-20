@@ -20,6 +20,7 @@ import { AuditStore } from "../../src/store/audit-store.js";
 import { SmtService } from "../../src/services/smt-service.js";
 import { Verifier } from "../../src/services/verifier.js";
 import { registerAuditUiRoutes } from "../../src/ui/routes.js";
+import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
 
 type RouteEntry = {
   path: string;
@@ -31,6 +32,7 @@ type RouteEntry = {
 interface Rig {
   baseUrl: string;
   openclawDir: string;
+  configPath: string;
   server: Server;
   destroy: () => Promise<void>;
 }
@@ -42,6 +44,10 @@ async function bootRig(opts: {
   const dir = mkdtempSync(join(tmpdir(), "audit-gate-routes-"));
   const dbPath = join(dir, "audit.db");
   const openclawDir = join(dir, ".openclaw");
+  const configPath = join(openclawDir, "openclaw.json");
+  const prevConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+  process.env.OPENCLAW_CONFIG_PATH = configPath;
+  clearConfigCache();
 
   const store = new AuditStore(dbPath);
   const smt = new SmtService({ dbPath, smt: { checkpointDir: join(dir, "smt"), checkpointIntervalMs: 0 } });
@@ -77,11 +83,15 @@ async function bootRig(opts: {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     openclawDir,
+    configPath,
     server,
     destroy: async () => {
       await smt.stop();
       store.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (prevConfigPath === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
+      else process.env.OPENCLAW_CONFIG_PATH = prevConfigPath;
+      clearConfigCache();
       rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -155,7 +165,7 @@ describe("/api/gate/install", () => {
     assert.ok(body.changes.length > 0);
     assert.equal(body.probe, "skipped");
 
-    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
+    const cfg = JSON.parse(readFileSync(rig.configPath, "utf-8"));
     assert.equal(cfg.plugins.entries["constellation-audit-plugin"].config.gatewayUrl, "http://127.0.0.1:1");
   });
 
@@ -300,7 +310,7 @@ describe("CSRF defense on /api/gate/{install,test}", () => {
       body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", skipProbe: true }),
     });
     assert.equal(res.status, 415);
-    const cfgPath = join(rig.openclawDir, "config.json");
+    const cfgPath = rig.configPath;
     assert.equal(existsSync(cfgPath), false);
   });
 
@@ -355,7 +365,7 @@ describe("/api/gate/install — additional cases", () => {
       body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: false, skipProbe: true }),
     });
     assert.equal(res.status, 200);
-    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
+    const cfg = JSON.parse(readFileSync(rig.configPath, "utf-8"));
     assert.equal(cfg.models, undefined);
   });
 
@@ -368,7 +378,7 @@ describe("/api/gate/install — additional cases", () => {
       body: JSON.stringify({ url: "http://127.0.0.1:1", apiKey: "sk-gw-aaaa", registerBroker: "false", skipProbe: true }),
     });
     assert.equal(res.status, 200);
-    const cfg = JSON.parse(readFileSync(join(rig.openclawDir, "config.json"), "utf-8"));
+    const cfg = JSON.parse(readFileSync(rig.configPath, "utf-8"));
     assert.ok(cfg.models?.providers?.gate);
   });
 
@@ -384,7 +394,7 @@ describe("/api/gate/install — additional cases", () => {
       const body = await res.json();
       assert.match(body.error, /401/);
       // Nothing should be written when probe fails
-      assert.equal(existsSync(join(rig.openclawDir, "config.json")), false);
+      assert.equal(existsSync(rig.configPath), false);
     } finally {
       await mock.close();
     }

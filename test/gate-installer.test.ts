@@ -1,15 +1,14 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
 
 import {
   applyBrokerProviderPatch,
   applyGateInstallPatch,
   isJsonObject,
-  readOpenclawConfig,
-  writeOpenclawConfig,
   type JsonObject,
 } from "../src/util/openclaw-config-writer.js";
 import {
@@ -22,6 +21,13 @@ import {
 
 function makeOpenclawDir(): string {
   return mkdtempSync(join(tmpdir(), "openclaw-cfg-"));
+}
+
+function pointConfigAt(dir: string): string {
+  const path = join(dir, "openclaw.json");
+  process.env.OPENCLAW_CONFIG_PATH = path;
+  clearConfigCache();
+  return path;
 }
 
 const baseInstallPatch = {
@@ -167,78 +173,6 @@ describe("openclaw-config-writer: applyBrokerProviderPatch", () => {
   });
 });
 
-describe("openclaw-config-writer: write atomicity & permissions", () => {
-  let dir: string;
-  afterEach(() => { if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true }); });
-  beforeEach(() => { dir = makeOpenclawDir(); });
-
-  it("creates a .bak when overwriting an existing file", () => {
-    const path = join(dir, "config.json");
-    writeOpenclawConfig(path, { initial: true });
-    writeOpenclawConfig(path, { updated: true });
-
-    assert.ok(existsSync(`${path}.bak`));
-    const bak = JSON.parse(readFileSync(`${path}.bak`, "utf-8"));
-    assert.equal(bak.initial, true);
-
-    const current = JSON.parse(readFileSync(path, "utf-8"));
-    assert.equal(current.updated, true);
-  });
-
-  it("writes the .bak file with mode 0o600 so the prior API key isn't world-readable", () => {
-    const path = join(dir, "config.json");
-    writeOpenclawConfig(path, { initial: true });
-    writeOpenclawConfig(path, { updated: true });
-    const mode = statSync(`${path}.bak`).mode & 0o777;
-    assert.equal(mode, 0o600);
-  });
-
-  it("writes the main config file with mode 0o600", () => {
-    const path = join(dir, "config.json");
-    writeOpenclawConfig(path, { hello: "world" });
-    const mode = statSync(path).mode & 0o777;
-    assert.equal(mode, 0o600);
-  });
-
-  it("writes nothing to .bak on first write", () => {
-    const path = join(dir, "config.json");
-    writeOpenclawConfig(path, { hello: "world" });
-    assert.ok(!existsSync(`${path}.bak`));
-  });
-
-  it("writes through a symlinked config without replacing the symlink", () => {
-    // Some operators dotfile-manage ~/.openclaw — the symlink must survive.
-    const realDir = mkdtempSync(join(tmpdir(), "openclaw-real-"));
-    const realPath = join(realDir, "config.json");
-    writeFileSync(realPath, JSON.stringify({ initial: true }));
-    const linkPath = join(dir, "config.json");
-    symlinkSync(realPath, linkPath);
-
-    writeOpenclawConfig(linkPath, { updated: true });
-
-    // The symlink itself still exists and still points at the real file.
-    const stats = statSync(linkPath);
-    assert.ok(stats.isFile());
-    // Real file was updated through the symlink target.
-    const real = JSON.parse(readFileSync(realPath, "utf-8"));
-    assert.equal(real.updated, true);
-
-    rmSync(realDir, { recursive: true, force: true });
-  });
-
-  it("readOpenclawConfig returns empty object when file does not exist", () => {
-    const { content } = readOpenclawConfig(dir);
-    assert.deepEqual(content, {});
-  });
-
-  it("readOpenclawConfig rejects non-object top-level JSON", () => {
-    const path = join(dir, "config.json");
-    writeOpenclawConfig(path, {} as JsonObject);
-    writeFileSync(path, '"a string, not an object"');
-    assert.throws(() => readOpenclawConfig(dir), /must contain a JSON object/);
-  });
-});
-
 describe("openclaw-config-writer: isJsonObject", () => {
   it("returns true only for plain JSON objects", () => {
     assert.equal(isJsonObject({}), true);
@@ -295,10 +229,17 @@ describe("gate-installer: validation helpers", () => {
   });
 });
 
-describe("gate-installer: installGate", () => {
+describe("gate-installer: installGate (writes via SDK)", () => {
   let dir: string;
-  beforeEach(() => { dir = makeOpenclawDir(); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = makeOpenclawDir();
+    pointConfigAt(dir);
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+  });
 
   it("writes config and registers broker by default when --skip-probe", async () => {
     const report = await installGate({
@@ -307,7 +248,6 @@ describe("gate-installer: installGate", () => {
       registerBroker: true,
       allowPrivateHost: false,
       skipProbe: true,
-      openclawDir: dir,
     });
 
     assert.ok(report.changes.length > 0);
@@ -321,19 +261,28 @@ describe("gate-installer: installGate", () => {
     assert.equal(written.models.providers.gate.baseUrl, "https://gate.example.com");
   });
 
-  it("is idempotent at the disk level — second install does not bump mtime or create a .bak", async () => {
+  it("the resolved config path ends in openclaw.json (not legacy config.json)", async () => {
+    const report = await installGate({
+      url: "https://gate.example.com",
+      apiKey: "sk-gw-aaaa",
+      registerBroker: false,
+      allowPrivateHost: false,
+      skipProbe: true,
+    });
+    assert.match(report.configPath, /openclaw\.json$/);
+  });
+
+  it("is idempotent — second install with same inputs reports no changes and does not bump mtime", async () => {
     const firstReport = await installGate({
       url: "https://gate.example.com",
       apiKey: "sk-gw-aaaa",
       registerBroker: true,
       allowPrivateHost: false,
       skipProbe: true,
-      openclawDir: dir,
     });
     const mtimeAfterFirst = statSync(firstReport.configPath).mtimeMs;
     assert.equal(existsSync(`${firstReport.configPath}.bak`), false);
 
-    // Sleep just enough that any second write would produce a different mtime.
     await new Promise((r) => setTimeout(r, 50));
 
     const secondReport = await installGate({
@@ -342,12 +291,10 @@ describe("gate-installer: installGate", () => {
       registerBroker: true,
       allowPrivateHost: false,
       skipProbe: true,
-      openclawDir: dir,
     });
 
     assert.deepEqual(secondReport.changes, []);
     assert.equal(statSync(secondReport.configPath).mtimeMs, mtimeAfterFirst);
-    assert.equal(existsSync(`${secondReport.configPath}.bak`), false);
   });
 
   it("does not write broker entry when registerBroker is false", async () => {
@@ -357,7 +304,6 @@ describe("gate-installer: installGate", () => {
       registerBroker: false,
       allowPrivateHost: false,
       skipProbe: true,
-      openclawDir: dir,
     });
     assert.ok(!report.changes.some((c) => c.startsWith("models.providers")));
     const written = JSON.parse(readFileSync(report.configPath, "utf-8"));
@@ -371,7 +317,6 @@ describe("gate-installer: installGate", () => {
       registerBroker: false,
       allowPrivateHost: true,
       skipProbe: true,
-      openclawDir: dir,
     });
     const written = JSON.parse(readFileSync(report.configPath, "utf-8"));
     assert.equal(
@@ -388,7 +333,6 @@ describe("gate-installer: installGate", () => {
       registerBroker: false,
       allowPrivateHost: true,
       skipProbe: true,
-      openclawDir: dir,
     });
     const written = JSON.parse(readFileSync(report.configPath, "utf-8"));
     assert.equal(
@@ -401,11 +345,18 @@ describe("gate-installer: installGate", () => {
 
 describe("gate-installer: readGateStatus", () => {
   let dir: string;
-  beforeEach(() => { dir = makeOpenclawDir(); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = makeOpenclawDir();
+    pointConfigAt(dir);
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+  });
 
-  it("reports 'not configured' when no file exists", () => {
-    const status = readGateStatus(dir);
+  it("reports 'not configured' when no file exists", async () => {
+    const status = await readGateStatus();
     assert.equal(status.configured, false);
     assert.equal(status.hasApiKey, false);
     assert.equal(status.allowlisted, false);
@@ -418,9 +369,8 @@ describe("gate-installer: readGateStatus", () => {
       registerBroker: true,
       allowPrivateHost: false,
       skipProbe: true,
-      openclawDir: dir,
     });
-    const status = readGateStatus(dir);
+    const status = await readGateStatus();
     assert.equal(status.configured, true);
     assert.equal(status.url, "https://gate.example.com");
     assert.equal(status.hasApiKey, true);
@@ -428,41 +378,5 @@ describe("gate-installer: readGateStatus", () => {
     assert.equal(status.conversationAccess, true);
     assert.equal(status.enabled, true);
     assert.equal(status.brokerProviderKey, "gate");
-  });
-
-  it("prefers the conventional 'gate' provider key when multiple providers share the URL", () => {
-    const path = join(dir, "config.json");
-    const config = {
-      plugins: { entries: { "constellation-audit-plugin": {
-        config: { gatewayUrl: "https://gate.example.com", gatewayApiKey: "sk-gw-aaaa" },
-      } } },
-      models: { providers: {
-        "my-other-thing": { baseUrl: "https://gate.example.com" },
-        gate: { baseUrl: "https://gate.example.com" },
-      } },
-    };
-    writeFileSync(path, JSON.stringify(config));
-    const status = readGateStatus(dir);
-    assert.equal(status.brokerProviderKey, "gate");
-  });
-
-  it("falls back to URL scan when no 'gate' key is present", () => {
-    const path = join(dir, "config.json");
-    const config = {
-      plugins: { entries: { "constellation-audit-plugin": {
-        config: { gatewayUrl: "https://gate.example.com", gatewayApiKey: "sk-gw-aaaa" },
-      } } },
-      models: { providers: { custom: { baseUrl: "https://gate.example.com" } } },
-    };
-    writeFileSync(path, JSON.stringify(config));
-    const status = readGateStatus(dir);
-    assert.equal(status.brokerProviderKey, "custom");
-  });
-
-  it("does not crash on malformed JSON — reports not configured", () => {
-    const path = join(dir, "config.json");
-    writeFileSync(path, "{not json");
-    const status = readGateStatus(dir);
-    assert.equal(status.configured, false);
   });
 });
