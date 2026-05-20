@@ -95,6 +95,7 @@ export class SmtService {
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
   private checkpointInFlight: Promise<void> | undefined;
   private restored = false;
+  private restoreError: string | null = null;
   private needsFirstCheckpoint = true;
   private suppressCheckpoints = false;
 
@@ -109,7 +110,6 @@ export class SmtService {
    */
   async ensureReady(): Promise<void> {
     if (this.restored) return;
-    this.restored = true;
     try {
       await this.manager.restoreAll(this.config.checkpointDir);
       await this.restoreMetadata();
@@ -128,10 +128,23 @@ export class SmtService {
       smtLog.info(
         `Restored ${trees.length} tree(s) from checkpoint`,
       );
+      // Only flip `restored` once the restore actually succeeded so a
+      // transient failure (e.g. flaky disk) is retried on the next call
+      // instead of being silently latched as "already restored".
+      this.restored = true;
+      this.restoreError = null;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
+      this.restoreError = msg;
       smtLog.error(`Checkpoint restore failed: ${msg}`);
     }
+  }
+
+  /** Last restore error, or null if the most recent attempt succeeded (or
+   *  none has been attempted yet). Callers use this to distinguish "SMT not
+   *  yet restored" from "restore failed" when interpreting the cursor. */
+  getRestoreError(): string | null {
+    return this.restoreError;
   }
 
   async start(): Promise<void> {

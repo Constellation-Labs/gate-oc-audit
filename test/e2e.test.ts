@@ -1184,14 +1184,14 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     );
   });
 
-  it("audit anomalies — text and --json over a window that covers the seeded events", () => {
-    const text = captureConsole(() =>
+  it("audit anomalies — text and --json over a window that covers the seeded events", async () => {
+    const text = await captureConsoleAsync(() =>
       cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc" }),
     );
     assert.match(text.stdout, /Audit anomalies — /);
     assert.ok(text.stdout.includes("Events in window:"));
 
-    const json = captureConsole(() =>
+    const json = await captureConsoleAsync(() =>
       cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc", json: true }),
     );
     const view = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
@@ -1202,8 +1202,8 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.ok(view.detectorConfig);
   });
 
-  it("audit anomalies — --html, --until and all detector tuning flags round-trip through the view", () => {
-    const html = captureConsole(() =>
+  it("audit anomalies — --html, --until and all detector tuning flags round-trip through the view", async () => {
+    const html = await captureConsoleAsync(() =>
       cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", tz: "utc", html: true }),
     );
     assert.ok(html.stdout.startsWith("<!doctype html>"));
@@ -1211,14 +1211,14 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
 
     // --until pins the upper bound and the JSON view echoes it back.
     const until = "2099-01-01T00:00:00.000Z";
-    const bounded = captureConsole(() =>
+    const bounded = await captureConsoleAsync(() =>
       cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", until, tz: "utc", json: true }),
     );
     const boundedView = JSON.parse(bounded.stdout.split("\n").filter(Boolean)[0]);
     assert.equal(boundedView.period.toIso, until);
 
     // Every detector-tuning flag is accepted and reflected in detectorConfig.
-    const tuned = captureConsole(() =>
+    const tuned = await captureConsoleAsync(() =>
       cliAnomaliesHandler(rig.store, rig.smt, {
         since: "24h",
         tz: "utc",
@@ -1240,9 +1240,40 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.equal(cfg.dropThreshold, 4);
 
     // A representative bad value is rejected at the boundary.
-    assert.throws(
+    await assert.rejects(
       () => cliAnomaliesHandler(rig.store, rig.smt, { since: "24h", denialThreshold: "abc" }),
       /--denial-threshold must be a positive integer/,
+    );
+  });
+
+  it("audit anomalies — fresh SmtService restores from disk so the tamper scan runs", async () => {
+    // Regression for the 0.2.0–0.2.4 bypass: cliAnomaliesHandler was sync
+    // and never called ensureReady(), so a fresh SmtService instance reported
+    // lastInsertedSeq=0 and integrityViolations.note read "SMT has no
+    // checkpointed leaves yet — tamper scan skipped." even when the on-disk
+    // SMT was populated. Verify the handler now restores from disk by passing
+    // it a fresh SmtService that has never been start()ed.
+    await rig.smt.stop(); // flush any in-flight checkpoint to disk
+
+    const freshSmt = new SmtService({
+      smt: {
+        checkpointDir: join(rig.dir, "smt-checkpoints"),
+        checkpointIntervalMs: 0,
+      },
+    });
+
+    const json = await captureConsoleAsync(() =>
+      cliAnomaliesHandler(rig.store, freshSmt, { since: "24h", tz: "utc", json: true }),
+    );
+    // ensureReady() emits a "Restored N tree(s)" log line via the subsystem
+    // logger; pick the JSON document, not the log preamble.
+    const jsonLine = json.stdout.split("\n").find((l) => l.startsWith("{"));
+    assert.ok(jsonLine, `no JSON line in stdout: ${json.stdout}`);
+    const view = JSON.parse(jsonLine);
+    assert.equal(
+      view.anomalies.integrityViolations.note,
+      null,
+      "expected the tamper scan to run after ensureReady() restores the SMT cursor",
     );
   });
 });
