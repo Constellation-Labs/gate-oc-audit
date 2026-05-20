@@ -11,7 +11,6 @@ import type { SmtService } from "../services/smt-service.js";
 import type { AnchorHealth } from "../services/de-anchor.js";
 import type { GatewayHealth } from "../services/gateway-publisher.js";
 import type { RetentionHealth } from "../services/retention.js";
-import type { CheckpointRecord } from "../store/audit-store.js";
 import type { InventorySummary } from "../services/inventory.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -36,7 +35,7 @@ export interface StorageSection {
 export interface IntegritySection {
   sequenceAtHead: number;
   smtTreeCount: number;
-  smtTreeKeys: string[];
+  smtTreeKeys: readonly string[];
   smtRoot: string | null;
   smtEntryCount: number;
   smtNodeCount: number;
@@ -160,18 +159,20 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
   // FS).
   const trees = smtService.listTrees().slice().sort((a, b) => a.key.localeCompare(b.key));
   const lastInsertedSeq = smtService.getLastInsertedSequence();
-  const checkpoints: CheckpointRecord[] = store.getCheckpoints();
-  const lastCp = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : undefined;
+  // Use the single-row "latest by sequence_end" fetch so an overlapping or
+  // backfilled checkpoint with a smaller sequence_start but larger
+  // sequence_end is honored. getCheckpoints() is ORDER BY sequence_start
+  // ASC and would pick the wrong row in that case.
+  const lastCp = store.getLastCheckpoint();
   const sequenceAtHead = computeHeadSequence(store);
-  // SMT-centric "pending" — how many events the SMT has accepted but the
-  // last DE-anchored checkpoint doesn't cover yet. Falls back to the
-  // anchor health snapshot's value when the SMT data isn't comparable
-  // (no checkpoints yet, or lastInsertedSeq behind the checkpoint cursor,
-  // which indicates a forensic copy with newer checkpoints than tree
-  // state). Both definitions should agree when the anchor is active and
-  // up-to-date; this prefers the SMT view because the row lives under
-  // the Integrity section, not the Anchor section.
+  // SMT-centric "pending": events the SMT has accepted but the latest
+  // DE-anchored checkpoint doesn't cover yet. Clamp negative diffs to 0
+  // so a forensic copy with newer checkpoints than tree state isn't
+  // reported as negative.
   const smtPending = lastCp ? Math.max(0, lastInsertedSeq - lastCp.sequenceEnd) : lastInsertedSeq;
+  // Fall back to the anchor-health value when SMT has nothing to say
+  // (no checkpoints yet, or the SMT cursor sits at/behind the
+  // checkpoint cursor) so the row still surfaces an anchor backlog.
   const pendingSinceLastCheckpoint = smtPending > 0 || anchorHealth === undefined
     ? smtPending
     : anchorHealth.pendingSinceLastCheckpoint;
