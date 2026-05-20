@@ -8,6 +8,10 @@ const PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 export interface RetentionHealth {
   /** ISO timestamp of the next scheduled prune tick, or undefined if not started. */
   nextPruneAt: string | undefined;
+  /** Configured retention window in days (used as the time-based prune cutoff). */
+  retentionDays: number;
+  /** Configured DB size cap in MiB (used as the size-based prune trigger). */
+  maxSizeMb: number;
 }
 
 export const RETENTION_HEALTH_NAME = "retention";
@@ -48,7 +52,11 @@ export class RetentionService {
   }
 
   health(): RetentionHealth {
-    return { nextPruneAt: this.nextPruneAt() };
+    return {
+      nextPruneAt: this.nextPruneAt(),
+      retentionDays: this.retentionDays,
+      maxSizeMb: this.maxSizeMb,
+    };
   }
 
   private runPrune(): void {

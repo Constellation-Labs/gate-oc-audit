@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://constellationnetwork.io/schemas/openclaw-audit/audit-status.schema.json",
+  "title": "AuditStatus",
+  "description": "Runtime health snapshot produced by `openclaw audit status --json`. Consumed by the gateway dashboard so a remote viewer renders the same one-screen health view a local operator sees. See Local Reporting PRD §R1.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "header",
+    "storage",
+    "integrity",
+    "anchor",
+    "gateway",
+    "fileWatch",
+    "inventory",
+    "securityScan"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "header": {
+      "type": "object",
+      "required": ["pluginName", "pluginVersion", "machineId", "generatedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "pluginName": { "type": "string" },
+        "pluginVersion": { "type": "string" },
+        "machineId": { "type": "string" },
+        "generatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": [
+        "dbSizeMb",
+        "maxSizeMb",
+        "eventCount",
+        "oldestEventAt",
+        "oldestEventAgeDays",
+        "retentionDays",
+        "nextPruneAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dbSizeMb": { "type": "number", "minimum": 0 },
+        "maxSizeMb": { "type": "number", "minimum": 0 },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "oldestEventAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "oldestEventAgeDays": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "retentionDays": { "type": "integer", "minimum": 0 },
+        "nextPruneAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "required": [
+        "sequenceAtHead",
+        "smtTreeCount",
+        "smtTreeKeys",
+        "smtRoot",
+        "smtEntryCount",
+        "smtNodeCount",
+        "lastInsertedSequence",
+        "lastCheckpoint",
+        "pendingSinceLastCheckpoint",
+        "conversationAccess"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sequenceAtHead": { "type": "integer", "minimum": 0 },
+        "smtTreeCount": { "type": "integer", "minimum": 0 },
+        "smtTreeKeys": { "type": "array", "items": { "type": "string" } },
+        "smtRoot": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "smtEntryCount": { "type": "integer", "minimum": 0 },
+        "smtNodeCount": { "type": "integer", "minimum": 0 },
+        "lastInsertedSequence": { "type": "integer", "minimum": 0 },
+        "lastCheckpoint": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["id", "sequenceEnd", "createdAt"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "sequenceEnd": { "type": "integer", "minimum": 0 },
+                "createdAt": { "type": "string", "format": "date-time" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "pendingSinceLastCheckpoint": { "type": "integer", "minimum": 0 },
+        "conversationAccess": { "enum": ["enabled", "enabled-but-silent", "disabled"] }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": [
+        "isActive",
+        "circuitOpen",
+        "consecutiveFailures",
+        "anchoredToday",
+        "lastAnchorAt",
+        "lastTxHash",
+        "pendingSinceLastCheckpoint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "isActive": { "type": "boolean" },
+        "circuitOpen": { "type": "boolean" },
+        "consecutiveFailures": { "type": "integer", "minimum": 0 },
+        "anchoredToday": { "type": "integer", "minimum": 0 },
+        "lastAnchorAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "lastTxHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "pendingSinceLastCheckpoint": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "required": [
+        "isActive",
+        "url",
+        "buffered",
+        "droppedToday",
+        "circuitOpen",
+        "lastSuccessAt",
+        "lastErrorAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "isActive": { "type": "boolean" },
+        "url": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "buffered": { "type": "integer", "minimum": 0 },
+        "droppedToday": { "type": "integer", "minimum": 0 },
+        "circuitOpen": { "type": "boolean" },
+        "lastSuccessAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "lastErrorAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
+      }
+    },
+    "fileWatch": {
+      "type": "object",
+      "required": ["patternsWatched", "patternsIgnored", "recentChanges24h"],
+      "additionalProperties": false,
+      "properties": {
+        "patternsWatched": { "type": "integer", "minimum": 0 },
+        "patternsIgnored": { "type": "integer", "minimum": 0 },
+        "recentChanges24h": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "required": ["plugins", "skills", "tools", "crons"],
+      "additionalProperties": false,
+      "properties": {
+        "plugins": { "type": "integer", "minimum": 0 },
+        "skills": { "type": "integer", "minimum": 0 },
+        "tools": { "type": "integer", "minimum": 0 },
+        "crons": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "securityScan": {
+      "type": "object",
+      "required": ["lastScanAt", "highFindings", "mediumFindings"],
+      "additionalProperties": false,
+      "properties": {
+        "lastScanAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "highFindings": { "type": "integer", "minimum": 0 },
+        "mediumFindings": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliStatusHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions, type AuditStatusOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -22,6 +22,12 @@ import {GatewayStopCapture} from "./gateway-stop-capture.js";
 import {registerAuditUiRoutes} from "./ui/routes.js";
 import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
+import {createRequire} from "node:module";
+
+const requireFromHere = createRequire(import.meta.url);
+const pluginPkg = requireFromHere("../package.json") as { name: string; version: string };
+const PLUGIN_NAME = pluginPkg.name;
+const PLUGIN_VERSION = pluginPkg.version;
 
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
@@ -109,6 +115,14 @@ export default (() => {
                     .command("verify")
                     .description("Verify SMT integrity and DE checkpoints")
                     .action(() => cliVerifyHandler(getSmtService(), getStore(), getNotifier()));
+
+                audit
+                    .command("status")
+                    .description("Runtime health snapshot (storage, integrity, anchor, gateway, inventory)")
+                    .option("--json", "Emit the snapshot as JSON (single line)")
+                    .action((opts: AuditStatusOptions) =>
+                        cliStatusHandler(getStore(), getSmtService(), config, PLUGIN_NAME, PLUGIN_VERSION, opts),
+                    );
 
                 audit
                     .command("ui")
