@@ -20,6 +20,13 @@ export const SPEND_GROUP_BY_VALUES: ReadonlyArray<SpendGroupBy> = [
   "session",
 ];
 
+/** Default bucket cap when the caller doesn't supply --limit. Mirrors the
+ *  cron-rollup MAX (1000): plenty for normal use, bounded enough to avoid
+ *  a soft local-DoS on session grouping over a large DB. */
+export const DEFAULT_SPEND_LIMIT = 1000;
+/** Hard upper bound the CLI accepts via --limit. */
+export const MAX_SPEND_LIMIT = 100_000;
+
 export interface SpendRollupRow {
   /** Bucket label. The interpretation depends on `groupBy`. */
   bucket: string;
@@ -44,6 +51,10 @@ export interface SpendRollup {
   schemaVersion: typeof SPEND_ROLLUP_SCHEMA_VERSION;
   generatedAt: string;
   groupBy: SpendGroupBy;
+  /** Bucket cap that produced this rollup. Mirrors what the SQL LIMIT was. */
+  limit: number;
+  /** True when the SQL LIMIT trimmed at least one bucket from the result. */
+  truncated: boolean;
   window: {
     fromIso: string;
     toIso: string;
@@ -54,13 +65,23 @@ export interface SpendRollup {
   totals: SpendRollupTotals;
 }
 
+export interface BuildSpendRollupOptions {
+  limit?: number;
+}
+
 export function buildSpendRollup(
   store: AuditStore,
   window: TimeWindow,
   groupBy: SpendGroupBy,
+  opts: BuildSpendRollupOptions = {},
 ): SpendRollup {
-  const raw = store.aggregateLlmSpendByInWindow(window.fromIso, window.toIso, groupBy);
-  const rows: SpendRollupRow[] = raw.map((r) => ({
+  const limit = opts.limit ?? DEFAULT_SPEND_LIMIT;
+  // Over-fetch by 1 so we can detect truncation without a second COUNT(*)
+  // query. The extra row is dropped before returning.
+  const raw = store.aggregateLlmSpendByInWindow(window.fromIso, window.toIso, groupBy, limit + 1);
+  const truncated = raw.length > limit;
+  const sliced = truncated ? raw.slice(0, limit) : raw;
+  const rows: SpendRollupRow[] = sliced.map((r) => ({
     bucket: r.bucket,
     callCount: r.callCount,
     inputTokens: r.inputTokens,
@@ -93,6 +114,8 @@ export function buildSpendRollup(
     schemaVersion: SPEND_ROLLUP_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     groupBy,
+    limit,
+    truncated,
     window: {
       fromIso: window.fromIso,
       toIso: window.toIso,
@@ -116,6 +139,15 @@ export function formatSpendRollupText(r: SpendRollup): string {
   lines.push(`LLM spend by ${r.groupBy} — ${r.window.label} (${r.window.tz.toUpperCase()})`);
   lines.push(`Window: ${r.window.fromIso} → ${r.window.toIso}`);
   lines.push(`Generated: ${r.generatedAt}`);
+  // Day buckets are sliced from created_at in UTC; we don't apply a tz
+  // offset per row. Surface this so a user passing --tz local doesn't
+  // assume the labels are local-tz dates.
+  if (r.groupBy === "day") {
+    lines.push("Note: day buckets are UTC dates regardless of --tz.");
+  }
+  if (r.truncated) {
+    lines.push(`Note: truncated to ${r.limit} buckets (some entries omitted; raise --limit to see them).`);
+  }
   lines.push("");
 
   if (r.rows.length === 0) {

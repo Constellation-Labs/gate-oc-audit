@@ -16,7 +16,7 @@ import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
 import { buildSessionProjection } from "./reports/session-projection.js";
 import { formatSessionProjectionText, serializeSessionProjectionJson } from "./reports/format-session.js";
 import { buildCronRollup, formatCronRollupText, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "./reports/cron-rollup.js";
-import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, type SpendGroupBy } from "./reports/spend-rollup.js";
+import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "./reports/spend-rollup.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -520,6 +520,7 @@ export interface AuditSpendOptions {
   since?: string;
   until?: string;
   tz?: string;
+  limit?: string;
   json?: boolean;
 }
 
@@ -530,8 +531,9 @@ export function cliSpendHandler(store: AuditStore, opts: AuditSpendOptions = {})
   const groupBy = parseGroupBy(opts.by);
   const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
   const window = parseSince(opts.since ?? "24h", opts.until, tz);
+  const limit = parsePositiveInt(opts.limit, "--limit", MAX_SPEND_LIMIT) ?? DEFAULT_SPEND_LIMIT;
 
-  const rollup = buildSpendRollup(store, window, groupBy);
+  const rollup = buildSpendRollup(store, window, groupBy, { limit });
 
   if (opts.json === true) {
     outLine(JSON.stringify(rollup));

@@ -11,6 +11,7 @@ import {
   formatSpendRollupText,
   SPEND_ROLLUP_SCHEMA_VERSION,
 } from "../../src/reports/spend-rollup.js";
+import { cliSpendHandler } from "../../src/cli.js";
 import { parseSince } from "../../src/reports/time-window.js";
 
 const require2 = createRequire(import.meta.url);
@@ -74,7 +75,7 @@ describe("buildSpendRollup", () => {
     assert.equal(r.totals.costUsd, 0);
   });
 
-  it("groups by model and sums tokens + cost", () => {
+  it("groups by model (provider/model label) and sums tokens + cost", () => {
     appendResponse(store, dbPath, { provider: "openai", model: "gpt-5", inputTokens: 100, outputTokens: 50, costUsd: 0.02 });
     appendResponse(store, dbPath, { provider: "openai", model: "gpt-5", inputTokens: 200, outputTokens: 75, costUsd: 0.04 });
     appendResponse(store, dbPath, { provider: "anthropic", model: "opus-4-7", inputTokens: 500, outputTokens: 200, costUsd: 0.10 });
@@ -83,16 +84,27 @@ describe("buildSpendRollup", () => {
     const r = buildSpendRollup(store, window, "model");
     assert.equal(r.rows.length, 2);
     // Cost desc — opus first
-    assert.equal(r.rows[0]!.bucket, "opus-4-7");
+    assert.equal(r.rows[0]!.bucket, "anthropic/opus-4-7");
     assert.equal(r.rows[0]!.callCount, 1);
     assert.equal(r.rows[0]!.costUsd, 0.10);
-    assert.equal(r.rows[1]!.bucket, "gpt-5");
+    assert.equal(r.rows[1]!.bucket, "openai/gpt-5");
     assert.equal(r.rows[1]!.callCount, 2);
     assert.equal(r.rows[1]!.inputTokens, 300);
     assert.equal(r.rows[1]!.outputTokens, 125);
     assert.ok(Math.abs(r.rows[1]!.costUsd - 0.06) < 1e-9);
     assert.equal(r.totals.callCount, 3);
     assert.ok(Math.abs(r.totals.costUsd - 0.16) < 1e-9);
+  });
+
+  it("does not merge same-model name across two providers", () => {
+    // Two providers exposing the same model name should produce two
+    // distinct buckets so totals match `audit report daily` per-row.
+    appendResponse(store, dbPath, { provider: "openai", model: "opus", inputTokens: 10, outputTokens: 5, costUsd: 0.01 });
+    appendResponse(store, dbPath, { provider: "anthropic", model: "opus", inputTokens: 10, outputTokens: 5, costUsd: 0.02 });
+    const r = buildSpendRollup(store, WIDE_WINDOW(), "model");
+    assert.equal(r.rows.length, 2);
+    assert.ok(r.rows.find((x) => x.bucket === "openai/opus"));
+    assert.ok(r.rows.find((x) => x.bucket === "anthropic/opus"));
   });
 
   it("groups by provider", () => {
@@ -155,6 +167,54 @@ describe("buildSpendRollup", () => {
     const r = buildSpendRollup(store, WIDE_WINDOW(), "model");
     assert.equal(r.rows[0]!.cacheReadTokens, 12);
   });
+
+  it("prefers cacheReadTokens over cacheTokens when both are present on the same row", () => {
+    // SQL COALESCE order is (cacheReadTokens, cacheTokens); the modern
+    // field wins so callers can migrate forward without double-counting.
+    appendResponse(store, dbPath, { provider: "p", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0, cacheReadTokens: 5, cacheTokens: 999 });
+    const r = buildSpendRollup(store, WIDE_WINDOW(), "model");
+    assert.equal(r.rows[0]!.cacheReadTokens, 5);
+  });
+
+  it("respects --limit and surfaces truncated: true with sort-by-cost retention", () => {
+    // Insert 5 distinct providers; cap at 3. The three highest-cost ones
+    // should appear, the two cheapest should be elided.
+    appendResponse(store, dbPath, { provider: "alpha",   model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.50 });
+    appendResponse(store, dbPath, { provider: "beta",    model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.40 });
+    appendResponse(store, dbPath, { provider: "gamma",   model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.30 });
+    appendResponse(store, dbPath, { provider: "delta",   model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.20 });
+    appendResponse(store, dbPath, { provider: "epsilon", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.10 });
+
+    const r = buildSpendRollup(store, WIDE_WINDOW(), "provider", { limit: 3 });
+    assert.equal(r.limit, 3);
+    assert.equal(r.truncated, true);
+    assert.equal(r.rows.length, 3);
+    assert.deepEqual(r.rows.map((x) => x.bucket), ["alpha", "beta", "gamma"]);
+    // Sanity: totals reflect what's displayed, not the full window.
+    assert.ok(Math.abs(r.totals.costUsd - 1.20) < 1e-9);
+  });
+
+  it("truncated is false when result row count is at or below limit", () => {
+    appendResponse(store, dbPath, { provider: "alpha", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    appendResponse(store, dbPath, { provider: "beta",  model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.02 });
+    const r = buildSpendRollup(store, WIDE_WINDOW(), "provider", { limit: 10 });
+    assert.equal(r.truncated, false);
+    assert.equal(r.rows.length, 2);
+  });
+
+  it("--by day breaks ties on bucket ASC (oldest first)", () => {
+    // All three rows have identical costUsd; the day bucket must be
+    // stably sorted ascending. Regression for the L-5/L-6 nit: day
+    // grouping uses `bucket ASC`, the other groupings use cost DESC.
+    const a = appendResponse(store, dbPath, { provider: "p", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    const b = appendResponse(store, dbPath, { provider: "p", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    const c = appendResponse(store, dbPath, { provider: "p", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    backdate(dbPath, a, "2026-05-17T10:00:00.000Z");
+    backdate(dbPath, b, "2026-05-19T10:00:00.000Z");
+    backdate(dbPath, c, "2026-05-18T10:00:00.000Z");
+    const r = buildSpendRollup(store, parseSince("365d", undefined, "utc"), "day");
+    assert.deepEqual(r.rows.map((x) => x.bucket), ["2026-05-17", "2026-05-18", "2026-05-19"]);
+  });
 });
 
 describe("formatSpendRollupText", () => {
@@ -184,6 +244,49 @@ describe("formatSpendRollupText", () => {
     const r = buildSpendRollup(store, WIDE_WINDOW(), "model");
     const text = formatSpendRollupText(r);
     assert.match(text, /no LLM activity in window/);
+  });
+
+  it("notes that --by day buckets are UTC dates", () => {
+    appendResponse(store, dbPath, { provider: "p", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    const r = buildSpendRollup(store, parseSince("365d", undefined, "local"), "day");
+    const text = formatSpendRollupText(r);
+    assert.match(text, /day buckets are UTC dates/);
+  });
+
+  it("notes truncation when --limit trims the result", () => {
+    appendResponse(store, dbPath, { provider: "a", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.02 });
+    appendResponse(store, dbPath, { provider: "b", model: "m", inputTokens: 0, outputTokens: 0, costUsd: 0.01 });
+    const r = buildSpendRollup(store, WIDE_WINDOW(), "provider", { limit: 1 });
+    const text = formatSpendRollupText(r);
+    assert.match(text, /truncated to 1 buckets/);
+  });
+});
+
+describe("cliSpendHandler --by validation", () => {
+  let dbPath: string;
+  let store: AuditStore;
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("rejects an unknown --by value with a descriptive error", () => {
+    assert.throws(
+      () => cliSpendHandler(store, { by: "team" }),
+      /--by must be one of provider\|model\|day\|session/,
+    );
+  });
+
+  it("rejects --limit values outside the cap", () => {
+    assert.throws(
+      () => cliSpendHandler(store, { limit: "999999999" }),
+      /--limit/,
+    );
   });
 });
 

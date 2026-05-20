@@ -219,10 +219,11 @@ export default (() => {
                 audit
                     .command("spend")
                     .description("LLM-spend rollup grouped by provider, model, day, or session")
-                    .option("--by <bucket>", "Group rows by provider|model|day|session (default: model)")
+                    .option("--by <bucket>", "Group rows by provider|model|day|session (default: model). For 'model', the bucket label is `provider/model` so cross-provider model name collisions don't merge.")
                     .option("--since <dur|iso>", "Window start: duration (Nm|Nh|Nd) or ISO 8601 instant (default: 24h)")
                     .option("--until <dur|iso>", "Window end: duration (Nm|Nh|Nd) or ISO 8601 instant (default: now)")
-                    .option("--tz <local|utc>", "Timezone for the period label (default: utc)")
+                    .option("--tz <local|utc>", "Timezone for the period label (default: utc). Note: --by day buckets are always UTC dates regardless of this flag.")
+                    .option("--limit <n>", "Cap on the number of buckets returned (default: 1000, max: 100000). When the cap trims a result, `truncated: true` appears in all outputs.")
                     .option("--json", "Emit the rollup as JSON (single line)")
                     .action((opts: AuditSpendOptions) => cliSpendHandler(getStore(), opts));
 
