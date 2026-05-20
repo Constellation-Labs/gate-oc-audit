@@ -117,6 +117,12 @@ export class SmtService {
   // in-memory set still works for the lifetime of the process.
   private auditStore: AuditStoreLike | undefined;
 
+  // True once restoreSkippedSeqs() has observed a service_health row
+  // (even an empty one). Gates the legacy JSON migration so a stale
+  // `_metadata.json` can't keep re-importing skips after the operator
+  // has cleared them via the DB row.
+  private skippedSeqsRestoredFromDb = false;
+
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
   private checkpointInFlight: Promise<void> | undefined;
@@ -776,11 +782,12 @@ export class SmtService {
         );
       }
       // Legacy migration: earlier WIP commits on the AG-123 branch stored
-      // skippedSeqs in this JSON. Read once if present (and the audit DB
-      // doesn't already have a row) so an in-flight upgrader doesn't
-      // lose their accumulated skip set. Persistence going forward uses
-      // service_health only — see restoreSkippedSeqs and persistSkippedSeqs.
-      if (Array.isArray(data.skippedSeqs) && this.skippedSeqs.size === 0) {
+      // skippedSeqs in this JSON. Read once if present, but only when the
+      // audit DB has no service_health row yet — otherwise a stale
+      // `_metadata.json` would keep re-importing skips the operator
+      // cleared via the DB. Persistence going forward uses service_health
+      // only — see restoreSkippedSeqs and persistSkippedSeqs.
+      if (Array.isArray(data.skippedSeqs) && !this.skippedSeqsRestoredFromDb) {
         this.skippedSeqs = new Set(
           (data.skippedSeqs as unknown[]).filter(
             (n): n is number => typeof n === "number",
@@ -810,6 +817,10 @@ export class SmtService {
     if (!this.auditStore) return;
     const row = this.auditStore.getServiceHealth(SMT_SKIPPED_SEQS_HEALTH_NAME);
     if (!row) return;
+    // The row exists — including the empty-array case, which is the
+    // "operator cleared the skip set" signal that must suppress the
+    // legacy JSON migration.
+    this.skippedSeqsRestoredFromDb = true;
     if (!Array.isArray(row.payload)) return;
     this.skippedSeqs = new Set(
       (row.payload as unknown[]).filter((n): n is number => typeof n === "number"),
