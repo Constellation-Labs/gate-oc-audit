@@ -16,6 +16,7 @@ import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
 import { buildSessionProjection } from "./reports/session-projection.js";
 import { formatSessionProjectionText, serializeSessionProjectionJson } from "./reports/format-session.js";
 import { buildCronRollup, formatCronRollupText, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "./reports/cron-rollup.js";
+import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, type SpendGroupBy } from "./reports/spend-rollup.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -512,4 +513,37 @@ export async function cliAnomaliesHandler(
     return;
   }
   process.stdout.write(formatAnomalyViewText(view));
+}
+
+export interface AuditSpendOptions {
+  by?: string;
+  since?: string;
+  until?: string;
+  tz?: string;
+  json?: boolean;
+}
+
+export function cliSpendHandler(store: AuditStore, opts: AuditSpendOptions = {}): void {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+  const groupBy = parseGroupBy(opts.by);
+  const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
+  const window = parseSince(opts.since ?? "24h", opts.until, tz);
+
+  const rollup = buildSpendRollup(store, window, groupBy);
+
+  if (opts.json === true) {
+    outLine(JSON.stringify(rollup));
+    return;
+  }
+  process.stdout.write(formatSpendRollupText(rollup));
+}
+
+function parseGroupBy(raw: string | undefined): SpendGroupBy {
+  if (raw === undefined) return "model";
+  if ((SPEND_GROUP_BY_VALUES as ReadonlyArray<string>).includes(raw)) {
+    return raw as SpendGroupBy;
+  }
+  throw new Error(`--by must be one of ${SPEND_GROUP_BY_VALUES.join("|")} (got "${raw}")`);
 }

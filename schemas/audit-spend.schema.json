@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://constellationnetwork.io/schemas/openclaw-audit/audit-spend.schema.json",
+  "title": "AuditSpendRollup",
+  "description": "LLM-spend rollup produced by `openclaw audit spend --json`. Aggregates `prompt.response` metadata (token counts + costUsd) across a time window, grouped by provider, model, day, or session. See Local Reporting PRD §R11.",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "groupBy", "window", "rows", "totals"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "groupBy": { "enum": ["provider", "model", "day", "session"] },
+    "window": {
+      "type": "object",
+      "required": ["fromIso", "toIso", "label", "tz"],
+      "additionalProperties": false,
+      "properties": {
+        "fromIso": { "type": "string", "format": "date-time" },
+        "toIso": { "type": "string", "format": "date-time" },
+        "label": { "type": "string" },
+        "tz": { "enum": ["local", "utc"] }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "bucket",
+          "callCount",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens",
+          "costUsd"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "bucket": { "type": "string" },
+          "callCount": { "type": "integer", "minimum": 0 },
+          "inputTokens": { "type": "integer", "minimum": 0 },
+          "outputTokens": { "type": "integer", "minimum": 0 },
+          "cacheReadTokens": { "type": "integer", "minimum": 0 },
+          "cacheWriteTokens": { "type": "integer", "minimum": 0 },
+          "costUsd": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "required": [
+        "callCount",
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+        "costUsd"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "callCount": { "type": "integer", "minimum": 0 },
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "cacheReadTokens": { "type": "integer", "minimum": 0 },
+        "cacheWriteTokens": { "type": "integer", "minimum": 0 },
+        "costUsd": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

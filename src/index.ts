@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -214,6 +214,17 @@ export default (() => {
                     .action((sessionId: string, opts: AuditReportSessionOptions) =>
                         cliReportSessionHandler(getStore(), getSmtService(), sessionId, opts),
                     );
+
+                // Spend rollup (PRD R11)
+                audit
+                    .command("spend")
+                    .description("LLM-spend rollup grouped by provider, model, day, or session")
+                    .option("--by <bucket>", "Group rows by provider|model|day|session (default: model)")
+                    .option("--since <dur|iso>", "Window start: duration (Nm|Nh|Nd) or ISO 8601 instant (default: 24h)")
+                    .option("--until <dur|iso>", "Window end: duration (Nm|Nh|Nd) or ISO 8601 instant (default: now)")
+                    .option("--tz <local|utc>", "Timezone for the period label (default: utc)")
+                    .option("--json", "Emit the rollup as JSON (single line)")
+                    .action((opts: AuditSpendOptions) => cliSpendHandler(getStore(), opts));
 
                 // SMT subcommands
                 const smt = audit.command("smt").description("Sparse Merkle Tree operations");

@@ -197,6 +197,10 @@ export class AuditStore {
     aggCronByEventType: StatementSync;
     aggToolInvocations: StatementSync;
     aggLlmUsage: StatementSync;
+    aggLlmSpendByProvider: StatementSync;
+    aggLlmSpendByModel: StatementSync;
+    aggLlmSpendByDay: StatementSync;
+    aggLlmSpendBySession: StatementSync;
     aggMessageSentByChannel: StatementSync;
     distinctToolNames: StatementSync;
     reportFooterLastEvent: StatementSync;
@@ -338,6 +342,70 @@ export class AuditStore {
           AND created_at >= @fromIso AND created_at < @toIso
         GROUP BY model, provider
         ORDER BY cost_usd DESC
+      `),
+      // Spend rollups for `audit spend` — one prepared statement per
+      // groupBy. Same columns as aggLlmUsage so the projection can reuse
+      // the row shape; the bucket label varies (provider name, model name,
+      // YYYY-MM-DD, session id).
+      aggLlmSpendByProvider: this.db.prepare(`
+        SELECT COALESCE(json_extract(metadata, '$.provider'), '<unknown>') AS bucket,
+               COUNT(*) AS call_count,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.inputTokens')    AS INTEGER)), 0) AS input_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.outputTokens')   AS INTEGER)), 0) AS output_tokens,
+               COALESCE(SUM(CAST(COALESCE(json_extract(metadata, '$.cacheReadTokens'),
+                                          json_extract(metadata, '$.cacheTokens')) AS INTEGER)), 0) AS cache_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.cacheWriteTokens') AS INTEGER)), 0) AS cache_write_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.costUsd') AS REAL)), 0) AS cost_usd
+        FROM audit_events
+        WHERE event_type = 'prompt.response'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY bucket
+        ORDER BY cost_usd DESC, bucket ASC
+      `),
+      aggLlmSpendByModel: this.db.prepare(`
+        SELECT COALESCE(json_extract(metadata, '$.model'), '<unknown>') AS bucket,
+               COUNT(*) AS call_count,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.inputTokens')    AS INTEGER)), 0) AS input_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.outputTokens')   AS INTEGER)), 0) AS output_tokens,
+               COALESCE(SUM(CAST(COALESCE(json_extract(metadata, '$.cacheReadTokens'),
+                                          json_extract(metadata, '$.cacheTokens')) AS INTEGER)), 0) AS cache_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.cacheWriteTokens') AS INTEGER)), 0) AS cache_write_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.costUsd') AS REAL)), 0) AS cost_usd
+        FROM audit_events
+        WHERE event_type = 'prompt.response'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY bucket
+        ORDER BY cost_usd DESC, bucket ASC
+      `),
+      aggLlmSpendByDay: this.db.prepare(`
+        SELECT substr(created_at, 1, 10) AS bucket,
+               COUNT(*) AS call_count,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.inputTokens')    AS INTEGER)), 0) AS input_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.outputTokens')   AS INTEGER)), 0) AS output_tokens,
+               COALESCE(SUM(CAST(COALESCE(json_extract(metadata, '$.cacheReadTokens'),
+                                          json_extract(metadata, '$.cacheTokens')) AS INTEGER)), 0) AS cache_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.cacheWriteTokens') AS INTEGER)), 0) AS cache_write_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.costUsd') AS REAL)), 0) AS cost_usd
+        FROM audit_events
+        WHERE event_type = 'prompt.response'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `),
+      aggLlmSpendBySession: this.db.prepare(`
+        SELECT COALESCE(session_id, '<no-session>') AS bucket,
+               COUNT(*) AS call_count,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.inputTokens')    AS INTEGER)), 0) AS input_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.outputTokens')   AS INTEGER)), 0) AS output_tokens,
+               COALESCE(SUM(CAST(COALESCE(json_extract(metadata, '$.cacheReadTokens'),
+                                          json_extract(metadata, '$.cacheTokens')) AS INTEGER)), 0) AS cache_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.cacheWriteTokens') AS INTEGER)), 0) AS cache_write_tokens,
+               COALESCE(SUM(CAST(json_extract(metadata, '$.costUsd') AS REAL)), 0) AS cost_usd
+        FROM audit_events
+        WHERE event_type = 'prompt.response'
+          AND created_at >= @fromIso AND created_at < @toIso
+        GROUP BY bucket
+        ORDER BY cost_usd DESC, bucket ASC
       `),
       aggMessageSentByChannel: this.db.prepare(`
         SELECT json_extract(metadata, '$.channel') AS channel,
@@ -931,6 +999,51 @@ export class AuditStore {
     return rows.map((r) => ({
       model: r.model ?? "<unknown>",
       provider: r.provider,
+      callCount: r.call_count,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      cacheTokens: r.cache_tokens,
+      cacheWriteTokens: r.cache_write_tokens,
+      costUsd: r.cost_usd,
+    }));
+  }
+
+  /**
+   * Per-bucket LLM spend rollup. `groupBy` selects the bucketing strategy;
+   * the row shape is identical across all four so the formatter only needs
+   * one column layout.
+   */
+  aggregateLlmSpendByInWindow(
+    fromIso: string,
+    toIso: string,
+    groupBy: "provider" | "model" | "day" | "session",
+  ): Array<{
+    bucket: string;
+    callCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheTokens: number;
+    cacheWriteTokens: number;
+    costUsd: number;
+  }> {
+    const stmt = groupBy === "provider"
+      ? this.stmts.aggLlmSpendByProvider
+      : groupBy === "model"
+        ? this.stmts.aggLlmSpendByModel
+        : groupBy === "day"
+          ? this.stmts.aggLlmSpendByDay
+          : this.stmts.aggLlmSpendBySession;
+    const rows = stmt.all({ fromIso, toIso }) as Array<{
+      bucket: string | null;
+      call_count: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_tokens: number;
+      cache_write_tokens: number;
+      cost_usd: number;
+    }>;
+    return rows.map((r) => ({
+      bucket: r.bucket ?? "<unknown>",
       callCount: r.call_count,
       inputTokens: r.input_tokens,
       outputTokens: r.output_tokens,
