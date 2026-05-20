@@ -5,6 +5,7 @@ import type { SmtService } from "./services/smt-service.js";
 import { resolveAuditUiUrl } from "./util/gateway-url.js";
 import { streamExport, type ExportFormat } from "./ui/export.js";
 import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
+import { resolveOpenclawDir } from "./util/openclaw-paths.js";
 import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
 import { parseDate, parseWeek, parseSince, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
 import { buildProjection } from "./reports/projection.js";
@@ -16,6 +17,11 @@ import { formatAnomalyViewHtml } from "./reports/format-anomalies-html.js";
 import { buildSessionProjection } from "./reports/session-projection.js";
 import { formatSessionProjectionText, serializeSessionProjectionJson } from "./reports/format-session.js";
 import { buildCronRollup, formatCronRollupText, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "./reports/cron-rollup.js";
+import { buildStatusSnapshot } from "./reports/status-snapshot.js";
+import { formatStatusText } from "./reports/format-status.js";
+import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "./services/de-anchor.js";
+import { GATEWAY_HEALTH_NAME, type GatewayHealth } from "./services/gateway-publisher.js";
+import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "./services/retention.js";
 import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "./reports/spend-rollup.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
@@ -513,6 +519,88 @@ export async function cliAnomaliesHandler(
     return;
   }
   process.stdout.write(formatAnomalyViewText(view));
+}
+
+export interface AuditStatusOptions {
+  json?: boolean;
+}
+
+export async function cliStatusHandler(
+  store: AuditStore,
+  smtService: SmtService,
+  config: Record<string, unknown>,
+  pluginName: string,
+  pluginVersion: string,
+  opts: AuditStatusOptions = {},
+): Promise<void> {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+
+  // SmtService is best-effort: the CLI may run on a host where the SMT
+  // working state was moved or hasn't been built yet (forensic copy, fresh
+  // clone). Failures degrade to "no SMT info" rather than failing the whole
+  // command, matching cliReportSessionHandler. Surface a stderr warning
+  // so the operator notices when the Integrity section is reading zero
+  // because of a load failure (not because the SMT is genuinely empty).
+  try {
+    await smtService.ensureReady();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error(`WARNING: SMT state could not be loaded (${msg}). Integrity section will report zero state.`);
+  }
+
+  const anchorHealth = readHealth<AnchorHealth>(store, ANCHOR_HEALTH_NAME);
+  const gatewayHealth = readHealth<GatewayHealth>(store, GATEWAY_HEALTH_NAME);
+  // Health row is populated on every prune tick. When absent (service never
+  // ran in this DB lifecycle) we still want a meaningful Retention line —
+  // fall back to the configured values, matching what RetentionService would
+  // have written on its first tick.
+  const persistedRetention = readHealth<RetentionHealth>(store, RETENTION_HEALTH_NAME);
+  const retentionHealth: RetentionHealth = persistedRetention ?? {
+    nextPruneAt: undefined,
+    retentionDays: typeof config.localRetentionDays === "number" ? config.localRetentionDays : DEFAULT_RETENTION_DAYS,
+    maxSizeMb: typeof config.localMaxSizeMb === "number" ? config.localMaxSizeMb : DEFAULT_MAX_SIZE_MB,
+  };
+
+  const inventoryReport = collectInventory(store, "summary", {
+    openclawDir: resolveOpenclawDir(config),
+    projectRoot: process.cwd(),
+  });
+  const filePatterns = {
+    watched: Array.isArray(config.fileWatchPatterns) ? (config.fileWatchPatterns as unknown[]).length : 0,
+    ignored: Array.isArray(config.fileWatchIgnorePatterns) ? (config.fileWatchIgnorePatterns as unknown[]).length : 0,
+  };
+  const gatewayUrl = typeof config.gatewayUrl === "string" ? config.gatewayUrl : undefined;
+  const allowConversationAccess = config.allowConversationAccess === true;
+
+  const snapshot = buildStatusSnapshot({
+    pluginName,
+    pluginVersion,
+    machineId: smtService.getMachineId(),
+    now: new Date(),
+    store,
+    smtService,
+    anchorHealth,
+    gatewayHealth,
+    gatewayUrl,
+    retentionHealth,
+    filePatterns,
+    inventorySummary: inventoryReport.summary,
+    allowConversationAccess,
+  });
+
+  if (opts.json === true) {
+    outLine(JSON.stringify(snapshot));
+    return;
+  }
+  process.stdout.write(formatStatusText(snapshot) + "\n");
+}
+
+function readHealth<T>(store: AuditStore, name: string): T | undefined {
+  const row = store.getServiceHealth(name);
+  if (!row) return undefined;
+  return row.payload as T;
 }
 
 export interface AuditSpendOptions {

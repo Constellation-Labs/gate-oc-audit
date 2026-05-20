@@ -577,7 +577,7 @@ describe("verifier: chain replay result states", () => {
       // One extra row appended without inserting into the SMT — simulates
       // the SIGINT-captured gateway.stop path. Its sequence is > smtLastSeq.
       const untracked = localRig.appendUntracked(sampleInsert({ description: "untracked-tail" }));
-      assert.ok(untracked.sequence > localRig.smt.getLastCheckpointedSequence());
+      assert.ok(untracked.sequence > localRig.smt.getLastInsertedSequence());
 
       // Tamper one tracked row so root-mismatch triggers and findTamperedRange runs.
       const target = tracked[2]!;

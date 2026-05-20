@@ -498,3 +498,150 @@ describe("SmtService", () => {
     assert.ok(trees[0].entryCount >= 5);
   });
 });
+
+/**
+ * In-memory stand-in for the slice of AuditStore that SmtService uses for
+ * skippedSeqs persistence. Lets us assert the audit-store path without
+ * spinning up a real SQLite database in every skip test.
+ */
+function makeFakeStore() {
+  const rows = new Map<string, { payload: unknown; updatedAt: string }>();
+  return {
+    rows,
+    upsertServiceHealth(name: string, payload: unknown): void {
+      rows.set(name, { payload, updatedAt: new Date().toISOString() });
+    },
+    getServiceHealth(name: string) {
+      return rows.get(name);
+    },
+  };
+}
+
+describe("SmtService skippedSeqs", () => {
+  let service: SmtService;
+  let fakeStore: ReturnType<typeof makeFakeStore>;
+  let checkpointDir: string;
+
+  beforeEach(() => {
+    checkpointDir = `/tmp/smt-skip-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    service = new SmtService({
+      smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+    });
+    fakeStore = makeFakeStore();
+    service.setStore(fakeStore);
+  });
+
+  it("marks insertEntry-rejected events as skipped and persists to the store", () => {
+    // maxTreeSize=1 forces insertEntry to reject the second event with
+    // an "error" result, hitting the rejected-skip branch. Standalone
+    // SmtService skip-mechanism check.
+    const tiny = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        maxTreeSize: 1,
+        checkpointDir: `/tmp/smt-tiny-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      },
+    });
+    const tinyStore = makeFakeStore();
+    tiny.setStore(tinyStore);
+
+    tiny.onEventAppended(makeEvent({ sequence: 1 }));
+    // Second insert exceeds maxTreeSize → rejected → seq=2 lands in
+    // skippedSeqs and the audit-store row reflects it.
+    tiny.onEventAppended(makeEvent({ sequence: 2 }));
+
+    assert.equal(tiny.wasSkipped(2), true);
+    const persisted = tinyStore.getServiceHealth("smt-skipped-seqs");
+    assert.ok(persisted, "service_health row must exist after a skip");
+    assert.deepEqual(persisted!.payload, [2]);
+  });
+
+  it("clears the skip when a later retry succeeds", async () => {
+    const tiny = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        maxTreeSize: 1,
+        checkpointDir: `/tmp/smt-tiny2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      },
+    });
+    const tinyStore = makeFakeStore();
+    tiny.setStore(tinyStore);
+
+    tiny.onEventAppended(makeEvent({ sequence: 1 }));
+    tiny.onEventAppended(makeEvent({ sequence: 2 })); // skipped (maxTreeSize)
+    assert.equal(tiny.wasSkipped(2), true);
+
+    // A successful insert at the same sequence clears the skip record.
+    // Easiest path: lift maxTreeSize via a fresh service that reads the
+    // same skip set, then insert with sequence=2.
+    const room = new SmtService({
+      smt: {
+        checkpointIntervalMs: 0,
+        pruneAfterEpochs: 0,
+        maxTreeSize: 10,
+        checkpointDir: `/tmp/smt-tiny2-room-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      },
+    });
+    room.setStore(tinyStore);
+    // Pre-load the skip set as if we'd restarted with more headroom.
+    // (ensureReady pulls from the same fakeStore row.) Must await so the
+    // in-memory set is populated before the retry-insert runs.
+    await room.ensureReady();
+    room.onEventAppended(makeEvent({ sequence: 2, description: "retry-with-room" }));
+
+    assert.equal(room.wasSkipped(2), false);
+    const persisted = tinyStore.getServiceHealth("smt-skipped-seqs");
+    assert.deepEqual(persisted!.payload, []);
+  });
+
+  it("restores skippedSeqs from the audit store on ensureReady", async () => {
+    // Pre-seed the store with a skip set as if a prior process had
+    // recorded one. Then construct a fresh SmtService pointed at the
+    // same checkpoint dir and store.
+    fakeStore.upsertServiceHealth("smt-skipped-seqs", [42, 100, 256]);
+
+    const fresh = new SmtService({
+      smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+    });
+    fresh.setStore(fakeStore);
+    await fresh.ensureReady();
+
+    assert.equal(fresh.wasSkipped(42), true);
+    assert.equal(fresh.wasSkipped(100), true);
+    assert.equal(fresh.wasSkipped(256), true);
+    assert.equal(fresh.wasSkipped(7), false);
+  });
+
+  it("filters non-numeric payload entries on restore (defends against tampered rows)", async () => {
+    // A malicious or corrupt service_health row could carry strings or
+    // objects. The restore path must strip them, not crash.
+    fakeStore.upsertServiceHealth("smt-skipped-seqs", [
+      1,
+      "evil",
+      { drop: "table" },
+      2,
+      null,
+    ]);
+    const fresh = new SmtService({
+      smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+    });
+    fresh.setStore(fakeStore);
+    await fresh.ensureReady();
+
+    assert.equal(fresh.wasSkipped(1), true);
+    assert.equal(fresh.wasSkipped(2), true);
+    // The non-numeric entries are silently dropped.
+    assert.equal(fresh.wasSkipped(0), false);
+  });
+
+  it("ensureReady without a store does not crash and leaves skip set empty", async () => {
+    // SmtService remains usable in unit tests that don't wire a store.
+    const noStoreService = new SmtService({
+      smt: { checkpointIntervalMs: 0, pruneAfterEpochs: 0, checkpointDir },
+    });
+    await noStoreService.ensureReady();
+    assert.equal(noStoreService.wasSkipped(1), false);
+  });
+});

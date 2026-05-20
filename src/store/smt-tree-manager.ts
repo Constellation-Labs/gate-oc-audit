@@ -41,14 +41,6 @@ export class TreeManager {
     return this.trees.get(treeKey);
   }
 
-  totalNodeCount(): number {
-    let total = 0;
-    for (const store of this.trees.values()) {
-      total += store.getSize();
-    }
-    return total;
-  }
-
   /**
    * Replay cursor recovered from the tree DBs (key `meta:lastInsertedSeq`).
    *

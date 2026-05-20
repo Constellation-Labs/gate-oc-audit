@@ -40,13 +40,24 @@ export type VerifyResult =
   | { status: "invalid"; reason: string }
   | { status: "unverifiable"; reason: string };
 
+/**
+ * Minimal slice of AuditStore that SmtService depends on. Defining it
+ * here (instead of importing the full class) avoids a circular import:
+ * AuditStore doesn't need to know about SmtService.
+ */
+export interface AuditStoreLike {
+  upsertServiceHealth(name: string, payload: unknown): void;
+  getServiceHealth(name: string): { payload: unknown; updatedAt: string } | undefined;
+}
+
+/** service_health row name where skippedSeqs is persisted. */
+export const SMT_SKIPPED_SEQS_HEALTH_NAME = "smt-skipped-seqs";
+
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
   canonicalize: (obj: unknown) => string;
   hashDocument: (content: string | Buffer) => string;
 };
-
-const BYTES_PER_NODE = 128;
 
 function resolveConfig(config: Record<string, unknown>): SmtConfig {
   const smt =
@@ -71,10 +82,6 @@ function resolveConfig(config: Record<string, unknown>): SmtConfig {
         : EPOCH_DURATION_MS,
     pruneAfterEpochs:
       typeof smt.pruneAfterEpochs === "number" ? smt.pruneAfterEpochs : 0,
-    storageCapBytes:
-      typeof smt.storageCapBytes === "number"
-        ? smt.storageCapBytes
-        : 500 * 1024 * 1024,
   };
 }
 
@@ -90,6 +97,25 @@ export class SmtService {
   private leafValues: LeafValues = new Map();
 
   private lastInsertedSeq = 0;
+  // Sequences the SMT chose not to track (leaf already frozen or
+  // insertEntry rejected). Consulted by classifyEvent so these aren't
+  // misreported as "tampered" once a later seq advances lastInsertedSeq past
+  // them — they have no leaf and seq ≤ lastInsertedSeq, but the absence is
+  // expected policy, not evidence of tampering.
+  //
+  // Persisted in the audit DB's `service_health` table (not in the SMT
+  // checkpoint dir) so a local-fs attacker who can write to the SMT
+  // checkpoint dir cannot stamp tampered seqs into this set and hide
+  // them from `findTamperedRange` / `classifyEvent`. The audit DB sits
+  // behind WAL + busy_timeout single-writer semantics, matching the trust
+  // boundary the rest of the audit trail already lives under.
+  private skippedSeqs = new Set<number>();
+
+  // Optional reference to the audit store, used for persisting skippedSeqs.
+  // Set via setStore() after construction. When absent (e.g. unit tests
+  // that exercise SmtService standalone), persistence is skipped — the
+  // in-memory set still works for the lifetime of the process.
+  private auditStore: AuditStoreLike | undefined;
 
   private checkpointTimer: ReturnType<typeof setInterval> | undefined;
   private pruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -105,6 +131,15 @@ export class SmtService {
   }
 
   /**
+   * Wire the audit store so skippedSeqs can be persisted to the
+   * tamper-resistant `service_health` table instead of the file-system
+   * checkpoint dir. Call once, right after construction.
+   */
+  setStore(store: AuditStoreLike): void {
+    this.auditStore = store;
+  }
+
+  /**
    * Restore checkpoints from disk if not already done.
    * Called automatically by start(), but can also be called directly for CLI use.
    */
@@ -112,6 +147,12 @@ export class SmtService {
     if (this.restored) return;
     try {
       await this.manager.restoreAll(this.config.checkpointDir);
+      // Restore the skip set from the audit DB BEFORE reading the JSON
+      // metadata. restoreMetadata's legacy-migration path checks
+      // skippedSeqs.size === 0 to decide whether to import the JSON
+      // value; pre-loading from service_health makes that check
+      // idempotent across restarts.
+      this.restoreSkippedSeqs();
       await this.restoreMetadata();
       // Authoritative cursor lives in the tree DBs (kv `meta:lastInsertedSeq`)
       // so it can't desync from the leaves. If no tree carried it (legacy
@@ -214,23 +255,12 @@ export class SmtService {
     return this.machineId;
   }
 
-  private estimateStorageBytes(): number {
-    return this.manager.totalNodeCount() * BYTES_PER_NODE;
-  }
-
   /**
    * Called after each successful audit store append.
    * Computes dual hashes and inserts into the SMT. Fail-open.
    */
   onEventAppended(event: AuditEvent): void {
     try {
-      if (this.estimateStorageBytes() >= this.config.storageCapBytes) {
-        smtLog.warn(
-          "Storage cap reached, skipping insert",
-        );
-        return;
-      }
-
       const treeKey = this.getTreeKey();
       const store = this.manager.getOrCreate(treeKey);
       const timestamp = Math.floor(new Date(event.createdAt).getTime() / 1000);
@@ -243,6 +273,7 @@ export class SmtService {
         store.isFrozen(rawHash) ||
         (censoredHash && store.isFrozen(censoredHash))
       ) {
+        this.markSkipped(event.sequence);
         return;
       }
 
@@ -262,12 +293,16 @@ export class SmtService {
 
       if ("error" in result) {
         smtLog.warn(`Insert rejected: ${result.error}`);
+        this.markSkipped(event.sequence);
         return;
       }
 
       if (event.sequence > this.lastInsertedSeq) {
         this.lastInsertedSeq = event.sequence;
       }
+      // A retry that succeeds clears any prior skip record so the classifier
+      // doesn't keep treating this seq as untracked.
+      this.clearSkipped(event.sequence);
 
       if (this.needsFirstCheckpoint && !this.suppressCheckpoints) {
         this.needsFirstCheckpoint = false;
@@ -583,9 +618,58 @@ export class SmtService {
     return replayed;
   }
 
-  /** Highest audit event sequence number that was inserted into the SMT and checkpointed. */
-  getLastCheckpointedSequence(): number {
+  /**
+   * Highest audit event sequence the SMT has accepted as a leaf so far.
+   *
+   * NOTE: this is updated in-memory the moment `onEventAppended` succeeds,
+   * before any checkpoint runs. After a crash between insert and checkpoint
+   * the in-memory value is lost; on next start the restored value is older
+   * than what was actually in memory. Callers that need a durability
+   * guarantee should not use this value.
+   *
+   * Sequences below this value that have no leaf may have been
+   * intentionally skipped by the SMT (frozen leaf, insert rejected) — check
+   * `wasSkipped(seq)` before concluding tampering.
+   */
+  getLastInsertedSequence(): number {
     return this.lastInsertedSeq;
+  }
+
+  /** True if the SMT chose not to track this sequence (frozen leaf or insert rejected). */
+  wasSkipped(seq: number): boolean {
+    return this.skippedSeqs.has(seq);
+  }
+
+  /**
+   * Record a sequence as intentionally skipped. Persists immediately to
+   * the audit DB so a crash or restart doesn't lose the skip and re-mark
+   * the event as "tampered". Persistence failure logs but does not
+   * propagate — the in-memory set still serves classification for the
+   * lifetime of the process.
+   */
+  private markSkipped(seq: number): void {
+    this.skippedSeqs.add(seq);
+    this.persistSkippedSeqs();
+  }
+
+  /** Clear a sequence from the skip set after a retry succeeds. */
+  private clearSkipped(seq: number): void {
+    if (this.skippedSeqs.delete(seq)) {
+      this.persistSkippedSeqs();
+    }
+  }
+
+  private persistSkippedSeqs(): void {
+    if (!this.auditStore) return;
+    try {
+      this.auditStore.upsertServiceHealth(
+        SMT_SKIPPED_SEQS_HEALTH_NAME,
+        Array.from(this.skippedSeqs),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      smtLog.warn(`failed to persist skippedSeqs: ${msg}`);
+    }
   }
 
   getCurrentSmtRoot(treeKey?: string): string | null {
@@ -608,6 +692,10 @@ export class SmtService {
           ([tk, epochs]) => [tk, Array.from(epochs)] as const,
         ),
         lastInsertedSeq: this.lastInsertedSeq,
+        // skippedSeqs intentionally NOT written here — see the field's
+        // docstring. Persisted in the audit DB's service_health table
+        // instead, so a local-fs attacker who can write the checkpoint
+        // dir can't suppress tampering narration.
       };
       const filePath = join(this.config.checkpointDir, "_metadata.json");
       const tmpPath = filePath + ".tmp";
@@ -620,14 +708,27 @@ export class SmtService {
   }
 
   private async restoreMetadata(): Promise<void> {
+    const filePath = join(this.config.checkpointDir, "_metadata.json");
     let raw: string;
     try {
-      raw = await readFile(
-        join(this.config.checkpointDir, "_metadata.json"),
-        "utf-8",
-      );
-    } catch {
-      return; // No metadata file yet
+      raw = await readFile(filePath, "utf-8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        smtLog.warn(
+          `Metadata file at ${filePath} could not be read (${code ?? "unknown"}); starting from empty state — every event below the next checkpoint will appear "untracked" until the SMT catches up.`,
+        );
+        return;
+      }
+      // ENOENT is expected on a fresh install, but suspicious if the
+      // checkpoint dir already contains tree state (upgrade path that
+      // orphaned the metadata file, or a corrupt half-restore).
+      if (this.manager.listTrees().length > 0) {
+        smtLog.warn(
+          `Metadata file missing at ${filePath} but tree state is present. lastInsertedSeq will start at 0 and every prior event will appear "untracked" until replay catches up — this is the symptom of a checkpointDir change or a partial upgrade.`,
+        );
+      }
+      return;
     }
 
     try {
@@ -669,11 +770,50 @@ export class SmtService {
       const savedSeq = data.lastInsertedSeq ?? data.lastCheckpointedSeq;
       if (typeof savedSeq === "number") {
         this.lastInsertedSeq = savedSeq;
+      } else {
+        smtLog.warn(
+          `Metadata at ${filePath} is missing lastInsertedSeq; starting from 0 — every prior event will appear "untracked" until replay catches up.`,
+        );
+      }
+      // Legacy migration: earlier WIP commits on the AG-123 branch stored
+      // skippedSeqs in this JSON. Read once if present (and the audit DB
+      // doesn't already have a row) so an in-flight upgrader doesn't
+      // lose their accumulated skip set. Persistence going forward uses
+      // service_health only — see restoreSkippedSeqs and persistSkippedSeqs.
+      if (Array.isArray(data.skippedSeqs) && this.skippedSeqs.size === 0) {
+        this.skippedSeqs = new Set(
+          (data.skippedSeqs as unknown[]).filter(
+            (n): n is number => typeof n === "number",
+          ),
+        );
+        if (this.skippedSeqs.size > 0) {
+          // Migrate to service_health so future restarts pick it up from
+          // the tamper-resistant store.
+          this.persistSkippedSeqs();
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      smtLog.error(`Metadata restore failed: ${msg}`);
+      smtLog.warn(
+        `Metadata restore failed (${msg}) — starting from empty state. Existing events will appear "untracked" until replay catches up. File: ${filePath}`,
+      );
     }
+  }
+
+  /**
+   * Restore the skip set from the audit DB. Called from ensureReady().
+   * Returns silently if the store isn't wired or the row is absent —
+   * the legacy JSON path in restoreMetadata acts as a one-shot migration
+   * for in-flight branches.
+   */
+  private restoreSkippedSeqs(): void {
+    if (!this.auditStore) return;
+    const row = this.auditStore.getServiceHealth(SMT_SKIPPED_SEQS_HEALTH_NAME);
+    if (!row) return;
+    if (!Array.isArray(row.payload)) return;
+    this.skippedSeqs = new Set(
+      (row.payload as unknown[]).filter((n): n is number => typeof n === "number"),
+    );
   }
 
   private checkpoint(): void {

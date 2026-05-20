@@ -201,7 +201,6 @@ Or directly in the config JSON:
 | `smt.checkpointIntervalMs` | `300000` | Interval between tree checkpoints (ms) |
 | `smt.epochDurationMs` | `3600000` | Epoch duration for subtree freezing (ms) |
 | `smt.pruneAfterEpochs` | `0` (disabled) | Freeze subtrees older than this many epochs |
-| `smt.storageCapBytes` | `524288000` (500 MB) | Max estimated in-memory tree storage |
 
 #### File watching
 

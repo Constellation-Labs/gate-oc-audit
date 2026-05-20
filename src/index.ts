@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliStatusHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions, type AuditStatusOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -22,6 +22,12 @@ import {GatewayStopCapture} from "./gateway-stop-capture.js";
 import {registerAuditUiRoutes} from "./ui/routes.js";
 import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
+import {createRequire} from "node:module";
+
+const requireFromHere = createRequire(import.meta.url);
+const pluginPkg = requireFromHere("../package.json") as { name: string; version: string };
+const PLUGIN_NAME = pluginPkg.name;
+const PLUGIN_VERSION = pluginPkg.version;
 
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
@@ -73,7 +79,13 @@ export default (() => {
             }
 
             function getSmtService(): SmtService {
-                if (!smtService) smtService = new SmtService(config);
+                if (!smtService) {
+                    smtService = new SmtService(config);
+                    // Wire the store so skippedSeqs can be persisted to the
+                    // tamper-resistant `service_health` table (in the audit DB)
+                    // instead of the file-system checkpoint dir.
+                    smtService.setStore(getStore());
+                }
                 return smtService;
             }
 
@@ -109,6 +121,14 @@ export default (() => {
                     .command("verify")
                     .description("Verify SMT integrity and DE checkpoints")
                     .action(() => cliVerifyHandler(getSmtService(), getStore(), getNotifier()));
+
+                audit
+                    .command("status")
+                    .description("Runtime health snapshot (storage, integrity, anchor, gateway, inventory)")
+                    .option("--json", "Emit the snapshot as JSON (single line)")
+                    .action((opts: AuditStatusOptions) =>
+                        cliStatusHandler(getStore(), getSmtService(), config, PLUGIN_NAME, PLUGIN_VERSION, opts),
+                    );
 
                 audit
                     .command("ui")
@@ -297,6 +317,9 @@ export default (() => {
             const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
             store = new AuditStore(dbPath);
             smtService = new SmtService(config);
+            // Wire the writable store so skippedSeqs persists to the audit DB
+            // (tamper-resistant) instead of the SMT checkpoint dir JSON.
+            smtService.setStore(store);
 
             const limiter = new RateLimiter(store, config);
             limiter.setSmtService(smtService);
@@ -577,7 +600,7 @@ export default (() => {
                     log.info("Service smt start() called");
                     await activeSmt.start();
                     // Replay events the SMT hasn't seen yet (delta since last checkpoint)
-                    const lastSeq = activeSmt.getLastCheckpointedSequence();
+                    const lastSeq = activeSmt.getLastInsertedSequence();
                     const pending = activeStore.countSince(lastSeq + 1);
                     if (pending > 0) {
                         const replayed = activeSmt.replayEvents(

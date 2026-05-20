@@ -170,7 +170,7 @@ function collectIntegrityViolations(
   rawEvents: ReadonlyArray<AuditEvent>,
 ): IntegrityViolationFinding {
   const { fromIso, toIso } = window;
-  const smtLastSeq = smtService.getLastCheckpointedSequence();
+  const smtLastSeq = smtService.getLastInsertedSequence();
   const unverifiedAnchored: UnverifiedAnchoredCheckpoint[] = store
     .getUnverifiedCheckpoints()
     .filter((cp) => cp.createdAt >= fromIso && cp.createdAt < toIso)
@@ -191,8 +191,10 @@ function collectIntegrityViolations(
   if (smtCheckpointed) {
     for (const e of rawEvents) {
       // Events past smtLastSeq are "untracked" (not yet replayed) — not
-      // evidence of tampering. Mirrors src/ui/routes.ts:classifyEvent.
+      // evidence of tampering. Same for seqs the SMT skipped by policy
+      // (frozen leaf, insert rejected). Mirrors src/ui/routes.ts:classifyEvent.
       if (e.sequence > smtLastSeq) continue;
+      if (smtService.wasSkipped(e.sequence)) continue;
       const rawHash = smtService.computeRawHash(e);
       if (smtService.findContainingTreeKey(rawHash) === null) {
         tamperedEvents.push({
