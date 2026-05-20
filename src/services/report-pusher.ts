@@ -52,6 +52,9 @@ export interface ReportPusherOptions {
   retryDelayMs?: number;
   /** Override for tests — clock source. */
   now?: () => Date;
+  /** Openclaw root used to populate `cron.configured`. Omit to keep
+   *  configured cron manifests out of webhook payloads. */
+  openclawDir?: string;
 }
 
 /**
@@ -88,6 +91,7 @@ export class ReportPusherService {
   private readonly tickIntervalMs: number;
   private readonly retryDelayMs: number;
   private readonly now: () => Date;
+  private readonly openclawDir: string | undefined;
 
   constructor(
     private store: AuditStore,
@@ -98,6 +102,7 @@ export class ReportPusherService {
     this.tickIntervalMs = opts.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
     this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.now = opts.now ?? (() => new Date());
+    this.openclawDir = opts.openclawDir;
 
     if (!this.webhookUrl) {
       this.disabled = true;
@@ -201,7 +206,7 @@ export class ReportPusherService {
     // Sanitize before formatting so neither the chat blocks nor the JSON
     // arm can leak raw recipients — even if a future change adds recipient
     // rendering to format-blocks, both sides see the hashed value.
-    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window));
+    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window, { openclawDir: this.openclawDir }));
     const payload = { ...formatDigestBlocks(sanitized), projection: sanitized };
     const result = await this.postWithRetry(payload);
     if (result.ok) {
@@ -214,7 +219,7 @@ export class ReportPusherService {
 
   private async fireWeekly(week: string): Promise<void> {
     const window = parseWeek(week, this.tz);
-    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window));
+    const sanitized = sanitizeProjectionForWebhook(buildProjection(this.store, window, { openclawDir: this.openclawDir }));
     const payload = { ...formatDigestBlocks(sanitized), projection: sanitized };
     const result = await this.postWithRetry(payload);
     if (result.ok) {

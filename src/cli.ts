@@ -337,6 +337,7 @@ export function cliReportHandler(
   store: AuditStore,
   period: "daily" | "weekly",
   opts: AuditReportOptions = {},
+  collectOpts?: CollectOptions,
 ): void {
   if (store.isDegraded()) {
     console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
@@ -350,6 +351,7 @@ export function cliReportHandler(
     duplicateOutboundWindowSec: parsePositiveInt(opts.dupWindowSec, "--dup-window-sec", 3600),
     firstSeenLookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
     topToolsLimit: parsePositiveInt(opts.topTools, "--top-tools", 1000),
+    openclawDir: collectOpts?.openclawDir,
   });
 
   if (opts.json === true) {
@@ -441,6 +443,7 @@ export function cliReportCronHandler(
   store: AuditStore,
   jobId: string | undefined,
   opts: AuditReportCronOptions = {},
+  collectOpts?: CollectOptions,
 ): void {
   if (!jobId || jobId.trim() === "") {
     throw new Error("audit report cron requires a <job-id> argument");
@@ -450,7 +453,7 @@ export function cliReportCronHandler(
   }
   const last = parsePositiveInt(opts.last, "--last", CRON_MAX_LAST) ?? CRON_DEFAULT_LAST;
 
-  const rollup = buildCronRollup(store, jobId, { last });
+  const rollup = buildCronRollup(store, jobId, { last, openclawDir: collectOpts?.openclawDir });
 
   if (opts.json === true) {
     outLine(JSON.stringify(rollup));

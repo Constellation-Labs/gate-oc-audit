@@ -162,7 +162,7 @@ export default (() => {
                     .option("--dup-window-sec <n>", "Duplicate-outbound detector window (default: 60)")
                     .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
                     .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
-                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "daily", opts));
+                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "daily", opts, resolveCollectOpts()));
 
                 report
                     .command("weekly")
@@ -174,7 +174,7 @@ export default (() => {
                     .option("--dup-window-sec <n>", "Duplicate-outbound detector window (default: 60)")
                     .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
                     .option("--top-tools <n>", "Cap for the Top tools section (default: 10)")
-                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "weekly", opts));
+                    .action((opts: AuditReportOptions) => cliReportHandler(getStore(), "weekly", opts, resolveCollectOpts()));
 
                 report
                     .command("cron <job-id>")
@@ -183,7 +183,7 @@ export default (() => {
                     .option("--json", "Emit the rollup as JSON (single line)")
                     .option("--html", "Emit the rollup as a self-contained HTML document")
                     .action((jobId: string, opts: AuditReportCronOptions) =>
-                        cliReportCronHandler(getStore(), jobId, opts),
+                        cliReportCronHandler(getStore(), jobId, opts, resolveCollectOpts()),
                     );
 
                 audit
@@ -519,7 +519,9 @@ export default (() => {
             const reportWebhookUrl = typeof config.reportWebhook === "string"
                 ? config.reportWebhook
                 : undefined;
-            const reportPusher = new ReportPusherService(activeStore, reportWebhookUrl);
+            const reportPusher = new ReportPusherService(activeStore, reportWebhookUrl, {
+                openclawDir: resolveOpenclawDir(config),
+            });
             const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
             deAnchor = createDeAnchorService(activeStore, config, activeNotifier);
             deAnchor.setSmtService(activeSmt);
@@ -674,6 +676,7 @@ export default (() => {
                 isNonLoopback: () => resolveGatewayBaseUrl().nonLoopback,
                 allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
                 allowVerifyOnNonLoopback: config.allowVerifyOnNonLoopback === true,
+                openclawDir: resolveOpenclawDir(config),
             });
 
             api.registerService({

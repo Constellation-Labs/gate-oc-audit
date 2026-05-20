@@ -1,6 +1,7 @@
 import type { AuditStore } from "../store/audit-store.js";
 import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
 import { padRight as pad } from "./text-utils.js";
+import { findConfiguredCron, formatCronSchedule, type ConfiguredCron } from "../services/cron-manifests.js";
 
 /**
  * Per-cron rollup (PRD R9). One row per `cron.executed` event for the
@@ -42,11 +43,18 @@ export interface CronRollup {
    *  oldest cron.executed beyond `last` was elided. */
   truncated: boolean;
   rows: CronRollupRow[];
+  /** Matching `<jobId>.cron.*.json` manifest, when one exists on the machine
+   *  the rollup was generated on. Null when no `openclawDir` was supplied or
+   *  no manifest matches `jobId`. */
+  manifest: ConfiguredCron | null;
 }
 
 export interface BuildCronRollupOptions {
   /** Cap the rollup to the N most recent executions. Default 20, max 1000. */
   last?: number;
+  /** When supplied, the openclaw root searched for the matching
+   *  `<jobId>.cron.*.json` manifest. */
+  openclawDir?: string;
 }
 
 export function buildCronRollup(
@@ -101,12 +109,15 @@ export function buildCronRollup(
     };
   });
 
+  const manifest = opts.openclawDir ? findConfiguredCron(opts.openclawDir, jobId) : null;
+
   return {
     schemaVersion: CRON_ROLLUP_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     jobId,
     truncated,
     rows,
+    manifest,
   };
 }
 
@@ -124,6 +135,9 @@ const COLS = {
 export function formatCronRollupText(r: CronRollup): string {
   const lines: string[] = [];
   lines.push(`Per-cron rollup — jobId=${r.jobId}`);
+  if (r.manifest) {
+    lines.push(`Schedule: ${formatCronSchedule(r.manifest.schedule)}`);
+  }
   lines.push(`Generated: ${r.generatedAt}`);
   lines.push(`Rows: ${r.rows.length}${r.truncated ? "  (truncated — more executions exist beyond --last)" : ""}`);
   lines.push("");
@@ -202,6 +216,7 @@ export function formatCronRollupHtml(r: CronRollup): string {
 <body>
 <h1>Per-cron rollup — <code>${escape(r.jobId)}</code></h1>
 <div class="meta">
+  ${r.manifest ? `Schedule: <code>${escape(formatCronSchedule(r.manifest.schedule))}</code><br />` : ""}
   Generated: <code>${escape(r.generatedAt)}</code><br />
   Rows: <strong>${r.rows.length}</strong>${r.truncated ? " (truncated)" : ""}
 </div>

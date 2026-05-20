@@ -55,6 +55,12 @@ interface AuditUiContext {
    * export (CPU-bound full-table scan).
    */
   allowVerifyOnNonLoopback: boolean;
+  /**
+   * Openclaw root used to populate `cron.configured` in the projection
+   * returned by /api/report. Omit to suppress configured cron manifests
+   * from the HTTP response.
+   */
+  openclawDir?: string;
 }
 
 /**
@@ -520,6 +526,7 @@ async function handleApi(
       duplicateOutboundWindowSec: dupWindow,
       firstSeenLookbackDays: lookback,
       topToolsLimit: topTools,
+      openclawDir: ctx.openclawDir,
     });
     const format = (url.searchParams.get("format") ?? "json").toLowerCase();
     if (format === "html") {
@@ -563,7 +570,10 @@ async function handleApi(
       sendError(res, 400, `last must be a positive integer in 1..${CRON_MAX_LAST}`);
       return true;
     }
-    const rollup = buildCronRollup(ctx.store, jobId, { last: lastParam ?? CRON_DEFAULT_LAST });
+    const rollup = buildCronRollup(ctx.store, jobId, {
+      last: lastParam ?? CRON_DEFAULT_LAST,
+      openclawDir: ctx.openclawDir,
+    });
     const format = (url.searchParams.get("format") ?? "json").toLowerCase();
     if (format === "html") {
       const body = Buffer.from(formatCronRollupHtml(rollup));
@@ -627,6 +637,8 @@ export interface AuditUiOptions {
   allowExportOnNonLoopback?: boolean;
   /** Operator opt-in to keep /api/verify available when bound beyond loopback. */
   allowVerifyOnNonLoopback?: boolean;
+  /** Openclaw root used to populate `cron.configured` in /api/report. */
+  openclawDir?: string;
 }
 
 export function registerAuditUiRoutes(
@@ -646,6 +658,7 @@ export function registerAuditUiRoutes(
     isNonLoopback: opts.isNonLoopback ?? (() => false),
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
+    openclawDir: opts.openclawDir,
   };
 
   api.registerHttpRoute({

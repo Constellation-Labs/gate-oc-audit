@@ -1050,6 +1050,55 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.ok(html.stdout.includes("Audit report"));
   });
 
+  it("audit report daily — configured openclaw crons surface in projection and text/HTML output", () => {
+    // Drop two `.cron.*.json` manifests into a scratch dir scoped to this
+    // test so we don't leak state into the other daily/weekly cases that
+    // share `rig.dir` and don't pass `collectOpts`.
+    const cronDir = mkdtempSync(join(tmpdir(), "audit-e2e-crons-"));
+    try {
+      writeFileSync(
+        join(cronDir, "daily-digest.cron.json"),
+        JSON.stringify({ schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" } }),
+      );
+      writeFileSync(
+        join(cronDir, "heartbeat.cron.json"),
+        JSON.stringify({ schedule: { kind: "every", everyMs: 60_000 } }),
+      );
+
+      const firstEvent = rig.store.query({ sessionId, limit: 1, includeContent: false })[0];
+      const date = firstEvent.createdAt.slice(0, 10);
+      const collectOpts = { openclawDir: cronDir, projectRoot: cronDir };
+
+      const json = captureConsole(() =>
+        cliReportHandler(rig.store, "daily", { date, tz: "utc", json: true }, collectOpts),
+      );
+      const projection = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+      assert.equal(projection.cron.configured.length, 2);
+      const byName = Object.fromEntries(
+        projection.cron.configured.map((c: { name: string; schedule: unknown }) => [c.name, c.schedule]),
+      );
+      assert.deepEqual(byName["daily-digest"], { kind: "cron", expr: "0 9 * * *", tz: "UTC" });
+      assert.deepEqual(byName["heartbeat"], { kind: "every", everyMs: 60_000 });
+
+      const text = captureConsole(() =>
+        cliReportHandler(rig.store, "daily", { date, tz: "utc" }, collectOpts),
+      );
+      assert.ok(text.stdout.includes("Configured:"));
+      assert.ok(text.stdout.includes("daily-digest"));
+      assert.ok(text.stdout.includes("cron 0 9 * * * (UTC)"));
+      assert.ok(text.stdout.includes("heartbeat"));
+      assert.ok(text.stdout.includes("every 60000ms"));
+
+      const html = captureConsole(() =>
+        cliReportHandler(rig.store, "daily", { date, tz: "utc", html: true }, collectOpts),
+      );
+      assert.ok(html.stdout.includes("Configured"));
+      assert.ok(html.stdout.includes("daily-digest"));
+    } finally {
+      rmSync(cronDir, { recursive: true, force: true });
+    }
+  });
+
   it("audit report daily — --top-tools/--dup-window-sec/--lookback-days take effect and bad values are rejected", () => {
     const firstEvent = rig.store.query({ sessionId, limit: 1, includeContent: false })[0];
     const date = firstEvent.createdAt.slice(0, 10);
@@ -1343,6 +1392,41 @@ describe("e2e: audit report cron — rollup CLI over a hook-populated cron run",
       () => cliReportCronHandler(rig.store, "", {}),
       /requires a <job-id>/,
     );
+  });
+
+  it("inlines the matching openclaw cron manifest in the rollup header", () => {
+    fireCronRun("job-nightly", "sess-cron-ok-manifest", "run-m", true);
+    const cronDir = mkdtempSync(join(tmpdir(), "audit-e2e-crons-"));
+    try {
+      writeFileSync(
+        join(cronDir, "job-nightly.cron.json"),
+        JSON.stringify({ schedule: { kind: "cron", expr: "30 2 * * *", tz: "UTC" } }),
+      );
+      const collectOpts = { openclawDir: cronDir, projectRoot: cronDir };
+
+      const json = captureConsole(() =>
+        cliReportCronHandler(rig.store, "job-nightly", { json: true }, collectOpts),
+      );
+      const rollup = JSON.parse(json.stdout.split("\n").filter(Boolean)[0]);
+      assert.deepEqual(rollup.manifest, {
+        name: "job-nightly",
+        schedule: { kind: "cron", expr: "30 2 * * *", tz: "UTC" },
+      });
+
+      const text = captureConsole(() =>
+        cliReportCronHandler(rig.store, "job-nightly", {}, collectOpts),
+      );
+      assert.ok(text.stdout.includes("Schedule: cron 30 2 * * * (UTC)"));
+
+      // No manifest on disk → manifest is null and the header omits the line.
+      const noManifest = captureConsole(() =>
+        cliReportCronHandler(rig.store, "other-job", { json: true }, collectOpts),
+      );
+      const rollup2 = JSON.parse(noManifest.stdout.split("\n").filter(Boolean)[0]);
+      assert.equal(rollup2.manifest, null);
+    } finally {
+      rmSync(cronDir, { recursive: true, force: true });
+    }
   });
 });
 
