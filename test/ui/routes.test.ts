@@ -486,6 +486,26 @@ describe("verification status: verified / pending / tampered / untracked", () =>
     const found = json.events.find((e: AuditEvent) => e.id === untracked.id) as AuditEvent & { verification: { status: string } };
     assert.equal(found.verification.status, "untracked");
   });
+
+  it("classifies a row as 'untracked' (not 'tampered') when SmtService marked the sequence as skipped", async () => {
+    // Insert a row through the SMT, then mutate its persisted content so
+    // the current rawHash no longer matches any leaf. Without the
+    // wasSkipped consult in classifyEvent this would flip to "tampered" —
+    // the test asserts the skip-by-policy branch suppresses that.
+    const local = await createUiRig();
+    try {
+      const ev = local.appendTracked(sampleInsert({ description: "to-skip" }));
+      local.store["db"].prepare("UPDATE audit_events SET description = ? WHERE id = ?")
+        .run("MUTATED", ev.id);
+      (local.smt as unknown as { skippedSeqs: Set<number> }).skippedSeqs.add(ev.sequence);
+
+      const json = await (await fetch(`${local.baseUrl}/plugins/audit/api/events`)).json();
+      const found = json.events.find((e: AuditEvent) => e.id === ev.id) as AuditEvent & { verification: { status: string } };
+      assert.equal(found.verification.status, "untracked");
+    } finally {
+      await local.destroy();
+    }
+  });
 });
 
 describe("verifier: chain replay result states", () => {
@@ -594,6 +614,36 @@ describe("verifier: chain replay result states", () => {
       }
     } finally {
       await localRig.destroy();
+    }
+  });
+
+  it("excludes wasSkipped sequences from the tampered range (skip-by-policy)", async () => {
+    const local = await createUiRig();
+    try {
+      const a = local.appendTracked(sampleInsert({ description: "a" }));
+      const skipped = local.appendTracked(sampleInsert({ description: "to-skip" }));
+      const c = local.appendTracked(sampleInsert({ description: "c" }));
+      const root = local.smt.getRoot()?.root ?? "";
+      local.store.insertCheckpoint("cp-skip", a.sequence, c.sequence, root, 3, "0xanchor");
+      // Mutate the middle row so the verifier's fresh replay diverges from
+      // the checkpoint root (forces findTamperedRange to run), then mark
+      // that sequence as skipped on the live SMT so the wasSkipped branch
+      // in findTamperedRange is exercised.
+      local.store["db"].prepare("UPDATE audit_events SET description = ? WHERE id = ?")
+        .run("MUTATED", skipped.id);
+      (local.smt as unknown as { skippedSeqs: Set<number> }).skippedSeqs.add(skipped.sequence);
+
+      const result = local.verifier.verifyRange({ from: "2020-01-01T00:00:00Z", to: "2999-01-01T00:00:00Z" });
+      assert.equal(result.status, "mismatch-at-interval");
+      if (result.status === "mismatch-at-interval") {
+        assert.equal(result.mismatchAt.reason, "root-mismatch");
+        // The mutated row is the only divergence and it's wasSkipped, so
+        // findTamperedRange must not bracket any tampered window.
+        assert.equal(result.mismatchAt.tamperedStart, undefined);
+        assert.equal(result.mismatchAt.tamperedEnd, undefined);
+      }
+    } finally {
+      await local.destroy();
     }
   });
 

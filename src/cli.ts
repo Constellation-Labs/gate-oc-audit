@@ -495,8 +495,8 @@ export async function cliAnomaliesHandler(
   if (store.isDegraded()) {
     console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
   }
-  // Restore the SMT cursor from disk so getLastCheckpointedSequence() reflects
-  // the on-disk state; without this the tamper scan is unconditionally skipped.
+  // Restore the SMT cursor from disk so the tamper scan reflects on-disk
+  // state; without this the scan is unconditionally skipped.
   await smtService.ensureReady();
   const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
   const window = parseSince(opts.since ?? "24h", opts.until, tz);
