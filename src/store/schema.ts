@@ -29,6 +29,11 @@ const DDL = [
     description   TEXT NOT NULL,
     metadata      TEXT NOT NULL,
     content_gz    BLOB,
+    -- SHA-256 of the uncompressed content. The Local Reporting PRD R7
+    -- refers to this column as content_sha256; we keep the shorter
+    -- legacy name in DDL for backward compatibility but they are the
+    -- same field. Used by the duplicate-outbound detector and the
+    -- wire-format chain (see Product Spec section 11.3).
     content_hash  TEXT NOT NULL DEFAULT '',
     previous_hash TEXT,
     created_at    TEXT NOT NULL,
