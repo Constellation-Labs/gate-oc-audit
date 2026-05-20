@@ -110,6 +110,23 @@ describe("buildStatusSnapshot", () => {
     assert.equal(s.integrity.conversationAccess, "enabled");
   });
 
+  it("does not flag enabled-but-silent on a fresh install (< 24h of store history)", () => {
+    // Operator just opted in; no events yet OR only fresh events.
+    // The "no prompt.input in 24h" check would otherwise produce a
+    // false alarm. The fresh-install guard suppresses the warning until
+    // the oldest event is at least 24h old.
+    store.append({
+      eventType: "tool.invoked",
+      category: "tool",
+      description: "first",
+      metadata: { toolName: "exec" },
+    });
+    const s = buildStatusSnapshot(baseInputs(store, smt, {
+      allowConversationAccess: true,
+    }));
+    assert.equal(s.integrity.conversationAccess, "enabled");
+  });
+
   it("flags allowConversationAccess=true with no prompt.input in 24h as silent", () => {
     // Append a prompt.input event but backdate it >24h before "now" so the
     // 24h window query returns zero — simulates a host that opted in but
@@ -152,6 +169,76 @@ describe("buildStatusSnapshot", () => {
     assert.equal(s.fileWatch.patternsWatched, 3);
     assert.equal(s.fileWatch.patternsIgnored, 1);
     assert.equal(s.fileWatch.recentChanges24h, 1);
+  });
+
+  it("computes pendingSinceLastCheckpoint from the SMT cursor (Integrity-centric)", () => {
+    // Push 5 events through the SMT so lastInsertedSeq = 5.
+    for (let i = 1; i <= 5; i++) {
+      smt.onEventAppended({
+        id: `event-${i}`,
+        sequence: i,
+        source: "openclaw-plugin",
+        machineId: "test-machine-01",
+        eventType: "tool.invoked",
+        category: "tool",
+        description: `t${i}`,
+        metadata: {},
+        createdAt: "2026-05-20T00:00:00.000Z",
+      });
+    }
+    // Anchor up to sequence 3 (last checkpoint covers 1-3).
+    store.insertCheckpoint("cp-1", 1, 3, "0xroot", 3, "0xtx");
+
+    const s = buildStatusSnapshot(baseInputs(store, smt, {
+      // anchorHealth is intentionally undefined — must NOT silently
+      // fall back to 0; the SMT cursor minus the last checkpoint's
+      // sequenceEnd should drive the value.
+      anchorHealth: undefined,
+    }));
+    assert.equal(s.integrity.pendingSinceLastCheckpoint, 2);
+  });
+
+  it("falls back to anchor health when SMT cursor matches checkpoint and anchor reports a non-zero backlog", () => {
+    // Edge case: SMT thinks it's caught up (lastInsertedSeq == checkpoint.sequenceEnd)
+    // but the anchor service reports a backlog (e.g., events came in
+    // between SMT and anchor). The fallback to anchorHealth covers
+    // hosts where SMT-anchor accounting differs.
+    store.insertCheckpoint("cp-1", 1, 0, "0xroot", 0, "0xtx");
+    const s = buildStatusSnapshot(baseInputs(store, smt, {
+      anchorHealth: {
+        isActive: true,
+        consecutiveFailures: 0,
+        circuitOpenUntil: 0,
+        lastAnchorAt: "2026-05-19T09:02:00Z",
+        lastTxHash: null,
+        anchoredToday: 1,
+        pendingSinceLastCheckpoint: 7,
+      },
+    }));
+    assert.equal(s.integrity.pendingSinceLastCheckpoint, 7);
+  });
+
+  it("returns SMT tree keys in deterministic (sorted) order", () => {
+    // Construct three trees with non-alphabetical insertion order by
+    // pushing events with different machine ids → different tree keys.
+    // listTrees() may return them in fs-order; the projection must sort.
+    smt.onEventAppended({
+      id: "z-evt", sequence: 1, source: "openclaw-plugin", machineId: "tree-z",
+      sessionId: "sz", eventType: "tool.invoked", category: "tool",
+      description: "z", metadata: {},
+      createdAt: "2026-05-20T00:00:00.000Z",
+    });
+    smt.onEventAppended({
+      id: "a-evt", sequence: 2, source: "openclaw-plugin", machineId: "tree-a",
+      sessionId: "sa", eventType: "tool.invoked", category: "tool",
+      description: "a", metadata: {},
+      createdAt: "2026-05-20T00:00:01.000Z",
+    });
+    const s = buildStatusSnapshot(baseInputs(store, smt));
+    // Whatever trees end up active, their keys must be sorted ascending.
+    const keys = s.integrity.smtTreeKeys;
+    const sortedCopy = keys.slice().sort((a, b) => a.localeCompare(b));
+    assert.deepEqual(keys, sortedCopy);
   });
 
   it("surfaces anchor and gateway health when present", () => {

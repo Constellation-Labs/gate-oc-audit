@@ -67,11 +67,6 @@ export class FileWatcher {
       : false;
   }
 
-  /** Snapshot of the configured patterns. Read-only — exposed for status reporting. */
-  getPatternCounts(): { watched: number; ignored: number } {
-    return { watched: this.patterns.length, ignored: this.ignorePatterns.length };
-  }
-
   async start(): Promise<void> {
     if (this.watcher) return;
     if (this.patterns.length === 0) return;

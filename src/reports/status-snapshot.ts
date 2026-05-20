@@ -154,14 +154,40 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
     : null;
   const eventCount = store.count();
 
-  // Integrity
-  const trees = smtService.listTrees();
+  // Integrity. Tree ordering: sort by key so `smtRoot = trees[0]` is
+  // deterministic across restarts (TreeManager's internal Map insertion
+  // order follows filesystem readdir, which isn't alphabetical on every
+  // FS).
+  const trees = smtService.listTrees().slice().sort((a, b) => a.key.localeCompare(b.key));
   const lastInsertedSeq = smtService.getLastInsertedSequence();
   const checkpoints: CheckpointRecord[] = store.getCheckpoints();
   const lastCp = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : undefined;
   const sequenceAtHead = computeHeadSequence(store);
+  // SMT-centric "pending" — how many events the SMT has accepted but the
+  // last DE-anchored checkpoint doesn't cover yet. Falls back to the
+  // anchor health snapshot's value when the SMT data isn't comparable
+  // (no checkpoints yet, or lastInsertedSeq behind the checkpoint cursor,
+  // which indicates a forensic copy with newer checkpoints than tree
+  // state). Both definitions should agree when the anchor is active and
+  // up-to-date; this prefers the SMT view because the row lives under
+  // the Integrity section, not the Anchor section.
+  const smtPending = lastCp ? Math.max(0, lastInsertedSeq - lastCp.sequenceEnd) : lastInsertedSeq;
+  const pendingSinceLastCheckpoint = smtPending > 0 || anchorHealth === undefined
+    ? smtPending
+    : anchorHealth.pendingSinceLastCheckpoint;
+  // Conversation-access posture. "enabled-but-silent" is only meaningful
+  // when the store has been running long enough that 24h of silence is
+  // surprising. Suppress the warning state on fresh installs (oldest
+  // event < 24h ago) to avoid false alarms — the operator hasn't had a
+  // chance to produce traffic yet.
   const promptInput24h = store.count({ eventType: "prompt.input", createdAfter: oneDayAgoIso });
-  const conversationAccess = computeConvAccessPosture(allowConversationAccess, promptInput24h);
+  const storeAgeSufficient = oldestEventAt !== null
+    && Date.parse(oldestEventAt) <= now.getTime() - 24 * 60 * 60 * 1000;
+  const conversationAccess = computeConvAccessPosture(
+    allowConversationAccess,
+    promptInput24h,
+    storeAgeSufficient,
+  );
 
   // File watch (recent changes = config.* + system.file_changed in last 24h)
   const recentChanges24h =
@@ -204,7 +230,7 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
       lastCheckpoint: lastCp
         ? { id: lastCp.id, sequenceEnd: lastCp.sequenceEnd, createdAt: lastCp.createdAt }
         : null,
-      pendingSinceLastCheckpoint: anchorHealth?.pendingSinceLastCheckpoint ?? 0,
+      pendingSinceLastCheckpoint,
       conversationAccess,
     },
     anchor: {
@@ -248,9 +274,15 @@ function computeHeadSequence(store: AuditStore): number {
 function computeConvAccessPosture(
   allow: boolean,
   promptInput24h: number,
+  storeAgeSufficient: boolean,
 ): IntegritySection["conversationAccess"] {
   if (!allow) return "disabled";
-  return promptInput24h > 0 ? "enabled" : "enabled-but-silent";
+  if (promptInput24h > 0) return "enabled";
+  // Silent-warning state requires enough store history to make 24h of
+  // silence meaningful. On a fresh install we report "enabled" without
+  // the warning — the operator will see traffic land normally once
+  // their agent runs.
+  return storeAgeSufficient ? "enabled-but-silent" : "enabled";
 }
 
 function readLastSecurityScan(store: AuditStore): SecurityScanSection {
@@ -261,11 +293,17 @@ function readLastSecurityScan(store: AuditStore): SecurityScanSection {
   }
   // Severity counts live in the metadata JSON. The scanner writes
   // { findings: [{severity, ...}, ...] } — fall back to zero if absent.
+  // Cap the scan at 1000 entries so a pathological event (e.g. a stuck
+  // scanner that recorded a multi-million-finding result) can't pin the
+  // status command on iteration.
+  const MAX_FINDINGS_SCAN = 1000;
   let high = 0;
   let medium = 0;
   const meta = last.metadata as { findings?: ReadonlyArray<{ severity?: string }> } | undefined;
   const findings = Array.isArray(meta?.findings) ? meta.findings : [];
-  for (const f of findings) {
+  const scanLength = Math.min(findings.length, MAX_FINDINGS_SCAN);
+  for (let i = 0; i < scanLength; i++) {
+    const f = findings[i]!;
     if (f.severity === "high") high++;
     else if (f.severity === "medium") medium++;
   }

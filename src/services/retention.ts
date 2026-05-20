@@ -1,8 +1,8 @@
 import type { AuditStore } from "../store/audit-store.js";
 import {log} from "../util/logger.js";
 
-const DEFAULT_RETENTION_DAYS = 365;
-const DEFAULT_MAX_SIZE_MB = 500;
+export const DEFAULT_RETENTION_DAYS = 365;
+export const DEFAULT_MAX_SIZE_MB = 500;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 export interface RetentionHealth {

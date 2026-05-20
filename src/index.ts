@@ -79,7 +79,13 @@ export default (() => {
             }
 
             function getSmtService(): SmtService {
-                if (!smtService) smtService = new SmtService(config);
+                if (!smtService) {
+                    smtService = new SmtService(config);
+                    // Wire the store so skippedSeqs can be persisted to the
+                    // tamper-resistant `service_health` table (in the audit DB)
+                    // instead of the file-system checkpoint dir.
+                    smtService.setStore(getStore());
+                }
                 return smtService;
             }
 
@@ -311,6 +317,9 @@ export default (() => {
             const dbPath = typeof config.dbPath === "string" ? config.dbPath : undefined;
             store = new AuditStore(dbPath);
             smtService = new SmtService(config);
+            // Wire the writable store so skippedSeqs persists to the audit DB
+            // (tamper-resistant) instead of the SMT checkpoint dir JSON.
+            smtService.setStore(store);
 
             const limiter = new RateLimiter(store, config);
             limiter.setSmtService(smtService);

@@ -21,7 +21,7 @@ import { buildStatusSnapshot } from "./reports/status-snapshot.js";
 import { formatStatusText } from "./reports/format-status.js";
 import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "./services/de-anchor.js";
 import { GATEWAY_HEALTH_NAME, type GatewayHealth } from "./services/gateway-publisher.js";
-import { RETENTION_HEALTH_NAME, type RetentionHealth } from "./services/retention.js";
+import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "./services/retention.js";
 import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "./reports/spend-rollup.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
@@ -540,11 +540,14 @@ export async function cliStatusHandler(
   // SmtService is best-effort: the CLI may run on a host where the SMT
   // working state was moved or hasn't been built yet (forensic copy, fresh
   // clone). Failures degrade to "no SMT info" rather than failing the whole
-  // command, matching cliReportSessionHandler.
+  // command, matching cliReportSessionHandler. Surface a stderr warning
+  // so the operator notices when the Integrity section is reading zero
+  // because of a load failure (not because the SMT is genuinely empty).
   try {
     await smtService.ensureReady();
-  } catch {
-    // continue — listTrees/getLastInsertedSequence will return zero state
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error(`WARNING: SMT state could not be loaded (${msg}). Integrity section will report zero state.`);
   }
 
   const anchorHealth = readHealth<AnchorHealth>(store, ANCHOR_HEALTH_NAME);
@@ -556,8 +559,8 @@ export async function cliStatusHandler(
   const persistedRetention = readHealth<RetentionHealth>(store, RETENTION_HEALTH_NAME);
   const retentionHealth: RetentionHealth = persistedRetention ?? {
     nextPruneAt: undefined,
-    retentionDays: typeof config.localRetentionDays === "number" ? config.localRetentionDays : 365,
-    maxSizeMb: typeof config.localMaxSizeMb === "number" ? config.localMaxSizeMb : 500,
+    retentionDays: typeof config.localRetentionDays === "number" ? config.localRetentionDays : DEFAULT_RETENTION_DAYS,
+    maxSizeMb: typeof config.localMaxSizeMb === "number" ? config.localMaxSizeMb : DEFAULT_MAX_SIZE_MB,
   };
 
   const inventoryReport = collectInventory(store, "summary", {

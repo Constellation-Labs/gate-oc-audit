@@ -11,6 +11,9 @@ const LABEL_WIDTH = 18;
 
 export function formatStatusText(s: StatusSnapshot): string {
   const lines: string[] = [];
+  const row = (label: string, value: string): void => {
+    lines.push(`  ${pad(label, LABEL_WIDTH)}${value}`);
+  };
 
   // Header
   const versionTag = `v${s.header.pluginVersion}`;
@@ -21,91 +24,78 @@ export function formatStatusText(s: StatusSnapshot): string {
   lines.push("Storage");
   const dbBar = renderBar(s.storage.dbSizeMb, s.storage.maxSizeMb);
   const dbPct = s.storage.maxSizeMb > 0 ? (s.storage.dbSizeMb / s.storage.maxSizeMb) * 100 : 0;
-  lines.push(
-    `  ${pad("DB", LABEL_WIDTH)}` +
-      `${s.storage.dbSizeMb.toFixed(1)} MB of ${s.storage.maxSizeMb} MB cap     [${dbBar}] ${dbPct.toFixed(1)}%`,
-  );
+  row("DB", `${s.storage.dbSizeMb.toFixed(1)} MB of ${s.storage.maxSizeMb} MB cap     [${dbBar}] ${dbPct.toFixed(1)}%`);
   const ageStr = s.storage.oldestEventAt
     ? `(oldest ${s.storage.oldestEventAt.slice(0, 10)}, ${s.storage.oldestEventAgeDays ?? 0} days)`
     : "(no events)";
-  lines.push(`  ${pad("Events", LABEL_WIDTH)}${s.storage.eventCount.toLocaleString()}   ${ageStr}`);
+  row("Events", `${s.storage.eventCount.toLocaleString()}   ${ageStr}`);
   const nextPrune = s.storage.nextPruneAt
     ? `next prune ${formatRelative(s.storage.nextPruneAt, s.header.generatedAt)}`
     : "next prune not scheduled";
-  lines.push(
-    `  ${pad("Retention", LABEL_WIDTH)}${s.storage.retentionDays} days  •  size cap ${s.storage.maxSizeMb} MB  •  ${nextPrune}`,
-  );
+  row("Retention", `${s.storage.retentionDays} days  •  size cap ${s.storage.maxSizeMb} MB  •  ${nextPrune}`);
   lines.push("");
 
   // Integrity
   lines.push("Integrity");
-  lines.push(`  ${pad("Sequence at HEAD", LABEL_WIDTH)}#${s.integrity.sequenceAtHead}`);
+  row("Sequence at HEAD", `#${s.integrity.sequenceAtHead}`);
   const treesLabel = s.integrity.smtTreeCount === 0
     ? "0"
     : `${s.integrity.smtTreeCount} active (${s.integrity.smtTreeKeys.join(", ")})`;
-  lines.push(`  ${pad("SMT trees", LABEL_WIDTH)}${treesLabel}`);
+  row("SMT trees", treesLabel);
   if (s.integrity.smtRoot) {
-    lines.push(
-      `  ${pad("SMT root", LABEL_WIDTH)}${shortHash(s.integrity.smtRoot)}   •   entries ${s.integrity.smtEntryCount.toLocaleString()}   •   nodes ${s.integrity.smtNodeCount.toLocaleString()}`,
-    );
+    row("SMT root", `${shortHash(s.integrity.smtRoot)}   •   entries ${s.integrity.smtEntryCount.toLocaleString()}   •   nodes ${s.integrity.smtNodeCount.toLocaleString()}`);
   }
   if (s.integrity.lastCheckpoint) {
     const cp = s.integrity.lastCheckpoint;
-    lines.push(
-      `  ${pad("Last checkpoint", LABEL_WIDTH)}${formatInstant(cp.createdAt)}   (#${cp.sequenceEnd}, ${formatRelative(cp.createdAt, s.header.generatedAt)})`,
-    );
+    row("Last checkpoint", `${formatInstant(cp.createdAt)}   (#${cp.sequenceEnd}, ${formatRelative(cp.createdAt, s.header.generatedAt)})`);
   } else {
-    lines.push(`  ${pad("Last checkpoint", LABEL_WIDTH)}(none)`);
+    row("Last checkpoint", "(none)");
   }
-  lines.push(`  ${pad("Pending events", LABEL_WIDTH)}${s.integrity.pendingSinceLastCheckpoint} since last checkpoint`);
-  lines.push(`  ${pad("Conversation hook", LABEL_WIDTH)}${formatConvAccess(s.integrity.conversationAccess)}`);
+  row("Pending events", `${s.integrity.pendingSinceLastCheckpoint} since last checkpoint`);
+  row("Conversation hook", formatConvAccess(s.integrity.conversationAccess));
   lines.push("");
 
   // Digital Evidence anchor
   lines.push("Digital Evidence anchor");
-  lines.push(`  ${pad("Status", LABEL_WIDTH)}${s.anchor.isActive ? "ACTIVE" : "INACTIVE"}`);
-  lines.push(`  ${pad("Anchors today", LABEL_WIDTH)}${s.anchor.anchoredToday}`);
+  row("Status", s.anchor.isActive ? "ACTIVE" : "INACTIVE");
+  row("Anchors today", String(s.anchor.anchoredToday));
   if (s.anchor.lastAnchorAt) {
     const tx = s.anchor.lastTxHash ? `tx ${shortHash(s.anchor.lastTxHash)}` : "tx (none)";
-    lines.push(`  ${pad("Last anchor", LABEL_WIDTH)}${formatInstant(s.anchor.lastAnchorAt)}  •  ${tx}`);
+    row("Last anchor", `${formatInstant(s.anchor.lastAnchorAt)}  •  ${tx}`);
   } else {
-    lines.push(`  ${pad("Last anchor", LABEL_WIDTH)}(none)`);
+    row("Last anchor", "(none)");
   }
   const circuitState = s.anchor.circuitOpen ? "OPEN" : "closed";
-  lines.push(
-    `  ${pad("Circuit", LABEL_WIDTH)}${circuitState}   •   ${s.anchor.consecutiveFailures} consecutive failures`,
-  );
+  row("Circuit", `${circuitState}   •   ${s.anchor.consecutiveFailures} consecutive failures`);
   lines.push("");
 
   // Gateway publisher
   lines.push("Gateway publisher");
   const gwStatus = s.gateway.isActive ? "ACTIVE" : "INACTIVE";
   const gwSuffix = s.gateway.url ? `  •  ${s.gateway.url}` : "";
-  lines.push(`  ${pad("Status", LABEL_WIDTH)}${gwStatus}${gwSuffix}`);
-  lines.push(
-    `  ${pad("Buffered", LABEL_WIDTH)}${s.gateway.buffered}   •   dropped today ${s.gateway.droppedToday}   •   circuit ${s.gateway.circuitOpen ? "OPEN" : "closed"}`,
-  );
+  row("Status", `${gwStatus}${gwSuffix}`);
+  row("Buffered", `${s.gateway.buffered}   •   dropped today ${s.gateway.droppedToday}   •   circuit ${s.gateway.circuitOpen ? "OPEN" : "closed"}`);
   if (s.gateway.lastSuccessAt) {
-    lines.push(`  ${pad("Last successful", LABEL_WIDTH)}${formatInstant(s.gateway.lastSuccessAt)}`);
+    row("Last successful", formatInstant(s.gateway.lastSuccessAt));
   } else if (s.gateway.lastErrorAt) {
-    lines.push(`  ${pad("Last error", LABEL_WIDTH)}${formatInstant(s.gateway.lastErrorAt)}`);
+    row("Last error", formatInstant(s.gateway.lastErrorAt));
   } else {
-    lines.push(`  ${pad("Last successful", LABEL_WIDTH)}(none this process)`);
+    row("Last successful", "(none this process)");
   }
   lines.push("");
 
   // File watching
   lines.push("File watching");
-  lines.push(`  ${pad("Patterns watched", LABEL_WIDTH)}${s.fileWatch.patternsWatched}   •   ignored ${s.fileWatch.patternsIgnored}`);
-  lines.push(`  ${pad("Recent changes", LABEL_WIDTH)}${s.fileWatch.recentChanges24h} in last 24h`);
+  row("Patterns watched", `${s.fileWatch.patternsWatched}   •   ignored ${s.fileWatch.patternsIgnored}`);
+  row("Recent changes", `${s.fileWatch.recentChanges24h} in last 24h`);
   lines.push("");
 
   // Inventory
   lines.push("Inventory");
-  lines.push(`  ${pad("Plugins installed", LABEL_WIDTH)}${s.inventory.plugins}    (run \`audit inventory plugins\` for detail)`);
-  lines.push(`  ${pad("Skills installed", LABEL_WIDTH)}${s.inventory.skills}`);
-  lines.push(`  ${pad("Tools installed", LABEL_WIDTH)}${s.inventory.tools}`);
-  lines.push(`  ${pad("Cron jobs", LABEL_WIDTH)}${s.inventory.crons} configured`);
+  row("Plugins installed", `${s.inventory.plugins}    (run \`audit inventory plugins\` for detail)`);
+  row("Skills installed", String(s.inventory.skills));
+  row("Tools installed", String(s.inventory.tools));
+  row("Cron jobs", `${s.inventory.crons} configured`);
   lines.push("");
 
   // Last security scan
