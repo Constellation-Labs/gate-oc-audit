@@ -28,7 +28,7 @@ const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
  */
 const DROP_HEALTH_EMIT_MIN_MS = 1000;
 
-const INGEST_PATH = "/api/v1/audit/ingest";
+const INGEST_PATH = "/v1/audit/ingest";
 
 /**
  * Strip control chars (CR/LF/tab/escape/DEL) and cap to `maxBytes` bytes so

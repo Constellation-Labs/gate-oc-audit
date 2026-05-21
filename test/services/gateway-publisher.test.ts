@@ -296,7 +296,7 @@ describe("GatewayPublisher", () => {
     assert.equal(received.length, before, "circuit-open must suppress further POSTs");
   });
 
-  it("POSTs batch with X-Gateway-Api-Key header to /api/v1/audit/ingest", async () => {
+  it("POSTs batch with X-Gateway-Api-Key header to /v1/audit/ingest", async () => {
     const pub = createPub({
       gatewayUrl: `http://localhost:${port}`,
       gatewayApiKey: "sk-gw-test",
@@ -314,7 +314,7 @@ describe("GatewayPublisher", () => {
     assert.equal(received.length, 1);
     const req = received[0];
     assert.equal(req.method, "POST");
-    assert.equal(req.url, "/api/v1/audit/ingest");
+    assert.equal(req.url, "/v1/audit/ingest");
     assert.equal(req.headers["x-gateway-api-key"], "sk-gw-test");
     assert.equal(req.headers["content-type"], "application/json");
     assert.equal(req.body.events.length, 2);
@@ -333,7 +333,7 @@ describe("GatewayPublisher", () => {
     pub.notifyAppend(makeEvent(1));
     await new Promise((r) => setTimeout(r, 50));
 
-    assert.equal(received[0].url, "/api/v1/audit/ingest");
+    assert.equal(received[0].url, "/v1/audit/ingest");
   });
 
   it("requeues events on failure and retries on next flush", async () => {
