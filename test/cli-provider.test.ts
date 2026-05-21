@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -200,6 +200,58 @@ describe("cliProviderAddOpenAIHandler — API-key path", () => {
     await cliProviderAddOpenAIHandler({ yes: true, openclawDir: dir });
     cap.stop();
     assert.equal(process.exitCode, 1);
+    process.exitCode = 0;
+  });
+});
+
+describe("cliProviderAddOpenAIHandler — rolls back the auth-profile on config-write failure", () => {
+  let dir: string;
+  let configBlocker: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-provider-rb-"));
+    // Force the openclaw.json write to fail by pointing
+    // OPENCLAW_CONFIG_PATH at a path whose parent is a regular file,
+    // not a directory. The SDK's atomic write needs to create a temp
+    // sibling in the parent dir — fails reliably. The auth-profile
+    // store under `dir` is unaffected, so the upsert succeeds and we
+    // can observe whether rollback ran.
+    configBlocker = join(dir, "blocker");
+    writeFileSync(configBlocker, "not a directory");
+    process.env.OPENCLAW_CONFIG_PATH = join(configBlocker, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
+  });
+
+  it("removes the just-upserted SDK auth-profile entry when openclaw.json write fails", async () => {
+    // The handler upserts the profile FIRST, then writes the openclaw
+    // config. If the second step fails, we must not strand an orphan
+    // credential on disk. Regression guard against the prior shape
+    // (which left the API key in the SDK store with no provider
+    // entry pointing at it).
+    const cap = captureStdoutStderr();
+    await cliProviderAddOpenAIHandler({
+      apiKey: "sk-test-rollback-aaaa",
+      yes: true,
+      openclawDir: dir,
+    });
+    const { stderr } = cap.stop();
+
+    // The handler reports the failure
+    assert.equal(process.exitCode, 1, "expected exit 1 on config-write failure");
+    assert.match(stderr, /provider add openai/);
+
+    // …and the auth-profile store is empty (rollback fired)
+    const store = ensureAuthProfileStore(dir);
+    assert.deepEqual(
+      listProfilesForProvider(store, "openai"),
+      [],
+      "auth-profile should be rolled back after config-write failure",
+    );
     process.exitCode = 0;
   });
 });

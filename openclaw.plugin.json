@@ -153,7 +153,7 @@
       },
       "allowGateMutationOnNonLoopback": {
         "type": "boolean",
-        "description": "Opt-in to keep POST /plugins/audit/api/gate/{install,test} available when the gateway binds beyond loopback. Default false. These endpoints write the operator's Gate API key to ~/.openclaw/config.json (install) and emit outbound HTTP probes with that key (test); both are credential-handling paths that shouldn't accept arbitrary network input."
+        "description": "Opt-in to keep POST /plugins/audit/api/gate/{install,test} available when the gateway binds beyond loopback. Default false. These endpoints write the operator's Gate API key to ~/.openclaw/openclaw.json (install) and emit outbound HTTP probes with that key (test); both are credential-handling paths that shouldn't accept arbitrary network input."
       }
     },
     "additionalProperties": false

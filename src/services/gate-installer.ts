@@ -8,6 +8,7 @@ import {
   type JsonObject,
 } from "../util/openclaw-config-writer.js";
 import { probeGate, type ProbeResult } from "./gate-client.js";
+import { PLUGIN_ID } from "../plugin-id.js";
 
 export interface InstallInput {
   url: string;
@@ -168,8 +169,20 @@ export interface StatusReport {
   brokerProviderKey?: string;
 }
 
-const PLUGIN_ID = "constellation-audit-plugin";
 const DEFAULT_BROKER_KEY = "gate";
+
+/** ENOENT detection across Node fs errors and SDK errors. Node attaches
+ * `code === "ENOENT"`; the SDK's runtime-refresh / read errors don't
+ * always set it but also don't wrap an underlying fs error, so falling
+ * back to a name/message sniff catches the rest. */
+function isEnoent(err: unknown): boolean {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    if (code === "ENOENT") return true;
+    if (err.name === "ConfigFileNotFoundError") return true;
+  }
+  return false;
+}
 
 /**
  * Read-only summary of the operator's current Gate config. Does not
@@ -180,12 +193,22 @@ export async function readGateStatus(): Promise<StatusReport> {
   try {
     snapshot = await readOpenclawConfigSnapshot();
   } catch (err) {
-    // Malformed JSON / unreadable file — status should still answer
-    // truthfully ("nothing configured") rather than crash. Callers that
-    // need to surface the underlying error go through
-    // readSavedGatewayApiKey, which propagates.
+    // ENOENT — no openclaw config yet — is the "nothing configured"
+    // case, which we want to answer truthfully rather than crash.
+    // Anything else (malformed JSON, EACCES, SDK refresh failure,
+    // etc.) is a real broken state that should propagate so the
+    // caller surfaces a clear diagnostic instead of a misleading
+    // "Gate: not configured" message on a corrupted file.
+    if (!isEnoent(err)) throw err;
+    // SDK error shapes that carry the resolved path attach it on the
+    // error object; fall back to "" if absent (the report's
+    // configPath field is informational only when configured=false).
+    const errPath = err instanceof Error
+      ? (err as unknown as { path?: unknown }).path
+      : undefined;
+    const path = typeof errPath === "string" ? errPath : "";
     return {
-      configPath: err instanceof Error ? (err as { path?: string }).path ?? "" : "",
+      configPath: path,
       configured: false,
       hasApiKey: false,
       allowlisted: false,

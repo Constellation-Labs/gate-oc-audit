@@ -29,14 +29,16 @@ import {
   validateApiKeyOrThrow,
 } from "../services/gate-installer.js";
 import { probeGate } from "../services/gate-client.js";
-import { mutateOpenclawConfig } from "../util/openclaw-config-writer.js";
 import {
-  applyAuthProfileConfig,
+  applyAuthProfilePatch,
+  isConfigMutationConflict,
+  mutateOpenclawConfig,
+} from "../util/openclaw-config-writer.js";
+import {
   ensureAuthProfileStore,
   listProfilesForProvider,
   removeProviderAuthProfilesWithLock,
   upsertApiKeyProfile,
-  type OpenClawConfig,
 } from "openclaw/plugin-sdk/provider-auth";
 import { resolveOpenclawDir } from "../util/openclaw-paths.js";
 
@@ -983,9 +985,24 @@ async function handleApi(
       return true;
     }
     try {
-      await applyProviderProfileToConfig({ profileId, provider: "openai", mode: "api_key" });
+      await mutateOpenclawConfig((draft) =>
+        applyAuthProfilePatch(draft, { profileId, provider: "openai", mode: "api_key" }),
+      );
     } catch (err) {
-      sendError(res, 500, err instanceof Error ? err.message : "config write failed");
+      // Config write failed after the API key was upserted into the SDK
+      // store — roll back so we don't strand an orphan credential.
+      // `removeProviderAuthProfilesWithLock` is the only granularity the
+      // SDK exposes (it wipes all profiles for the provider); the
+      // upsert just touched the only "openai" profile so this is
+      // equivalent. Errors during rollback are swallowed — the original
+      // error is more informative; operator can re-run if cleanup fails.
+      try { await removeProviderAuthProfilesWithLock({ provider: "openai", agentDir }); }
+      catch { /* swallow — original error is more informative */ }
+      if (isConfigMutationConflict(err)) {
+        sendError(res, 409, "another writer modified ~/.openclaw/openclaw.json — retry");
+      } else {
+        sendError(res, 500, err instanceof Error ? err.message : "config write failed");
+      }
       return true;
     }
     sendJson(res, 200, { ok: true, profileId, provider: "openai", mode: "api_key" });
@@ -1019,19 +1036,6 @@ async function handleApi(
   }
 
   return false;
-}
-
-/** Read config → applyAuthProfileConfig → write back via the SDK. */
-async function applyProviderProfileToConfig(
-  params: { profileId: string; provider: string; mode: "api_key" | "oauth" | "token"; email?: string },
-): Promise<void> {
-  await mutateOpenclawConfig((draft) => {
-    const cfg = draft as unknown as OpenClawConfig;
-    const next = applyAuthProfileConfig(cfg, params);
-    for (const key of Object.keys(draft)) delete (draft as Record<string, unknown>)[key];
-    Object.assign(draft, next as unknown as Record<string, unknown>);
-    return [`models.providers.${params.provider}`];
-  });
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {
@@ -1119,14 +1123,16 @@ export function registerAuditUiRoutes(
         sendError(res, 400, "invalid url");
         return true;
       }
-      // Strip the API_BASE prefix (path may include a basePath we don't know
-      // about here; match by suffix to be safe).
-      const idx = url.pathname.indexOf(API_BASE);
-      if (idx < 0) {
+      // The route is registered with match: "prefix", so the gateway
+      // has already verified `pathname.startsWith(API_BASE)` before
+      // dispatching here. The `startsWith` check below is defensive
+      // (and rejects the embedded-prefix attack that `indexOf` would
+      // accept, e.g. "/foo/plugins/audit/api/events").
+      if (!url.pathname.startsWith(API_BASE)) {
         sendError(res, 404, "not found");
         return true;
       }
-      const apiPath = url.pathname.slice(idx + API_BASE.length);
+      const apiPath = url.pathname.slice(API_BASE.length);
       try {
         const handled = await handleApi(req, res, ctx, apiPath);
         if (!handled) sendError(res, 404, "not found");
@@ -1150,13 +1156,13 @@ export function registerAuditUiRoutes(
         res.end("Bad Request");
         return true;
       }
-      const idx = url.pathname.indexOf(UI_BASE);
-      if (idx < 0) {
+      if (!url.pathname.startsWith(UI_BASE)) {
         res.statusCode = 404;
         res.end("Not Found");
         return true;
       }
-      const uiPath = url.pathname.slice(idx + UI_BASE.length - 1); // keep leading slash
+      // Keep leading slash so `handleStatic` sees `/` for the root.
+      const uiPath = url.pathname.slice(UI_BASE.length - 1);
       try {
         const handled = await handleStatic(req, res, uiPath);
         if (!handled) {

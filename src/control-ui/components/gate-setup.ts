@@ -148,17 +148,11 @@ export class GateSetup extends LitElement {
     void this.loadStatus();
   }
 
-  private async loadStatus(opts: { syncUrlField?: boolean } = {}) {
+  private async loadStatus() {
     this.loadingStatus = true;
     this.statusError = undefined;
     try {
       this.status = await getGateStatus();
-      // Normal load: only pre-fill if the URL field is empty.
-      // syncUrlField (post-install): pull the canonical saved value so
-      // a trimmed/normalized URL is reflected back in the form.
-      if (this.status.url && (!this.url || opts.syncUrlField)) {
-        this.url = this.status.url;
-      }
     } catch (err) {
       this.statusError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -170,6 +164,10 @@ export class GateSetup extends LitElement {
     this.testing = true;
     this.testError = undefined;
     this.testResult = undefined;
+    // Clear any prior install result/error so the panel reflects only
+    // the outcome of THIS action.
+    this.installResult = undefined;
+    this.installError = undefined;
     try {
       // Status not loaded yet — refuse to act rather than fall into the
       // "any typed URL is an override" branch, which would produce a
@@ -213,6 +211,10 @@ export class GateSetup extends LitElement {
     this.installing = true;
     this.installError = undefined;
     this.installResult = undefined;
+    // Clear any prior test result/error so the panel reflects only the
+    // outcome of THIS action.
+    this.testResult = undefined;
+    this.testError = undefined;
     try {
       this.installResult = await installGate({
         url,
@@ -222,7 +224,7 @@ export class GateSetup extends LitElement {
         skipProbe: this.skipProbe,
       });
       this.apiKey = ""; // never leave the key on screen after success
-      await this.loadStatus({ syncUrlField: true });
+      await this.loadStatus();
     } catch (err) {
       this.installError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -290,10 +292,10 @@ export class GateSetup extends LitElement {
 
       <div class="help">
         Same flow as the CLI: <code>openclaw audit gate install</code>. The
-        install writes <code>~/.openclaw/openclaw.json</code> atomically and
-        a <code>.bak</code> snapshot of the prior file is kept (mode 0600).
-        API key entry is never echoed back and the saved key is never
-        included in <code>/api/gate/status</code> responses.
+        install writes <code>~/.openclaw/openclaw.json</code> atomically via
+        the openclaw SDK (no <code>.bak</code> file). API key entry is never
+        echoed back and the saved key is never included in
+        <code>/api/gate/status</code> responses.
       </div>
     `;
   }

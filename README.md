@@ -50,7 +50,7 @@ OPENCLAW_GATE_API_KEY=sk-gw-… openclaw audit gate install \
   --yes
 ```
 
-This writes `~/.openclaw/openclaw.json` atomically (a `.bak` is kept) with:
+This writes `~/.openclaw/openclaw.json` atomically via the openclaw SDK with:
 
 - `plugins.allow` ← appends `constellation-audit-plugin`
 - `plugins.entries.constellation-audit-plugin.enabled` ← `true`
@@ -58,7 +58,7 @@ This writes `~/.openclaw/openclaw.json` atomically (a `.bak` is kept) with:
 - `plugins.entries.constellation-audit-plugin.config.gatewayUrl` / `gatewayApiKey`
 - `models.providers.gate.{baseUrl,auth,apiKey,models}` — registers Gate as an LLM provider (omit with `--no-broker` for audit-only mode)
 
-Before writing, the installer probes the URL/key by POSTing an empty `events: []` batch to `<gateUrl>/api/v1/audit/ingest`. Skip with `--skip-probe` if the operator already trusts the inputs.
+Before writing, the installer probes the URL/key by POSTing an empty `events: []` batch to `<gateUrl>/v1/audit/ingest`. Skip with `--skip-probe` if the operator already trusts the inputs.
 
 Related commands:
 

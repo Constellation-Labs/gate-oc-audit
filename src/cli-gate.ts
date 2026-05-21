@@ -1,5 +1,4 @@
-import { createInterface, type Interface as ReadlineInterface } from "node:readline/promises";
-import { StringDecoder } from "node:string_decoder";
+import { createInterface } from "node:readline/promises";
 
 import {
   GateInstallError,
@@ -12,19 +11,14 @@ import {
 import { probeGate } from "./services/gate-client.js";
 import { STAGING_GATE_URL, STAGING_GATE_KEYS_URL } from "./services/gate-endpoints.js";
 import { cliProviderAddOpenAIHandler } from "./cli-provider.js";
+import { isConfigMutationConflict } from "./util/openclaw-config-writer.js";
+import { outLine, errLine } from "./util/cli-output.js";
+import { readStdinLine, StdinTtyError } from "./util/stdin.js";
+import { promptSecret } from "./util/prompt-secret.js";
 
 /** Env-var fallback for the API key — preferred over `--api-key` in CI
  * since flag values land in `ps`/argv and shell history. */
-const API_KEY_ENV = "OPENCLAW_GATE_API_KEY";
-
-/** Write a line to stdout directly. Mirrors `outLine` in cli.ts; see the
- * note there about why we bypass console.log in the CLI dispatch path. */
-function outLine(s: string): void {
-  process.stdout.write(`${s}\n`);
-}
-function errLine(s: string): void {
-  process.stderr.write(`${s}\n`);
-}
+const GATE_API_KEY_ENV = "OPENCLAW_GATE_API_KEY";
 
 export interface AuditGateInstallOptions {
   url?: string;
@@ -47,7 +41,13 @@ export interface AuditGateInstallOptions {
 export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Promise<void> {
   const interactive = !opts.yes && process.stdin.isTTY === true;
   let url = opts.url?.trim();
-  let apiKey = await resolveApiKeyFromOptsOrEnv(opts);
+  let apiKey: string | undefined;
+  try {
+    apiKey = await resolveApiKeyFromOptsOrEnv(opts);
+  } catch (err) {
+    handleError(err, opts.json === true);
+    return;
+  }
   // Default broker on; --no-broker sets broker=false explicitly.
   const registerBroker = opts.broker !== false;
 
@@ -58,7 +58,7 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
   if (!apiKey && !interactive) {
     errLine(
       `audit gate install: missing inputs in non-interactive mode. ` +
-      `Provide one of --api-key / --api-key-stdin / $${API_KEY_ENV}.`,
+      `Provide one of --api-key / --api-key-stdin / $${GATE_API_KEY_ENV}.`,
     );
     process.exitCode = 1;
     return;
@@ -75,8 +75,7 @@ export async function cliGateInstallHandler(opts: AuditGateInstallOptions): Prom
     } catch (err) {
       // Ctrl-C / stdin EOF inside the prompt — exit clean with the
       // shell-conventional 130 code, no stack trace, no unhandled
-      // rejection.
-      rl.close();
+      // rejection. `finally` below closes `rl`.
       const reason = err instanceof Error ? err.message : "aborted";
       if (opts.json) outLine(JSON.stringify({ ok: false, code: "aborted", error: reason }));
       else errLine(`audit gate install: ${reason}`);
@@ -201,11 +200,17 @@ export interface AuditGateTestOptions {
 export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<void> {
   const urlOverride = opts.url;
   let url = urlOverride;
-  let apiKey = await resolveApiKeyFromOptsOrEnv(opts);
+  let apiKey: string | undefined;
+  try {
+    apiKey = await resolveApiKeyFromOptsOrEnv(opts);
+  } catch (err) {
+    handleError(err, opts.json === true);
+    return;
+  }
 
   if (urlOverride && !apiKey) {
     errLine(
-      `audit gate test: --url override requires an explicit --api-key / --api-key-stdin / $${API_KEY_ENV}. ` +
+      `audit gate test: --url override requires an explicit --api-key / --api-key-stdin / $${GATE_API_KEY_ENV}. ` +
       `Refusing to send the saved API key to a non-configured URL.`,
     );
     process.exitCode = 1;
@@ -253,6 +258,11 @@ export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<vo
   const timeoutMs = parseTimeout(opts.timeoutMs);
   const result = await probeGate(url, apiKey, { timeoutMs });
 
+  // Set exitCode up front so both --json and human-readable branches
+  // share the same exit-on-failure policy. CI scripts that consume
+  // --json should be able to branch on `$?` alone.
+  if (result.kind !== "ok") process.exitCode = 1;
+
   if (opts.json) {
     outLine(JSON.stringify({ url, result }));
     return;
@@ -266,16 +276,13 @@ export async function cliGateTestHandler(opts: AuditGateTestOptions): Promise<vo
     case "unauthorized":
       outLine(`Probe: unauthorized (HTTP ${result.status})`);
       if (result.body) outLine(`  body: ${result.body}`);
-      process.exitCode = 1;
       break;
     case "http-error":
       outLine(`Probe: http-error (HTTP ${result.status})`);
       if (result.body) outLine(`  body: ${result.body}`);
-      process.exitCode = 1;
       break;
     case "network-error":
       outLine(`Probe: network-error — ${result.message}`);
-      process.exitCode = 1;
       break;
   }
 }
@@ -288,50 +295,21 @@ interface ApiKeyOpts {
 async function resolveApiKeyFromOptsOrEnv(opts: ApiKeyOpts): Promise<string | undefined> {
   if (opts.apiKey) return opts.apiKey.trim();
   if (opts.apiKeyStdin) {
-    const raw = await readLineFromStdin();
-    return raw.trim() || undefined;
+    // Wrap the TTY-throw in a typed error so the handler can surface a
+    // friendly message instead of letting the stack escape.
+    try {
+      const raw = await readStdinLine("openclaw audit gate install");
+      return raw.trim() || undefined;
+    } catch (err) {
+      if (err instanceof StdinTtyError) {
+        throw new GateInstallError("missing-api-key-stdin", err.message);
+      }
+      throw err;
+    }
   }
-  const env = process.env[API_KEY_ENV];
+  const env = process.env[GATE_API_KEY_ENV];
   if (env && env.length > 0) return env.trim();
   return undefined;
-}
-
-/** Read one newline-terminated line from stdin. Errors if stdin is a TTY
- * (so the operator can't accidentally hang the install). */
-async function readLineFromStdin(): Promise<string> {
-  if (process.stdin.isTTY) {
-    throw new GateInstallError(
-      "missing-api-key-stdin",
-      "--api-key-stdin requires the key to be piped in, e.g. `echo $KEY | openclaw audit gate install --api-key-stdin`",
-    );
-  }
-  return await new Promise<string>((resolve, reject) => {
-    let buf = "";
-    const onData = (chunk: Buffer): void => {
-      buf += chunk.toString("utf8");
-      const newlineIdx = buf.indexOf("\n");
-      if (newlineIdx >= 0) {
-        cleanup();
-        resolve(buf.slice(0, newlineIdx).replace(/\r$/, ""));
-      }
-    };
-    const onEnd = (): void => {
-      cleanup();
-      resolve(buf.replace(/\r$/, ""));
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      reject(err);
-    };
-    const cleanup = (): void => {
-      process.stdin.off("data", onData);
-      process.stdin.off("end", onEnd);
-      process.stdin.off("error", onError);
-    };
-    process.stdin.on("data", onData);
-    process.stdin.once("end", onEnd);
-    process.stdin.once("error", onError);
-  });
 }
 
 function parseTimeout(raw: string | undefined): number | undefined {
@@ -344,88 +322,20 @@ function parseTimeout(raw: string | undefined): number | undefined {
   return Math.floor(n);
 }
 
-/**
- * Read a secret from a TTY without echoing it. The fallback path (when
- * stdin is not a real TTY or `setRawMode` fails) just reads a line — no
- * masking, but still better than crashing. We don't try to be cleverer
- * than that here; mature secret entry belongs in the SDK, not this
- * plugin.
- *
- * Multi-byte safety: a single `data` event may split a UTF-8 codepoint
- * across continuation bytes (rare on a TTY, possible on paste), so we
- * accumulate raw bytes through a `StringDecoder` and only emit complete
- * characters. After the terminator, any remaining bytes in the chunk
- * are discarded so a multi-line paste does not flush the tail to the
- * shell after the process exits.
- */
-async function promptSecret(rl: ReadlineInterface, prompt: string): Promise<string> {
-  const stdin = process.stdin;
-  if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
-    return (await rl.question(prompt)).trim();
-  }
-
-  process.stdout.write(prompt);
-  stdin.setRawMode(true);
-  stdin.resume();
-  const decoder = new StringDecoder("utf8");
-
-  return await new Promise<string>((resolve, reject) => {
-    let buf = "";
-    const onData = (chunk: Buffer): void => {
-      const s = decoder.write(chunk);
-      for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
-        const code = ch.charCodeAt(0);
-        if (code === 0x03) {
-          finish();
-          process.stdout.write("\n");
-          reject(new Error("aborted (Ctrl-C)"));
-          return;
-        }
-        if (code === 0x0d || code === 0x0a) {
-          // Drain anything after the line terminator in this same chunk
-          // and discard it so a multi-line paste doesn't dump its tail
-          // into the post-exit shell.
-          finish();
-          process.stdout.write("\n");
-          resolve(buf.trim());
-          return;
-        }
-        if (code === 0x7f || code === 0x08) {
-          buf = buf.slice(0, -1);
-          continue;
-        }
-        buf += ch;
-      }
-    };
-    const onEnd = (): void => {
-      finish();
-      reject(new Error("aborted (stdin closed)"));
-    };
-    const onError = (err: Error): void => {
-      finish();
-      reject(err);
-    };
-    const finish = (): void => {
-      try { stdin.setRawMode(false); } catch { /* swallow */ }
-      stdin.pause();
-      stdin.off("data", onData);
-      stdin.off("end", onEnd);
-      stdin.off("close", onEnd);
-      stdin.off("error", onError);
-    };
-    stdin.on("data", onData);
-    stdin.once("end", onEnd);
-    stdin.once("close", onEnd);
-    stdin.once("error", onError);
-  });
-}
-
 function handleError(err: unknown, asJson: boolean): void {
   process.exitCode = 1;
   if (err instanceof GateInstallError) {
     if (asJson) outLine(JSON.stringify({ ok: false, code: err.code, error: err.message }));
     else errLine(`audit gate: ${err.message}`);
+    return;
+  }
+  // `ConfigMutationConflictError` from the SDK wins both attempts of
+  // `mutateOpenclawConfig`'s retry only when a third writer raced
+  // both passes — surface as a retryable, not a stack.
+  if (isConfigMutationConflict(err)) {
+    const msg = "another writer modified ~/.openclaw/openclaw.json — retry";
+    if (asJson) outLine(JSON.stringify({ ok: false, code: "config-conflict", error: msg }));
+    else errLine(`audit gate: ${msg}`);
     return;
   }
   const message = err instanceof Error ? err.message : String(err);

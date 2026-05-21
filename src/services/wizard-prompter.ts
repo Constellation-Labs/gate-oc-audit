@@ -77,16 +77,28 @@ export function createReadlineWizardPrompter(): WizardPrompter {
       params.options.forEach((opt, i) => {
         out(`  ${i + 1}. ${opt.label}${opt.hint ? ` — ${opt.hint}` : ""}`);
       });
-      const raw = trimEnd(await r.question("Select (comma-separated numbers, blank for none): "));
-      if (!raw.trim()) return [];
-      const out2: T[] = [];
-      for (const token of raw.split(",").map((s) => s.trim()).filter(Boolean)) {
-        const idx = Number(token) - 1;
-        if (Number.isInteger(idx) && idx >= 0 && idx < params.options.length) {
-          out2.push(params.options[idx].value);
+      // Retry on any invalid token (matches `select`'s policy). Blank
+      // input is the explicit "none" answer.
+      while (true) {
+        const raw = trimEnd(await r.question("Select (comma-separated numbers, blank for none): "));
+        if (!raw.trim()) return [];
+        const tokens = raw.split(",").map((s) => s.trim()).filter(Boolean);
+        const selected: T[] = [];
+        const invalid: string[] = [];
+        for (const token of tokens) {
+          const idx = Number(token) - 1;
+          if (Number.isInteger(idx) && idx >= 0 && idx < params.options.length) {
+            selected.push(params.options[idx].value);
+          } else {
+            invalid.push(token);
+          }
         }
+        if (invalid.length > 0) {
+          out(`Invalid selection: ${invalid.join(", ")}; try again.`);
+          continue;
+        }
+        return selected;
       }
-      return out2;
     },
     text: async (params: WizardTextParams): Promise<string> => {
       // The SDK no longer exposes a `sensitive` flag on text params;

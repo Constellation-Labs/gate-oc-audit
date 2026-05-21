@@ -175,13 +175,6 @@ export class ProviderPanel extends LitElement {
     if (this.loading && this.providers.length === 0) return html`<p class="hint">Loading…</p>`;
     if (this.loadError) return html`<div class="err">${this.loadError}</div>`;
     if (this.providers.length === 0) return html`<p class="hint">No provider profiles configured yet.</p>`;
-    // Group rows by provider for the remove button (which is per-provider).
-    const byProvider = new Map<string, ProviderRow[]>();
-    for (const r of this.providers) {
-      const list = byProvider.get(r.provider) ?? [];
-      list.push(r);
-      byProvider.set(r.provider, list);
-    }
     return html`
       <table>
         <thead><tr>

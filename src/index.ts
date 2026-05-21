@@ -24,12 +24,8 @@ import {GatewayStopCapture} from "./gateway-stop-capture.js";
 import {registerAuditUiRoutes} from "./ui/routes.js";
 import {resolveAuditUiUrl, resolveGatewayBaseUrl} from "./util/gateway-url.js";
 import {log, smtLog} from "./util/logger.js";
+import {PLUGIN_ID} from "./plugin-id.js";
 import {createRequire} from "node:module";
-
-const requireFromHere = createRequire(import.meta.url);
-const pluginPkg = requireFromHere("../package.json") as { name: string; version: string };
-const PLUGIN_NAME = pluginPkg.name;
-const PLUGIN_VERSION = pluginPkg.version;
 
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
@@ -54,7 +50,7 @@ export default (() => {
     let _gatewayStopCapture: GatewayStopCapture | undefined;
 
     return definePluginEntry({
-        id: "constellation-audit-plugin",
+        id: PLUGIN_ID,
         name: "@constellation-network/openclaw-audit-plugin",
         description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
@@ -299,12 +295,14 @@ export default (() => {
                     .option("--skip-probe", "Skip the live connection check before writing config")
                     .option("--yes", "Non-interactive mode — fail on missing inputs instead of prompting")
                     .option("--json", "Emit a single-line JSON result")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory (default: $OPENCLAW_DIR or ~/.openclaw)")
                     .action((opts: AuditGateInstallOptions) => cliGateInstallHandler(opts));
 
                 gate
                     .command("status")
                     .description("Show the current Gate connection from openclaw config (no network calls)")
                     .option("--json", "Emit the status as JSON")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory")
                     .action((opts: AuditGateStatusOptions) => cliGateStatusHandler(opts));
 
                 gate
@@ -316,6 +314,7 @@ export default (() => {
                     .option("--allow-private-host", "Allow https:// URLs to private/link-local hosts")
                     .option("--timeout-ms <n>", "Per-request timeout (default 10000)")
                     .option("--json", "Emit the probe result as JSON")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory")
                     .action((opts: AuditGateTestOptions) => cliGateTestHandler(opts));
 
                 // Provider management (LLM providers under models.providers.*)
@@ -325,6 +324,7 @@ export default (() => {
                     .command("list")
                     .description("List configured providers (redacted — never includes API-key values)")
                     .option("--json", "Emit as JSON")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory")
                     .action((opts: ProviderListOptions) => cliProviderListHandler(opts));
 
                 // Nested `add` → `openai` so commander binds the action handler
@@ -342,12 +342,14 @@ export default (() => {
                     .option("--oauth-timeout-sec <n>", "Cap the OAuth wait in seconds (default 300)")
                     .option("--yes", "Non-interactive — fail on missing inputs instead of prompting")
                     .option("--json", "Emit a single-line JSON result")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory")
                     .action((opts: ProviderAddOpenAIOptions) => cliProviderAddOpenAIHandler(opts));
 
                 provider
                     .command("remove <key>")
                     .description("Remove a configured provider entry (the 'gate' broker is managed by `audit gate install`)")
                     .option("--json", "Emit as JSON")
+                    .option("--openclaw-dir <dir>", "Override the openclaw config / profile-store directory")
                     .action((key: string, opts: ProviderRemoveOptions) => cliProviderRemoveHandler(key, opts));
             }, {
                 descriptors: [

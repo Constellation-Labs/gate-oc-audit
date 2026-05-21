@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
@@ -8,6 +8,7 @@ import { clearConfigCache } from "openclaw/plugin-sdk/config-runtime";
 import {
   applyBrokerProviderPatch,
   applyGateInstallPatch,
+  isConfigMutationConflict,
   isJsonObject,
   type JsonObject,
 } from "../src/util/openclaw-config-writer.js";
@@ -18,6 +19,7 @@ import {
   readGateStatus,
   validateApiKeyOrThrow,
 } from "../src/services/gate-installer.js";
+import { PLUGIN_ID } from "../src/plugin-id.js";
 
 function makeOpenclawDir(): string {
   return mkdtempSync(join(tmpdir(), "openclaw-cfg-"));
@@ -378,5 +380,135 @@ describe("gate-installer: readGateStatus", () => {
     assert.equal(status.conversationAccess, true);
     assert.equal(status.enabled, true);
     assert.equal(status.brokerProviderKey, "gate");
+  });
+
+  it("recovers as 'not configured' when the file is malformed (SDK best-effort parse)", async () => {
+    // The SDK's `readConfigFileSnapshotForWrite` silently coerces
+    // unparseable input to an empty config rather than throwing
+    // (verified at runtime, May 2026 SDK build). The audit plugin
+    // matches that posture and reports "nothing configured" rather
+    // than crashing. If a future SDK version starts throwing here,
+    // `readGateStatus`'s catch-and-rethrow path will propagate the
+    // error — this test will fail loudly so we revisit the contract.
+    const path = process.env.OPENCLAW_CONFIG_PATH;
+    assert.ok(path, "OPENCLAW_CONFIG_PATH must be set by the rig");
+    writeFileSync(path, "{ this is not json", { mode: 0o600 });
+    clearConfigCache();
+    const status = await readGateStatus();
+    assert.equal(status.configured, false);
+    assert.equal(status.hasApiKey, false);
+  });
+});
+
+describe("gate-installer: file mode on the written config", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "openclaw-cfg-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+  });
+
+  it("writes openclaw.json with mode 0o600 (owner-only read/write)", async () => {
+    // The plugin's API key lives in this file. Mode discipline is
+    // entirely the SDK's responsibility under the post-3fb5ec8
+    // writer; this regression test locks the invariant so a future
+    // SDK refactor can't silently widen permissions.
+    const path = process.env.OPENCLAW_CONFIG_PATH;
+    assert.ok(path, "OPENCLAW_CONFIG_PATH must be set by the rig");
+
+    await installGate({
+      url: "https://gate.example.com",
+      apiKey: "sk-gw-aaaa",
+      registerBroker: true,
+      allowPrivateHost: false,
+      skipProbe: true,
+    });
+
+    assert.ok(existsSync(path), "config file should exist after install");
+    // Mask off everything but the perm bits; on POSIX mode is the
+    // low 12 bits of `st_mode`.
+    const mode = statSync(path).mode & 0o777;
+    assert.equal(mode, 0o600, `expected 0o600, got 0o${mode.toString(8)}`);
+  });
+});
+
+describe("openclaw-config-writer: isConfigMutationConflict", () => {
+  it("returns true for an Error whose name is 'ConfigMutationConflictError'", () => {
+    // The SDK doesn't re-export the class through any subpath, so the
+    // predicate identifies it by `name`. This guards the contract:
+    // a future SDK refactor that renames the error class needs to
+    // come with a coordinated update here, and this test will fail
+    // loudly when the rename lands.
+    class Mock extends Error {
+      constructor() {
+        super("simulated");
+        this.name = "ConfigMutationConflictError";
+      }
+    }
+    assert.equal(isConfigMutationConflict(new Mock()), true);
+  });
+
+  it("returns false for unrelated errors", () => {
+    assert.equal(isConfigMutationConflict(new Error("io failed")), false);
+    assert.equal(isConfigMutationConflict(new TypeError("nope")), false);
+    assert.equal(isConfigMutationConflict("string"), false);
+    assert.equal(isConfigMutationConflict(undefined), false);
+    assert.equal(isConfigMutationConflict(null), false);
+  });
+});
+
+describe("gate-installer: install fails cleanly when config dir is unwritable", () => {
+  let dir: string;
+  beforeEach(() => {
+    // Point OPENCLAW_CONFIG_PATH at a path inside a regular file
+    // (not a directory) — `<tmp>/blocker/openclaw.json` where
+    // `<tmp>/blocker` is a file. The SDK's atomic write needs to
+    // create a temp sibling in the parent dir, which fails because
+    // the parent is not a directory. Reliably triggers a write
+    // failure without needing to mock the SDK.
+    dir = mkdtempSync(join(tmpdir(), "openclaw-cfg-"));
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "not a directory");
+    process.env.OPENCLAW_CONFIG_PATH = join(blocker, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+  });
+
+  it("installGate propagates the SDK write error rather than silently succeeding", async () => {
+    // Regression guard for the SDK-routed writer: prior shape
+    // hand-rolled the IO and a parent-not-a-directory case would
+    // crash later. The SDK should throw at write time; we just
+    // assert "did not silently return ok".
+    await assert.rejects(
+      installGate({
+        url: "https://gate.example.com",
+        apiKey: "sk-gw-aaaa",
+        registerBroker: true,
+        allowPrivateHost: false,
+        skipProbe: true,
+      }),
+    );
+  });
+});
+
+describe("gate-installer: PLUGIN_ID matches manifest", () => {
+  it("PLUGIN_ID exported by src/plugin-id.ts equals openclaw.plugin.json id", () => {
+    // The constant is shared between the config writer, the
+    // installer, and the plugin entry — drift would silently break
+    // the gate-install patch (config gets written under the wrong
+    // key, plugin entry can't read its own gatewayApiKey on
+    // restart).
+    const manifestPath = join(import.meta.dirname ?? ".", "..", "openclaw.plugin.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { id?: unknown };
+    assert.equal(manifest.id, PLUGIN_ID);
   });
 });

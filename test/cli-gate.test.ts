@@ -225,3 +225,65 @@ describe("cliGateTestHandler — --url-without-key exfil guard", () => {
     process.exitCode = 0;
   });
 });
+
+describe("cliGateTestHandler — --json exit code on probe failure", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cli-gate-"));
+    process.env.OPENCLAW_CONFIG_PATH = join(dir, "openclaw.json");
+    clearConfigCache();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.OPENCLAW_CONFIG_PATH;
+    clearConfigCache();
+    process.exitCode = 0;
+  });
+
+  it("--json sets process.exitCode = 1 when the probe network-errors", async () => {
+    // Regression guard: prior shape early-returned from the --json
+    // branch before the human-readable switch set exitCode, so CI
+    // scripts that parsed the JSON saw exit 0 on a failing probe.
+    // Loopback to a closed port deterministically network-errors.
+    const cap = captureStdoutStderr();
+    await cliGateTestHandler({
+      url: "http://127.0.0.1:1",
+      apiKey: "sk-gw-aaaa",
+      allowPrivateHost: false,
+      json: true,
+    });
+    const { stdout } = cap.stop();
+    // JSON output exists and parses
+    const lines = stdout.trim().split("\n").filter(Boolean);
+    const parsed = JSON.parse(lines[lines.length - 1]) as { result: { kind: string } };
+    assert.notEqual(parsed.result.kind, "ok");
+    // Exit code reflects the failure regardless of --json
+    assert.equal(process.exitCode, 1);
+    process.exitCode = 0;
+  });
+
+  it("--json exits 0 on a successful probe", async () => {
+    // Stand up a tiny http server that 200s the probe — covers the
+    // happy-path side of the same regression.
+    const { createServer } = await import("node:http");
+    const srv = createServer((_req, res) => {
+      res.statusCode = 200;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as { port: number };
+    try {
+      const cap = captureStdoutStderr();
+      await cliGateTestHandler({
+        url: `http://127.0.0.1:${addr.port}`,
+        apiKey: "sk-gw-aaaa",
+        allowPrivateHost: false,
+        json: true,
+      });
+      cap.stop();
+      assert.equal(process.exitCode, 0);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+});
