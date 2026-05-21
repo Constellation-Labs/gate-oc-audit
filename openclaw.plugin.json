@@ -7,6 +7,9 @@
     "onCommands": ["audit"],
     "onCapabilities": ["hook", "tool"]
   },
+  "skills": [
+    "./skills"
+  ],
   "contracts": {
     "tools": ["audit_de_setup", "audit_smt"]
   },
