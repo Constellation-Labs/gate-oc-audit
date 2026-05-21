@@ -27,6 +27,16 @@ const MAX_CONTENT_LENGTH = 64_000;
 const USER_ID_MAX_LEN = MAX_FIELD_LENGTH;
 const TRUNCATE_SUFFIX = "…[truncated]";
 
+/**
+ * Coerce an SDK-supplied value that's expected to be a count/duration/cost.
+ * Returns the value as a finite number, or `undefined` if the input wasn't a
+ * usable number — JSON.stringify drops `undefined` keys, so the metadata
+ * stays clean of `null`/`NaN`/`Infinity` for downstream readers.
+ */
+function numOrUndef(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
 function truncateString(s: string, max: number, label: string): string {
   if (s.length <= max) return s;
   log.warn(
@@ -646,10 +656,10 @@ export function registerHooks(
         metadata: {
           provider: evt.provider,
           model: evt.model,
-          inputTokens: evt.usage?.input,
-          outputTokens: evt.usage?.output,
-          cacheReadTokens: evt.usage?.cacheRead,
-          cacheWriteTokens: evt.usage?.cacheWrite,
+          inputTokens: numOrUndef(evt.usage?.input),
+          outputTokens: numOrUndef(evt.usage?.output),
+          cacheReadTokens: numOrUndef(evt.usage?.cacheRead),
+          cacheWriteTokens: numOrUndef(evt.usage?.cacheWrite),
         },
         content: evt.assistantTexts?.join("\n"),
       }),

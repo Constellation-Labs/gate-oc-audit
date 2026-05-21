@@ -14,26 +14,29 @@ export interface PostResult {
   error?: string;
 }
 
+import { validateHttpTargetUrl } from "./network-policy.js";
+
 /**
- * Returns a reason if the URL isn't safe to POST to. Surfaces protocol +
- * parse failures; callers log this once and disable the webhook rather than
- * throwing at request time.
+ * Returns a reason if the URL isn't safe to POST to, or undefined if it
+ * passes the shared host policy (see util/network-policy.ts). Callers log
+ * the reason once and disable the webhook rather than throwing at request
+ * time.
  *
- * Trust model: callers pass URLs sourced from operator-controlled config
- * (audit plugin config file). The validator deliberately allows `http://`
- * for loopback / dev setups and does NOT block private/link-local hosts —
- * operators who can write the config already have local file access, which
- * is more powerful than SSRF. Do NOT reuse this validator for URLs coming
- * from any less-trusted surface (CLI input, UI form, network) without
- * adding host/protocol policy on top.
+ * Trust model: URLs originate from the plugin's config file. We gate them
+ * through the same SSRF policy as the gateway publisher — `http://`
+ * only to loopback, no userinfo, no numeric IP encoding tricks, and
+ * private/link-local hosts only when the caller explicitly opts in via
+ * `allowPrivateHost: true`. Operators who legitimately need to POST to
+ * an intranet recipient flip the corresponding `*AllowPrivateHost` config
+ * flag; everyone else gets defense in depth against a copy-pasted bad URL.
  */
-export function isUnsafeWebhookUrl(raw: string): string | undefined {
-  let url: URL;
-  try { url = new URL(raw); } catch { return "malformed URL"; }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return `disallowed protocol ${url.protocol}`;
-  }
-  return undefined;
+export function isUnsafeWebhookUrl(
+  raw: string,
+  opts: { allowPrivateHost?: boolean } = {},
+): string | undefined {
+  const result = validateHttpTargetUrl(raw, opts);
+  if (result.ok) return undefined;
+  return result.reason;
 }
 
 /** Strip CR/LF/tab and cap length so a hostile webhook server's status text
@@ -62,6 +65,11 @@ export async function postJsonWebhook(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
+      // Reject redirects rather than following them. A hostile or
+      // misconfigured webhook that returns 302 could otherwise steer
+      // the POST  to an
+      // unintended host. Treat any 3xx as a transport failure.
+      redirect: "manual",
     });
     if (!response.ok) {
       return { ok: false, status: response.status, error: sanitize(response.statusText) };

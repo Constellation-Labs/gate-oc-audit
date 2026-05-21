@@ -8,7 +8,8 @@
   "files": [
     "dist",
     "openclaw.plugin.json",
-    "schemas"
+    "schemas",
+    "skills"
   ],
   "scripts": {
     "build": "tsc && vite build",

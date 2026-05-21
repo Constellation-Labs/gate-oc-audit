@@ -6,7 +6,7 @@
  * openclaw schema change can't break the audit reports.
  */
 
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeOutput } from "./inventory.js";
 
@@ -71,19 +71,20 @@ function parseSchedule(raw: unknown): ParsedCronSchedule {
 }
 
 function readOne(path: string, name: string): ConfiguredCron {
-  // Pre-flight via stat so an oversized file can be rejected without ever
-  // touching readFileSync's buffer. The stub `<oversize>` keeps the file
-  // visible to the operator instead of silently dropping it.
+  // Open-then-fstat-then-read against the SAME fd so the size check
+  // applies to the same inode the subsequent read consumes. A plain
+  // `statSync(path) + readFileSync(path)` pair has a TOCTOU window
+  // where the path can be swapped between syscalls; opening once
+  // collapses that window — the read pulls the inode we already
+  // measured even if the directory entry now points elsewhere.
+  let fd: number | undefined;
   try {
-    const st = statSync(path);
+    fd = openSync(path, "r");
+    const st = fstatSync(fd);
     if (st.size > MAX_MANIFEST_BYTES) {
       return { name, schedule: { kind: "unknown", raw: "<oversize>" } };
     }
-  } catch {
-    return { name, schedule: { kind: "unknown", raw: "<unreadable>" } };
-  }
-  try {
-    const text = readFileSync(path, "utf8");
+    const text = readFileSync(fd, "utf8");
     const doc = JSON.parse(text) as unknown;
     if (doc === null || typeof doc !== "object") {
       return { name, schedule: { kind: "unknown", raw: "<not-an-object>" } };
@@ -94,6 +95,13 @@ function readOne(path: string, name: string): ConfiguredCron {
     };
   } catch {
     return { name, schedule: { kind: "unknown", raw: "<unreadable>" } };
+  } finally {
+    // readFileSync(fd) does NOT close the fd on its own (unlike
+    // readFileSync(path)); close explicitly so a parse exception above
+    // doesn't leak the descriptor.
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* fd may already be closed; ignore */ }
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { join, normalize, resolve as resolvePath, extname } from "node:path";
+import { join, normalize, resolve as resolvePath, extname, sep as pathSep } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const MIME: Record<string, string> = {
@@ -38,7 +38,7 @@ export async function serveStaticFile(
   const cleaned = normalize(requestPath).replace(/^[/\\]+/, "");
   const absRoot = resolvePath(rootDir);
   const absPath = resolvePath(join(absRoot, cleaned));
-  if (!absPath.startsWith(absRoot + "/") && absPath !== absRoot) {
+  if (!absPath.startsWith(absRoot + pathSep) && absPath !== absRoot) {
     res.statusCode = 403;
     res.end("Forbidden");
     return true;

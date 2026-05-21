@@ -89,7 +89,13 @@ export class RateLimiter {
       if (this.buffer.length < this.bufferCapacity) {
         this.buffer.push(insert);
       }
-      // If still full after coalescing, drop the event (shouldn't happen in practice)
+      // Still full after coalescing — only reachable if every buffered event
+      // is already in its own coalesce group . Convert the
+      // "shouldn't happen in practice" assumption into a signal so an operator
+      // sees the drop in logs instead of silent data loss.
+      rateLimiterLog.warn(
+        `rate-limiter buffer full after coalescing; dropping ${insert.eventType}/${insert.category} event`,
+      );
     }
 
     // Start drain timer if not running

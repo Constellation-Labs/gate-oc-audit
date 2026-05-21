@@ -2,6 +2,23 @@
 
 Tamper-evident audit trail for AI coding agent activity. Records every session, tool invocation, and prompt exchange into a local SQLite database with SHA-256 hash chain integrity, so you can verify that no events were altered or deleted after the fact.
 
+## What this does for you
+
+| Job | Command | What you get |
+|---|---|---|
+| Confirm the plugin is healthy | `openclaw audit status` | One-screen snapshot: storage, integrity, anchor, gateway, file-watch, inventory, last security scan |
+| See today's / this week's activity | `openclaw audit report daily` / `… weekly` | Activity, top tools, LLM spend, outbound messaging, anomalies, integrity footer |
+| Track LLM spend | `openclaw audit spend --by model --since 7d` | Token usage and `costUsd` grouped by provider / model / day / session |
+| Prove an event happened | `openclaw audit smt proof <hash>` then `… smt verify` | Inclusion proof against tree roots and DE-anchored checkpoints |
+| Independent third-party proof | Configure Digital Evidence anchoring (see below) | SMT roots anchored on the Constellation Digital Evidence network |
+| Alert on file changes | Configure `fileWatchPatterns` + `notificationWebhook` | Slack/Discord/webhook ping when a watched path changes |
+| Daily/weekly digests to a channel | Configure `reportWebhook` | Slack-compatible payload with the same projection as `audit report` |
+| Export the trail for compliance | `openclaw audit export csv --from … --to …` | Streamed NDJSON or CSV with anchor references per row |
+| Re-scan for tampering | `openclaw audit verify` | Full SMT replay + DE checkpoint consistency check; exit 0 if clean |
+| Forward to a central gateway | Configure `gatewayUrl` + `gatewayApiKey` | Batched POSTs to swarm-deck for centralized retention |
+
+If you don't know where to start, run `openclaw audit status` after install — it tells you everything that's wired up and what isn't.
+
 ## Installation
 
 ```bash
@@ -72,7 +89,158 @@ Or directly in the config JSON:
 
 The plugin also logs a warning at startup if a tool call is observed without any preceding `llm_input` event, which usually indicates this opt-in is missing.
 
-### Configuration (optional)
+## Quick check after install
+
+```bash
+openclaw audit status
+```
+
+This is the single best command to confirm the plugin is recording. It prints one screen covering:
+
+- **Storage** — DB size vs cap, event count, oldest event, next prune
+- **Integrity** — sequence head, SMT trees + root, last checkpoint, conversation-hook state (`ENABLED` / `DISABLED` / `ENABLED-but-silent` if no `prompt.input` seen in 24h)
+- **Digital Evidence anchor** — active / inactive, anchors today, last anchor tx hash, circuit-breaker state
+- **Gateway publisher** — buffer depth, dropped today, last success / error
+- **File watching** — patterns watched / ignored, changes in last 24h
+- **Inventory** — plugins / skills / tools / cron counts
+- **Last security scan** — timestamp + finding counts
+
+Add `--json` for a single-line, machine-readable snapshot. If `Conversation hook` shows `DISABLED`, the operator hasn't set `allowConversationAccess` (see above) and `prompt.input` / `prompt.response` / `agent.end` events are missing from the trail.
+
+## CLI commands
+
+All commands open the audit DB read-only via SQLite WAL, so they coexist with the running gateway without lock contention.
+
+### Runtime health — `audit status`
+
+See [Quick check after install](#quick-check-after-install) above. Use `--json` to pipe to `jq`.
+
+### List events
+
+```bash
+openclaw audit list
+openclaw audit list --last 20
+openclaw audit list --type tool.invoked
+openclaw audit list --category prompt --session <session-id>
+```
+
+### Verify integrity
+
+Verify SMT proofs for recent events and check DE checkpoint consistency:
+
+```bash
+openclaw audit verify
+```
+
+Exits with code `0` if all proofs and checkpoints are valid, `1` if any verification fails.
+
+### Inventory
+
+```bash
+openclaw audit inventory                # summary across plugins/skills/tools/crons
+openclaw audit inventory plugins        # detail for one kind
+openclaw audit inventory skills --json
+```
+
+### Report
+
+Generate a daily or weekly activity digest with inline anomaly detectors. The projection covers Activity / Cron schedule / Top tools / LLM spend / Outbound messaging / Anomalies / Integrity, rendered as human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`).
+
+```bash
+openclaw audit report daily                       # today (UTC), human text
+openclaw audit report daily --date 2026-05-17     # specific UTC day
+openclaw audit report daily --tz local            # use local-time day boundary
+openclaw audit report weekly                      # this ISO week (UTC)
+openclaw audit report weekly --week 2026-W19      # specific ISO week
+openclaw audit report daily --json                # single-line JSON
+openclaw audit report daily --html > report.html  # standalone HTML
+openclaw audit report cron <job-id>               # per-cron rollup, one row per execution
+openclaw audit report cron <job-id> --last 5 --json
+openclaw audit report cron <job-id> --html > cron.html
+openclaw audit report session <session-id>        # per-conversation rollup
+```
+
+Detector knobs (capped on both CLI and HTTP):
+
+| Flag | Default | Max | Description |
+|---|---|---|---|
+| `--dup-window-sec` | `60` | `3600` | R5a duplicate-outbound: sha256-equal `message.sent` within this window to the same channel + recipient is flagged |
+| `--lookback-days` | `30` | `365` | R5b first-seen-tool: tools invoked in the window but absent from this trailing day count are flagged |
+| `--top-tools` | `10` | `1000` | Cap for the Top tools section |
+
+Anomaly detectors emitted in the `anomalies` block:
+
+- **R5a duplicate outbound** — same content hash sent to the same channel + recipient inside `--dup-window-sec`. `duplicateOutboundTruncated: true` indicates the underlying `message.sent` scan hit its 100k-row cap and a duplicate beyond that point could have been missed.
+- **R5b first-seen tools** — tool names invoked in the window that did not appear in the prior `--lookback-days` window. Calendar-day arithmetic in the report's timezone keeps the lookback DST-tolerant.
+
+The Integrity footer pins the report to a sequence point: last event id / sequence / `content_hash`, plus the last DE-anchored checkpoint (id, `smtRoot`, `deTxHash`, sequence range, `createdAt`) when one exists. A consumer can cross-check the footer against `openclaw audit verify` to confirm the report covers a tamper-evident slice of the trail.
+
+The **Cron schedule** section lists the openclaw cron manifests (`<jobId>.cron.*.json`) found in the openclaw root on the machine the report was generated on, so an operator can see the configured schedule alongside the in-window execution counters. Each entry shows the job name and a compact schedule string (`cron <expr> (<tz>)`, `every <ms>`, `at <iso>`, or `unknown (<raw>)` when the manifest's `schedule` field doesn't parse). Symlinked, oversized (>64 KiB), and non-`.json` manifest files are deliberately skipped so a stray file in the openclaw root can't redirect or DoS the report. Reports generated without filesystem access emit `configured: []`.
+
+**Per-cron rollup (R9).** `openclaw audit report cron <job-id>` projects the trail as one row per cron execution for a given `jobId`, newest first. Each row pairs the `cron.executed` event with its matching `agent.end` (by `sessionId` + `metadata.runId`) and attributes tool / LLM / outbound-message activity that fired on the same session between the two timestamps. `--last N` (default 20, max 1000) bounds the rollup; when the store has more executions than fit, `truncated: true` is surfaced in all output formats. When a `<jobId>.cron.*.json` manifest matches on disk, its schedule is inlined in the rollup header (`Schedule: cron <expr> (<tz>)`, etc.); `manifest: null` when no manifest matches or no `openclawDir` was supplied. Output is human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`). The JSON shape is published at `schemas/audit-cron-rollup.schema.json` so dashboards can pin against `schemaVersion: 1`.
+
+The same projection is available over HTTP at `GET /plugins/audit/api/report?period=daily|weekly&date=&week=&tz=&format=json|html&dupWindowSec=&lookbackDays=&topTools=`. The JSON shape is published at `schemas/audit-projection.schema.json` so dashboards can pin against `schemaVersion: 1`.
+
+> **HTTP endpoint and loopback.** Like `/api/export`, the report route is unauthenticated and returns `403` when the gateway binds beyond loopback unless `allowExportOnNonLoopback: true` is set. The CLI reads the local DB directly and is unaffected.
+
+### LLM spend
+
+`openclaw audit spend [--by provider|model|day|session] [--since 24h] [--until now] [--limit 1000] [--json]` aggregates `prompt.response` metadata across a time window, grouping by provider, model, calendar day, or session id. Token columns include input, output, cache-read, and cache-write counts; `costUsd` is summed verbatim from the per-event `metadata.costUsd`.
+
+Default grouping is `model`; bucket labels for that mode are formatted as `provider/model` (e.g. `openai/gpt-5`) so cross-provider model name collisions don't merge. `--by day` buckets are always UTC dates regardless of `--tz` — the formatter prints a note when `--tz local` is used with `--by day`. `--limit` (default 1000, max 100000) caps the number of buckets; when the cap trims a result, `truncated: true` appears in all outputs. The JSON shape is published at `schemas/audit-spend.schema.json`. Totals match the daily report's LLM-spend section when the windows align.
+
+### Export
+
+```bash
+openclaw audit export                                         # JSON Lines (default, streamed)
+openclaw audit export csv                                     # CSV (streamed, stable column order)
+openclaw audit export --type tool.invoked --limit 100         # cap rows
+openclaw audit export --from 2025-01-01T00:00:00Z --to 2025-02-01T00:00:00Z
+openclaw audit export --security-only                         # security / config / system categories
+openclaw audit export --include-content                       # include decompressed content column / field
+```
+
+Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, `anchor.sequenceStart`, `anchor.sequenceEnd`, `anchor.createdAt`) for the checkpoint covering its sequence, or `null` when no DE-anchored checkpoint covers it yet. Output is streamed in fixed-size batches via a sequence cursor, so retention pruning during the export can't shift the window and silently drop rows. The same shape is available over HTTP at `GET /plugins/audit/api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=`.
+
+> **`--include-content` and redaction.** `redactPromptText` rewrites prompt / message content to `sha256:<hex>` before insert, and `redactToolArgs` does the same for tool-call arguments. Neither switch covers `tool.result` content (tool stdout / stderr / output bodies). If you set both flags and run `audit export --include-content`, the prompt and message bodies are hashed but tool outputs are still emitted verbatim. Operators that need a fully redacted export should either (a) skip `--include-content`, or (b) filter `--category` away from `tool` events.
+
+> **HTTP endpoint and loopback.** `GET /plugins/audit/api/export` is unauthenticated; the plugin relies on the gateway being bound to loopback (`gateway.bind: "loopback"`, the default) for safety. When the gateway binds beyond loopback the export route returns `403` unless you explicitly opt in:
+>
+> ```bash
+> openclaw config set plugins.entries.constellation-audit-plugin.config.allowExportOnNonLoopback true
+> ```
+>
+> ```json
+> { "config": { "allowExportOnNonLoopback": true } }
+> ```
+>
+> The CLI (`openclaw audit export …`) is unaffected — it reads the local DB directly and doesn't traverse the HTTP gate.
+
+### SMT operations
+
+```bash
+openclaw audit smt root                           # Show current SMT root and entry count
+openclaw audit smt root --tree <key>              # Root for a specific tree
+openclaw audit smt trees                          # List all SMT trees
+openclaw audit smt proof <hash>                   # Generate inclusion/exclusion proof for a hash
+openclaw audit smt proof <hash> --tree <key>
+openclaw audit smt verify --proof '<json>'        # Verify a proof against known tree/checkpointed roots
+openclaw audit smt chain <conversationId> --tree <key>
+```
+
+Proof verification checks both internal consistency (siblings hash to the claimed root) and root legitimacy . A self-consistent proof with an unknown root is rejected.
+
+Exit codes for `smt verify`:
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | Proof is valid — internally consistent and root matches a known anchor |
+| 1 | INVALID — root not recognized by this node, or proof is internally inconsistent |
+| 2 | UNVERIFIABLE — no SMT trees or DE checkpoints exist to verify against |
+
+**Live-root window:** proofs are verified against current tree roots and DE-checkpointed roots. When a new event advances the tree from root R1 to R2, proofs generated at R1 will be rejected unless a checkpoint captured R1. On active systems there is always a brief window between tree advancement and the next checkpoint where recently-generated proofs cannot be verified. To avoid this, verify proofs before appending new events, or ensure the checkpoint interval is short enough for your use case.
+
+## Configuration reference
 
 > **Config key:** in openclaw config this plugin lives under `constellation-audit-plugin` (the manifest id), **not** the npm package name `@constellation-network/openclaw-audit-plugin`. Openclaw logs a warning about the mismatch on load — it's expected and safe to ignore.
 
@@ -417,120 +585,6 @@ Emitted only when the agent run's `ctx.trigger === "cron"`. `cron.executed` mark
 `system.install` records every plugin or skill install/update intercepted by openclaw's install pipeline, including the built-in security scan summary. Captures who installed what so unexpected supply-chain events leave an audit-trail signal. Hook is non-decisive — the plugin observes only and never blocks.
 
 `system.install_hook_unavailable` is appended each time `registerHooks` runs and `before_install` registration throws (typically once per process, but openclaw may re-register on config reload). This makes "we silently couldn't audit installs" a recorded event rather than a console warning that scrolls away.
-
-## CLI commands
-
-### List events
-
-```bash
-openclaw audit list
-openclaw audit list --last 20
-openclaw audit list --type tool.invoked
-openclaw audit list --category prompt --session <session-id>
-```
-
-### Verify integrity
-
-Verify SMT proofs for recent events and check DE checkpoint consistency:
-
-```bash
-openclaw audit verify
-```
-
-Exits with code `0` if all proofs and checkpoints are valid, `1` if any verification fails.
-
-### Export
-
-```bash
-openclaw audit export                                    # JSON Lines (default, streamed)
-openclaw audit export csv                                # CSV (streamed, stable column order)
-openclaw audit export --type tool.invoked --limit 100    # cap rows
-openclaw audit export --from 2025-01-01T00:00:00Z --to 2025-02-01T00:00:00Z
-openclaw audit export --security-only                    # security / config / system categories
-openclaw audit export --include-content                  # include decompressed content column / field
-```
-
-Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, `anchor.sequenceStart`, `anchor.sequenceEnd`, `anchor.createdAt`) for the checkpoint covering its sequence, or `null` when no DE-anchored checkpoint covers it yet. Output is streamed in fixed-size batches via a sequence cursor, so retention pruning during the export can't shift the window and silently drop rows. The same shape is available over HTTP at `GET /plugins/audit/api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=`.
-
-> **`--include-content` and redaction.** `redactPromptText` rewrites prompt / message content to `sha256:<hex>` before insert, and `redactToolArgs` does the same for tool-call arguments. Neither switch covers `tool.result` content (tool stdout / stderr / output bodies). If you set both flags and run `audit export --include-content`, the prompt and message bodies are hashed but tool outputs are still emitted verbatim. Operators that need a fully redacted export should either (a) skip `--include-content`, or (b) filter `--category` away from `tool` events.
-
-> **HTTP endpoint and loopback.** `GET /plugins/audit/api/export` is unauthenticated; the plugin relies on the gateway being bound to loopback (`gateway.bind: "loopback"`, the default) for safety. When the gateway binds beyond loopback the export route returns `403` unless you explicitly opt in:
->
-> ```bash
-> openclaw config set plugins.entries.constellation-audit-plugin.config.allowExportOnNonLoopback true
-> ```
->
-> ```json
-> { "config": { "allowExportOnNonLoopback": true } }
-> ```
->
-> The CLI (`openclaw audit export …`) is unaffected — it reads the local DB directly and doesn't traverse the HTTP gate.
-
-### Report
-
-Generate a daily or weekly activity digest with inline anomaly detectors. The projection covers Activity / Cron schedule / Top tools / LLM spend / Outbound messaging / Anomalies / Integrity, rendered as human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`).
-
-```bash
-openclaw audit report daily                                # today (UTC), human text
-openclaw audit report daily --date 2026-05-17              # specific UTC day
-openclaw audit report daily --tz local                     # use local-time day boundary
-openclaw audit report weekly                               # this ISO week (UTC)
-openclaw audit report weekly --week 2026-W19               # specific ISO week
-openclaw audit report daily --json                         # single-line JSON
-openclaw audit report daily --html > report.html           # standalone HTML
-openclaw audit report cron <job-id>                        # per-cron rollup, one row per execution
-openclaw audit report cron <job-id> --last 5 --json        # last 5 executions, JSON
-openclaw audit report cron <job-id> --html > cron.html     # standalone HTML
-```
-
-Detector knobs (capped on both CLI and HTTP):
-
-| Flag | Default | Max | Description |
-|---|---|---|---|
-| `--dup-window-sec` | `60` | `3600` | R5a duplicate-outbound: sha256-equal `message.sent` within this window to the same channel + recipient is flagged |
-| `--lookback-days` | `30` | `365` | R5b first-seen-tool: tools invoked in the window but absent from this trailing day count are flagged |
-| `--top-tools` | `10` | `1000` | Cap for the Top tools section |
-
-Anomaly detectors emitted in the `anomalies` block:
-
-- **R5a duplicate outbound** — same content hash sent to the same channel + recipient inside `--dup-window-sec`. `duplicateOutboundTruncated: true` indicates the underlying `message.sent` scan hit its 100k-row cap and a duplicate beyond that point could have been missed.
-- **R5b first-seen tools** — tool names invoked in the window that did not appear in the prior `--lookback-days` window. Calendar-day arithmetic in the report's timezone keeps the lookback DST-tolerant.
-
-The Integrity footer pins the report to a sequence point: last event id / sequence / `content_hash`, plus the last DE-anchored checkpoint (id, `smtRoot`, `deTxHash`, sequence range, `createdAt`) when one exists. A consumer can cross-check the footer against `openclaw audit verify` to confirm the report covers a tamper-evident slice of the trail.
-
-The **Cron schedule** section lists the openclaw cron manifests (`<jobId>.cron.*.json`) found in the openclaw root on the machine the report was generated on, so an operator can see the configured schedule alongside the in-window execution counters. Each entry shows the job name and a compact schedule string (`cron <expr> (<tz>)`, `every <ms>`, `at <iso>`, or `unknown (<raw>)` when the manifest's `schedule` field doesn't parse). Symlinked, oversized (>64 KiB), and non-`.json` manifest files are deliberately skipped so a stray file in the openclaw root can't redirect or DoS the report. Reports generated without filesystem access (or via consumers that don't supply an `openclawDir`) emit `configured: []`.
-
-**Per-cron rollup (R9).** `openclaw audit report cron <job-id>` projects the trail as one row per cron execution for a given `jobId`, newest first. Each row pairs the `cron.executed` event with its matching `agent.end` (by `sessionId` + `metadata.runId`) and attributes tool / LLM / outbound-message activity that fired on the same session between the two timestamps. `--last N` (default 20, max 1000) bounds the rollup; when the store has more executions than fit, `truncated: true` is surfaced in all output formats. When a `<jobId>.cron.*.json` manifest matches on disk, its schedule is inlined in the rollup header (`Schedule: cron <expr> (<tz>)`, etc.); `manifest: null` when no manifest matches or no `openclawDir` was supplied. Output is human text (default), single-line JSON (`--json`), or a self-contained HTML document (`--html`). The JSON shape is published at `schemas/audit-cron-rollup.schema.json` so dashboards can pin against `schemaVersion: 1`.
-
-**LLM-spend rollup (R11).** `openclaw audit spend [--by provider|model|day|session] [--since 24h] [--until now] [--limit 1000] [--json]` aggregates `prompt.response` metadata across a time window, grouping by provider, model, calendar day, or session id. Token columns include input, output, cache-read, and cache-write counts; `costUsd` is summed verbatim from the per-event `metadata.costUsd`. Default grouping is `model`; bucket labels for that mode are formatted as `provider/model` (e.g. `openai/gpt-5`) so cross-provider model name collisions don't merge. `--by day` buckets are always UTC dates regardless of `--tz` — the formatter prints a note when `--tz local` is used with `--by day`. `--limit` (default 1000, max 100000) caps the number of buckets; when the cap trims a result, `truncated: true` appears in all outputs. The JSON shape is published at `schemas/audit-spend.schema.json`. Totals match the daily report's LLM-spend section when the windows align.
-
-The same projection is available over HTTP at `GET /plugins/audit/api/report?period=daily|weekly&date=&week=&tz=&format=json|html&dupWindowSec=&lookbackDays=&topTools=`. The JSON shape is published at `schemas/audit-projection.schema.json` so dashboards can pin against `schemaVersion: 1`.
-
-> **HTTP endpoint and loopback.** Like `/api/export`, the report route is unauthenticated and returns `403` when the gateway binds beyond loopback unless `allowExportOnNonLoopback: true` is set. The CLI reads the local DB directly and is unaffected.
-
-### SMT operations
-
-```bash
-openclaw audit smt root                     # Show current SMT root and entry count
-openclaw audit smt root --tree <key>        # Root for a specific tree
-openclaw audit smt trees                    # List all SMT trees
-openclaw audit smt proof <hash>             # Generate inclusion/exclusion proof for a hash
-openclaw audit smt proof <hash> --tree <key>
-openclaw audit smt verify --proof '<json>'  # Verify a proof against known tree/checkpointed roots
-openclaw audit smt chain <conversationId> --tree <key>  # Show conversation chain
-```
-
-Proof verification checks both internal consistency (siblings hash to the claimed root) and root legitimacy (the proof's root matches a current tree root or a DE-checkpointed root). A self-consistent proof with an unknown root is rejected.
-
-Exit codes for `smt verify`:
-
-| Exit code | Meaning |
-|-----------|---------|
-| 0 | Proof is valid — internally consistent and root matches a known anchor |
-| 1 | INVALID — root not recognized by this node, or proof is internally inconsistent |
-| 2 | UNVERIFIABLE — no SMT trees or DE checkpoints exist to verify against |
-
-**Live-root window:** proofs are verified against current tree roots and DE-checkpointed roots. When a new event advances the tree from root R1 to R2, proofs generated at R1 will be rejected unless a checkpoint captured R1. On active systems there is always a brief window between tree advancement and the next checkpoint where recently-generated proofs cannot be verified. To avoid this, verify proofs before appending new events, or ensure the checkpoint interval is short enough for your use case.
 
 ## How the Sparse Merkle Tree works
 

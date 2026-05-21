@@ -44,6 +44,8 @@ import {
   cliReportHandler,
   cliReportSessionHandler,
   cliSmtHandler,
+  cliSpendHandler,
+  cliStatusHandler,
   cliVerifyHandler,
 } from "../src/cli.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
@@ -1520,6 +1522,157 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
   });
 });
 
+describe("e2e: audit status — CLI handler over a hook-populated store", () => {
+  let rig: Rig;
+
+  before(async () => {
+    rig = await createRig({
+      localRetentionDays: 30,
+      localMaxSizeMb: 250,
+      fileWatchPatterns: ["src/**/*.ts"],
+      fileWatchIgnorePatterns: ["**/node_modules/**"],
+      allowConversationAccess: true,
+    });
+    seedSession(rig, "sess-status-1");
+  });
+
+  after(async () => { await destroyRig(rig); });
+
+  it("renders the PRD seven-section snapshot over hook-populated state", async () => {
+    const { stdout, stderr } = await captureConsoleAsync(() =>
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "constellation-audit-plugin", "0.0.0-test"),
+    );
+    assert.equal(stderr, "", `unexpected stderr: ${stderr}`);
+    // Header
+    assert.match(stdout, /constellation-audit-plugin v0\.0\.0-test/);
+    // The seven PRD-mock sections — keep loose so a section-title tweak doesn't flap.
+    for (const section of ["Storage", "Integrity", "Digital Evidence anchor", "Gateway publisher", "File watching", "Inventory", "Last security scan"]) {
+      assert.ok(stdout.includes(section), `expected section "${section}" in status output`);
+    }
+    // Sequence head reflects the seeded events (5 from seedSession, all in a single SMT).
+    assert.match(stdout, /Sequence at HEAD\s+#5/);
+    // File-watch counters surface what was configured.
+    assert.match(stdout, /Patterns watched\s+1/);
+    // Conversation hook is ENABLED on this rig — the operator opted in via config.
+    assert.match(stdout, /Conversation hook\s+ENABLED/);
+  });
+
+  it("--json emits a single-line, parseable snapshot", async () => {
+    const { stdout } = await captureConsoleAsync(() =>
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "constellation-audit-plugin", "0.0.0-test", { json: true }),
+    );
+    const lines = stdout.split("\n").filter((l) => l.trim().length > 0);
+    assert.equal(lines.length, 1, "JSON mode must emit exactly one line");
+    const snap = JSON.parse(lines[0]!) as Record<string, Record<string, unknown>>;
+    assert.equal(snap.header!.pluginName, "constellation-audit-plugin");
+    assert.equal(snap.header!.pluginVersion, "0.0.0-test");
+    assert.equal(snap.integrity!.sequenceAtHead, 5);
+    assert.equal((snap.fileWatch as { patternsWatched: number }).patternsWatched, 1);
+    // Conversation-access opt-in flows through to the snapshot as "enabled".
+    assert.equal(snap.integrity!.conversationAccess, "enabled");
+  });
+});
+
+describe("e2e: audit spend — CLI handler over a hook-populated store", () => {
+  let rig: Rig;
+  const sessionId = "sess-spend-1";
+
+  before(async () => {
+    rig = await createRig();
+    const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
+    fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
+    // Two openai llm_output events + one anthropic — produces three prompt.response
+    // rows so the rollup has multiple buckets to group across.
+    fire(rig.api, "llm_output", {
+      runId: "r-1", sessionId, provider: "openai", model: "gpt-5",
+      assistantTexts: ["hi"],
+      usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+    }, ctx);
+    fire(rig.api, "llm_output", {
+      runId: "r-2", sessionId, provider: "openai", model: "gpt-5",
+      assistantTexts: ["hello"],
+      usage: { input: 200, output: 75, cacheRead: 10, cacheWrite: 0 },
+    }, ctx);
+    fire(rig.api, "llm_output", {
+      runId: "r-3", sessionId, provider: "anthropic", model: "claude-sonnet-4-6",
+      assistantTexts: ["hey"],
+      usage: { input: 500, output: 200, cacheRead: 100, cacheWrite: 0 },
+    }, ctx);
+    // The model.usage diagnostic path is what carries costUsd in prod (src/index.ts
+    // line ~341). Mirror one such write through the rate-limiter to prove the spend
+    // rollup picks the cost up alongside the hook-sourced rows.
+    rig.limiter.append({
+      sessionId,
+      eventType: "prompt.response",
+      category: "prompt",
+      description: "LLM usage: openai/gpt-5",
+      metadata: {
+        provider: "openai", model: "gpt-5",
+        inputTokens: 1, outputTokens: 1,
+        cacheReadTokens: 0, cacheWriteTokens: 0,
+        costUsd: 0.25,
+      },
+    });
+    rig.limiter.flush();
+  });
+
+  after(async () => { await destroyRig(rig); });
+
+  it("groups by model (provider/model label) and sums tokens across hook-sourced rows", () => {
+    const { stdout } = captureConsole(() => cliSpendHandler(rig.store, { json: true }));
+    const lines = stdout.split("\n").filter((l) => l.trim().length > 0);
+    assert.equal(lines.length, 1, "JSON mode must emit exactly one line");
+    const rollup = JSON.parse(lines[0]!) as {
+      rows: Array<{ bucket: string; callCount: number; inputTokens: number; outputTokens: number; costUsd: number }>;
+      totals: { callCount: number; costUsd: number; inputTokens: number; outputTokens: number };
+    };
+    // Two distinct buckets — provider/model labels keep cross-provider collisions apart.
+    assert.equal(rollup.rows.length, 2);
+    const gpt5 = rollup.rows.find((r) => r.bucket === "openai/gpt-5");
+    const claude = rollup.rows.find((r) => r.bucket === "anthropic/claude-sonnet-4-6");
+    assert.ok(gpt5, "openai/gpt-5 bucket must be present");
+    assert.ok(claude, "anthropic/claude-sonnet-4-6 bucket must be present");
+    // openai bucket: 2 hook rows + 1 diagnostic-style row = 3 calls; tokens sum across all three.
+    assert.equal(gpt5!.callCount, 3);
+    assert.equal(gpt5!.inputTokens, 100 + 200 + 1);
+    assert.equal(gpt5!.outputTokens, 50 + 75 + 1);
+    assert.ok(Math.abs(gpt5!.costUsd - 0.25) < 1e-9, "openai/gpt-5 bucket carries the diagnostic-event costUsd");
+    // anthropic bucket: 1 hook row, no costUsd attribution (hook path doesn't carry it).
+    assert.equal(claude!.callCount, 1);
+    assert.equal(claude!.inputTokens, 500);
+    assert.equal(claude!.outputTokens, 200);
+    assert.equal(claude!.costUsd, 0);
+    // Totals roll up across both buckets.
+    assert.equal(rollup.totals.callCount, 4);
+    assert.ok(Math.abs(rollup.totals.costUsd - 0.25) < 1e-9);
+  });
+
+  it("--by provider collapses model buckets into one row per provider", () => {
+    const { stdout } = captureConsole(() => cliSpendHandler(rig.store, { by: "provider", json: true }));
+    const rollup = JSON.parse(stdout.trim()) as {
+      rows: Array<{ bucket: string; callCount: number }>;
+    };
+    assert.equal(rollup.rows.length, 2);
+    assert.equal(rollup.rows.find((r) => r.bucket === "openai")?.callCount, 3);
+    assert.equal(rollup.rows.find((r) => r.bucket === "anthropic")?.callCount, 1);
+  });
+
+  it("--by session groups rows under the seeded sessionId", () => {
+    const { stdout } = captureConsole(() => cliSpendHandler(rig.store, { by: "session", json: true }));
+    const rollup = JSON.parse(stdout.trim()) as {
+      rows: Array<{ bucket: string; callCount: number }>;
+    };
+    // All four prompt.response rows belong to the same session.
+    const row = rollup.rows.find((r) => r.bucket === sessionId);
+    assert.ok(row, `expected a bucket for ${sessionId}`);
+    assert.equal(row!.callCount, 4);
+  });
+
+  it("rejects an unknown --by value with a descriptive error", () => {
+    assert.throws(() => cliSpendHandler(rig.store, { by: "team" }), /--by must be one of/);
+  });
+});
+
 describe("e2e: Digital Evidence anchoring publishes SMT roots and persists checkpoints", () => {
   type DeRequest = { body: unknown };
   const received: DeRequest[] = [];
@@ -2212,7 +2365,7 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
     assert.ok(gateway.received.length >= 1, "expected at least one POST to the gateway");
     for (const req of gateway.received) {
       assert.equal(req.method, "POST");
-      assert.equal(req.url, "/api/v1/audit/ingest");
+      assert.equal(req.url, "/v1/audit/ingest");
       assert.equal(req.headers["x-gateway-api-key"], "sk-gw-e2e-test");
       assert.equal(req.headers["content-type"], "application/json");
     }

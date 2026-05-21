@@ -28,7 +28,7 @@ const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
  */
 const DROP_HEALTH_EMIT_MIN_MS = 1000;
 
-const INGEST_PATH = "/api/v1/audit/ingest";
+const INGEST_PATH = "/v1/audit/ingest";
 
 /**
  * Strip control chars (CR/LF/tab/escape/DEL) and cap to `maxBytes` bytes so
@@ -122,101 +122,21 @@ class NoOpGatewayPublisher implements GatewayPublisher {
   }
 }
 
-export type ValidationResult = { ok: true } | { ok: false; reason: string };
-
-/** DNS root-form trailing dot ("127.0.0.1." == "127.0.0.1"). Strip before matching. */
-function normalizeHost(host: string): string {
-  const trimmed = host.endsWith(".") ? host.slice(0, -1) : host;
-  return trimmed.toLowerCase();
-}
-
-function isLoopbackHost(host: string): boolean {
-  const h = normalizeHost(host);
-  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
-  // IPv4-mapped IPv6 loopback: ::ffff:127.x.x.x
-  if (/^\[?::ffff:127(\.\d{1,3}){3}\]?$/.test(h)) return true;
-  return false;
-}
-
-function isPrivateOrLinkLocalIp(host: string): boolean {
-  const h = normalizeHost(host);
-  // 0.0.0.0/8 — "unspecified" / wildcard; on most OSes binds to all
-  // interfaces including loopback, so treat as private to avoid leaking
-  // outbound POSTs to whichever interface the OS picks.
-  if (/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
-  const ipv4 = h.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    return false;
-  }
-  const v6 = h.replace(/^\[|\]$/g, "");
-  if (v6.startsWith("fe80:") || v6.startsWith("fe80::")) return true;
-  if (/^f[cd][0-9a-f]{2}(:|::)/.test(v6)) return true;
-  // IPv4-mapped IPv6 to private/link-local addresses (::ffff:10.x, etc.)
-  const mapped = v6.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (mapped) {
-    const a = Number(mapped[1]);
-    const b = Number(mapped[2]);
-    if (a === 0) return true;
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-  }
-  return false;
-}
+import { validateHttpTargetUrl, type ValidationResult } from "../util/network-policy.js";
+export type { ValidationResult };
 
 /**
- * Reject ambiguous numeric-encoded IPv4 (decimal "2130706433", hex
- * "0x7f000001", octal "0177.0.0.1"). Some resolvers decode these to
- * loopback/private addresses; we don't want to play whack-a-mole, so we
- * just refuse non-dotted-quad numeric hosts up-front.
- */
-function isNumericIpEncoding(host: string): boolean {
-  const h = host.replace(/^\[|\]$/g, "");
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return false;
-  // Pure decimal/hex integer, or dotted parts with hex/octal segments
-  if (/^(0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(h)) return true;
-  if (/\.0x[0-9a-f]+/i.test(h)) return true;
-  return false;
-}
-
-/**
- * Validate a configured gateway URL.
- * - Reject malformed URLs and non-http(s) protocols.
- * - Reject plain http:// to anything but loopback (cleartext API key risk).
- * - Reject https:// to private/link-local IPs unless `allowPrivateHost` is set
- *   (mitigates SSRF coercion via misconfigured config).
+ * Validate a configured gateway URL using the shared host policy. Annotates
+ * the rejection reason with the gateway-specific config key so operators
+ * know which flag to flip when they intend to allow a private host.
  */
 export function validateGatewayUrl(raw: string, opts: { allowPrivateHost?: boolean } = {}): ValidationResult {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { ok: false, reason: "malformed URL" };
+  const result = validateHttpTargetUrl(raw, opts);
+  if (result.ok) return result;
+  if (result.reason.startsWith("private/link-local host")) {
+    return { ok: false, reason: `${result.reason} (set gatewayAllowPrivateHost: true to allow)` };
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return { ok: false, reason: `disallowed protocol ${url.protocol}` };
-  }
-  const host = url.hostname;
-  if (isNumericIpEncoding(host)) {
-    return { ok: false, reason: `numeric IP encoding ${host} (use dotted-quad form)` };
-  }
-  const loopback = isLoopbackHost(host);
-  if (url.protocol === "http:" && !loopback) {
-    return { ok: false, reason: "http:// requires loopback host (localhost, 127.0.0.1, [::1])" };
-  }
-  if (!loopback && !opts.allowPrivateHost && isPrivateOrLinkLocalIp(host)) {
-    return { ok: false, reason: `private/link-local host ${host} (set gatewayAllowPrivateHost: true to allow)` };
-  }
-  return { ok: true };
+  return result;
 }
 
 export function validateGatewayApiKey(key: string): ValidationResult {
@@ -244,13 +164,15 @@ export interface SmtCheckpointPayload {
 export type ComputeHashesFn = (event: AuditEvent) => { rawHash: string; censoredHash: string };
 
 /**
- * Returns the most recent DE-anchored checkpoint whose range covers the
- * batch's highest sequence, or null when no anchor covers it yet.
+ * Returns the most recent DE-anchored checkpoint whose `sequenceStart` is
+ * at or before the batch's highest sequence, or null when no anchor exists
+ * yet. NOT a coverage check: the gateway re-filters per event. See
+ * `selectMostRecentAnchorAtOrBefore` for the rationale.
  */
 export type LatestAnchoredCheckpointFn = (maxSequence: number) => SmtCheckpointPayload | null;
 
 /**
- * Structural input for `selectAnchorCovering` — kept generic so the helper
+ * Structural input for `selectMostRecentAnchorAtOrBefore` — kept generic so the helper
  * doesn't pull `CheckpointRecord` into the publisher's import graph.
  */
 interface AnchorCandidate {
@@ -262,9 +184,12 @@ interface AnchorCandidate {
 }
 
 /**
- * Picks the most recent DE-anchored checkpoint whose `sequenceStart` is on
- * or before `maxSequence`. Full coverage (`sequenceEnd >= maxSequence`) is
- * *not* required: in steady state new events accumulate past the latest
+ * NOT a coverage check. Returns the most recent DE-anchored checkpoint
+ * whose `sequenceStart <= maxSequence`; the name "AtOrBefore" is
+ * load-bearing, "Covering" was misleading.
+ *
+ * Full coverage (`sequenceEnd >= maxSequence`) is intentionally NOT
+ * required: in steady state new events accumulate past the latest
  * anchor, so a strict coverage check would mean the envelope's
  * `smtCheckpoint` almost never ships. The gateway's controller does its
  * own per-event coverage filter (see `audit-ingest.controller.ts`:
@@ -273,7 +198,7 @@ interface AnchorCandidate {
  * anchor-pending regardless of what the plugin attaches. Returns null
  * when no anchored checkpoint exists yet at all.
  */
-export function selectAnchorCovering(
+export function selectMostRecentAnchorAtOrBefore(
   checkpoints: readonly AnchorCandidate[],
   maxSequence: number,
 ): SmtCheckpointPayload | null {
@@ -292,6 +217,13 @@ export function selectAnchorCovering(
   }
   return best;
 }
+
+/**
+ * @deprecated Renamed to `selectMostRecentAnchorAtOrBefore` to reflect
+ *   that this is NOT a coverage check. Kept as a thin alias so any
+ *   external importer keeps working; new code should not use this name.
+ */
+export const selectAnchorCovering = selectMostRecentAnchorAtOrBefore;
 
 /**
  * Dependencies for the active publisher. Wired by the plugin entry point
@@ -650,7 +582,10 @@ class ActiveGatewayPublisher implements GatewayPublisher {
     let smtCheckpoint: SmtCheckpointPayload | undefined;
     const lookup = this.cfg.latestAnchoredCheckpoint;
     if (lookup) {
-      const maxSeq = Math.max(...batch.map((e) => e.sequence));
+      // `reduce` instead of `Math.max(...batch.map(...))`: the spread form
+    // overflows V8's argument limit at ~7500 entries. MAX_BATCH_SIZE
+    // protects us today, but the reduce form is safe for any future cap.
+    const maxSeq = batch.reduce((m, e) => Math.max(m, e.sequence), 0);
       smtCheckpoint = lookup(maxSeq) ?? undefined;
     }
 
@@ -675,6 +610,11 @@ class ActiveGatewayPublisher implements GatewayPublisher {
         },
         body,
         signal: AbortSignal.timeout(this.cfg.timeoutMs),
+        // Reject redirects rather than following them. A compromised gateway
+        // returning 302 could otherwise steer the POST  to a private
+        // network host. Treat any 3xx as a transport failure on the circuit
+        // breaker.
+        redirect: "manual",
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";

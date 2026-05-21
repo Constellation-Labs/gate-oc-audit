@@ -264,6 +264,12 @@ export class SmtService {
   /**
    * Called after each successful audit store append.
    * Computes dual hashes and inserts into the SMT. Fail-open.
+   *
+   * Events that arrive before ensureReady() runs are NOT special-cased here
+   * because ensureReady clears the in-memory maps as its first action — so
+   * any pre-start increments to seqNos are reset before restoreMetadata
+   * loads the persisted values, and the explicit replay in service.start()
+   * then re-feeds the pre-start events against the restored cursor.
    */
   onEventAppended(event: AuditEvent): void {
     try {
@@ -646,6 +652,12 @@ export class SmtService {
     return this.skippedSeqs.has(seq);
   }
 
+  /** Tree-size cap honored by the live insert path. Replay paths must use
+   *  the same cap so they reject the same sequences the live tree skipped. */
+  getMaxTreeSize(): number {
+    return this.config.maxTreeSize;
+  }
+
   /**
    * Record a sequence as intentionally skipped. Persists immediately to
    * the audit DB so a crash or restart doesn't lose the skip and re-mark
@@ -714,6 +726,17 @@ export class SmtService {
   }
 
   private async restoreMetadata(): Promise<void> {
+    // Clear unconditionally on entry so pre-start hook fires can't leave
+    // poisoned values in the maps. Any event that landed in the
+    // [registerHooks, start()] window incremented seqNos against an empty
+    // state; the explicit replay in service.start() will re-feed those
+    // events against the values we restore below.
+    this.seqNos = new Map();
+    this.conversationChains = new Map();
+    this.epochEntries = new Map();
+    this.exportedProofs = new Map();
+    this.leafValues = new Map();
+
     const filePath = join(this.config.checkpointDir, "_metadata.json");
     let raw: string;
     try {
@@ -739,6 +762,17 @@ export class SmtService {
 
     try {
       const data = JSON.parse(raw);
+
+      // Clear-then-assign: a partial restore  must not
+      // leave a stray field carrying state from before this call (e.g. seqNos
+      // populated by an early hook fire). Any field that fails its shape
+      // check stays cleared so the in-memory state is consistent with what
+      // was actually parsed from disk.
+      this.seqNos = new Map();
+      this.conversationChains = new Map();
+      this.epochEntries = new Map();
+      this.exportedProofs = new Map();
+      this.leafValues = new Map();
 
       if (Array.isArray(data.seqNos)) {
         this.seqNos = new Map(data.seqNos);

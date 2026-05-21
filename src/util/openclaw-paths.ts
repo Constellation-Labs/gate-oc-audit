@@ -1,5 +1,11 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+
+/** Hard cap for any JSON manifest we read from disk. The manifests we
+ *  parse (openclaw.plugin.json, package.json) are normally a few KB; a
+ *  planted multi-MiB file under ~/.openclaw/extensions/ would OOM the
+ *  reader and the audit inventory path along with it. */
+const MAX_JSON_FILE_BYTES = 1 * 1024 * 1024;
 
 export interface OpenclawPathConfig {
   openclawDir?: unknown;
@@ -56,6 +62,8 @@ interface PackageJsonShape {
 function readJsonIfExists<T>(path: string): T | undefined {
   if (!existsSync(path)) return undefined;
   try {
+    const st = statSync(path);
+    if (!st.isFile() || st.size > MAX_JSON_FILE_BYTES) return undefined;
     return JSON.parse(readFileSync(path, "utf-8")) as T;
   } catch {
     return undefined;

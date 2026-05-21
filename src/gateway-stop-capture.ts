@@ -86,6 +86,15 @@ export class GatewayStopCapture {
   }
 
   private captureSignal(signal: "SIGTERM" | "SIGINT"): void {
+    // Shutdown-ordering invariant: the host's stop() chain in index.ts
+    // calls detachSignalListeners() BEFORE retention.stop()'s
+    // _store.close() runs. So by the time this body executes either the
+    // store is still open (signal arrived during steady state) or this
+    // listener was never invoked (detach already ran). If you re-order
+    // the host stop() chain, preserve that detach-first rule or this
+    // method will append against a closed store and surface a confusing
+    // error in the SIGTERM/SIGINT log line.
+    //
     // Mirror Node's auto-removal of `once` listeners in our own bookkeeping
     // so installSignalFallback() can re-attach this specific signal if it's
     // ever called again on the same instance.

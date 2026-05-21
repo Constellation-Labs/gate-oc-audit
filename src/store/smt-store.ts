@@ -165,6 +165,13 @@ export class SmtStore {
   }
 
   restoreFromState(nodes: Map<string, string[]>, root: string, frozenKeys?: Iterable<string>): void {
+    // Validate the snapshot before applying it: a caller-supplied root that
+    // isn't present in `nodes`  would silently corrupt the tree, and the
+    // post-restore proofs would fail in confusing ways. Mirror the same
+    // check `restore()` callers rely on (shallowConsistencyCheck).
+    if (root !== "0" && !nodes.has(root)) {
+      throw new Error(`restoreFromState: root ${root} not present in the supplied nodes map`);
+    }
     this.smt.root = root;
     // @ts-ignore — accessing internal nodes map
     const internalNodes: Map<string, string[]> = this.smt.nodes;

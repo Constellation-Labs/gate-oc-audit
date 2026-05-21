@@ -222,6 +222,15 @@ export function parseInstant(input: string, now: Date = new Date()): string {
       `instant must be a duration (Nm|Nh|Nd) or ISO 8601 with explicit offset (got "${input}")`,
     );
   }
+  // Sub-millisecond precision would silently truncate in `new Date(t)`,
+  // mis-bucketing events whose createdAt falls inside the dropped digits.
+  // Reject up-front so the operator notices and chooses a coarser bound.
+  const frac = input.match(/\.(\d+)(?=Z|[+-])/);
+  if (frac && frac[1].length > 3) {
+    throw new Error(
+      `instant has sub-millisecond precision (.${frac[1]}); use at most 3 fractional digits (got "${input}")`,
+    );
+  }
   const t = Date.parse(input);
   if (!Number.isFinite(t)) {
     throw new Error(`could not parse ISO 8601 instant "${input}"`);

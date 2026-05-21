@@ -17,12 +17,27 @@ export interface NotificationPayload {
   }>;
 }
 
+/** Truncate an SMT/DE root for display: keeps the first 16 hex chars then
+ *  an ellipsis. Short non-hash values pass through unchanged. */
+function formatRoot(s: string): string {
+  return s.length > 20 ? s.slice(0, 16) + "..." : s;
+}
+
+export interface NotificationOptions {
+  /**
+   * Operator opt-in for posting notifications to a private/link-local host
+   * (e.g. an intranet Slack proxy). Off by default; with it off, the same
+   * host policy that gates the gateway publisher applies.
+   */
+  allowPrivateHost?: boolean;
+}
+
 export class NotificationService {
   private webhookUrl: string | undefined;
 
-  constructor(webhookUrl?: string) {
+  constructor(webhookUrl?: string, opts: NotificationOptions = {}) {
     if (webhookUrl) {
-      const reason = isUnsafeWebhookUrl(webhookUrl);
+      const reason = isUnsafeWebhookUrl(webhookUrl, { allowPrivateHost: opts.allowPrivateHost === true });
       if (reason) {
         log.warn(`Webhook URL rejected (${reason}), notifications disabled`);
       } else {
@@ -112,8 +127,38 @@ export class NotificationService {
             text: [
               "*Digital Evidence anchor divergence*",
               `*Checkpoint:* \`${checkpointId}\``,
-              `*Local root:* \`${localRoot.length > 20 ? localRoot.slice(0, 16) + "..." : localRoot}\``,
-              `*DE root:* \`${deRoot.length > 20 ? deRoot.slice(0, 16) + "..." : deRoot}\``,
+              `*Local root:* \`${formatRoot(localRoot)}\``,
+              `*DE root:* \`${formatRoot(deRoot)}\``,
+              `*Detected:* ${new Date().toISOString()}`,
+            ].join("\n"),
+          },
+        },
+      ],
+    });
+  }
+
+  // DE returned 404 for a previously-submitted checkpoint: the local root is
+  // intact but DE has no record of the tx hash. Distinct from divergence —
+  // there is no DE-side root to compare against. Callers dedup repeats
+  // across restarts so the operator gets one notification per checkpoint.
+  async notifyDeAnchorNotFound(
+    checkpointId: string,
+    smtRoot: string,
+  ): Promise<void> {
+    if (!this.webhookUrl) return;
+
+    await this.send({
+      text: "OpenClaw DE anchor missing on Digital Evidence",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: [
+              "*Digital Evidence anchor not found*",
+              `*Checkpoint:* \`${checkpointId}\``,
+              `*Local root:* \`${formatRoot(smtRoot)}\``,
+              "*Reason:* DE returned 404 for the recorded tx hash — the fingerprint may need re-submission.",
               `*Detected:* ${new Date().toISOString()}`,
             ].join("\n"),
           },

@@ -66,7 +66,15 @@ function buildQueryOptions(filters: ExportFilters): QueryOptions {
     includeContent: filters.includeContent === true,
   };
   if (filters.from) opts.createdAfter = filters.from;
-  if (filters.to) opts.createdBefore = filters.to;
+  if (filters.to) {
+    // The store's createdBefore is exclusive, but CLI/UI export semantics
+    // are documented inclusive ("give me everything up to and including
+    // this instant"). Bump by 1ms so the boundary event is still emitted.
+    const t = Date.parse(filters.to);
+    opts.createdBefore = Number.isFinite(t)
+      ? new Date(t + 1).toISOString()
+      : filters.to;
+  }
   if (filters.eventType) opts.eventType = filters.eventType;
   if (filters.category) opts.category = filters.category;
   if (filters.sessionId) opts.sessionId = filters.sessionId;

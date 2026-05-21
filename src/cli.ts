@@ -34,6 +34,16 @@ function outLine(s: string): void {
   process.stdout.write(`${s}\n`);
 }
 
+// Emit the same degraded-mode warning every CLI handler needs. Keep wording
+// in one place so handlers don't drift across copy-paste; the message is
+// the operator-visible signal that the audit DB has dropped events at some
+// point in this process's life (sticky).
+function warnIfDegraded(store: { isDegraded(): boolean }): void {
+  if (store.isDegraded()) {
+    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
+  }
+}
+
 export interface AuditListOptions {
   last?: string;
   type?: string;
@@ -71,9 +81,7 @@ function buildQueryOpts(opts: { type?: string; category?: string; session?: stri
 }
 
 export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
 
   const q = buildQueryOpts(opts);
   if (opts.last) q.limit = parseInt(opts.last, 10) || 50;
@@ -90,8 +98,12 @@ export function cliAuditHandler(store: AuditStore, opts: AuditListOptions): void
   const total = store.count();
   outLine(`Showing ${events.length} of ${total} events:\n`);
 
-  for (const event of events.reverse()) {
-    outLine(formatEvent(event));
+  // Iterate without mutating: `events.reverse()` would flip the caller's
+  // array in place if `query` ever returned a shared view instead of a
+  // fresh copy. The today-safe-because-`rows.map(...)` guarantee belongs
+  // to the store, not the CLI.
+  for (let i = events.length - 1; i >= 0; i--) {
+    outLine(formatEvent(events[i]));
   }
 }
 
@@ -235,9 +247,7 @@ export function cliInventoryHandler(
   opts: AuditInventoryOptions,
   collectOpts: CollectOptions,
 ): void {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   const report = collectInventory(store, kind, collectOpts);
   outLine(opts.json ? formatInventoryJson(report) : formatInventoryHuman(report, kind));
 }
@@ -346,9 +356,7 @@ export function cliReportHandler(
   opts: AuditReportOptions = {},
   collectOpts?: CollectOptions,
 ): void {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
   const window = period === "daily"
     ? parseDate(opts.date ?? todayInTz(tz), tz)
@@ -385,9 +393,7 @@ export async function cliReportSessionHandler(
   sessionId: string,
   opts: AuditReportSessionOptions = {},
 ): Promise<void> {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   if (!sessionId || sessionId.trim() === "") {
     console.error("Session ID is required.");
     process.exitCode = 1;
@@ -455,9 +461,7 @@ export function cliReportCronHandler(
   if (!jobId || jobId.trim() === "") {
     throw new Error("audit report cron requires a <job-id> argument");
   }
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   const last = parsePositiveInt(opts.last, "--last", CRON_MAX_LAST) ?? CRON_DEFAULT_LAST;
 
   const rollup = buildCronRollup(store, jobId, { last, openclawDir: collectOpts?.openclawDir });
@@ -492,9 +496,7 @@ export async function cliAnomaliesHandler(
   smtService: SmtService,
   opts: AuditAnomaliesOptions = {},
 ): Promise<void> {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   // Restore the SMT cursor from disk so the tamper scan reflects on-disk
   // state; without this the scan is unconditionally skipped.
   await smtService.ensureReady();
@@ -533,9 +535,7 @@ export async function cliStatusHandler(
   pluginVersion: string,
   opts: AuditStatusOptions = {},
 ): Promise<void> {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
 
   // SmtService is best-effort: the CLI may run on a host where the SMT
   // working state was moved or hasn't been built yet (forensic copy, fresh
@@ -613,9 +613,7 @@ export interface AuditSpendOptions {
 }
 
 export function cliSpendHandler(store: AuditStore, opts: AuditSpendOptions = {}): void {
-  if (store.isDegraded()) {
-    console.error("WARNING: Audit store is in degraded mode. Some events may be missing.\n");
-  }
+  warnIfDegraded(store);
   const groupBy = parseGroupBy(opts.by);
   const tz: TimeZoneMode = opts.tz === "local" ? "local" : "utc";
   const window = parseSince(opts.since ?? "24h", opts.until, tz);
