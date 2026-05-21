@@ -27,6 +27,11 @@ import {log, smtLog} from "./util/logger.js";
 import {PLUGIN_ID} from "./plugin-id.js";
 import {createRequire} from "node:module";
 
+const requireFromHere = createRequire(import.meta.url);
+const pluginPkg = requireFromHere("../package.json") as { name: string; version: string };
+const PLUGIN_NAME = pluginPkg.name;
+const PLUGIN_VERSION = pluginPkg.version;
+
 /**
  * Handler-style tool definition accepted by the OpenClaw plugin runtime.
  * The SDK types export AgentTool (label + execute) but registerTool also

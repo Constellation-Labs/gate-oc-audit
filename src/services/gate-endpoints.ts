@@ -2,7 +2,7 @@
  * install-time probe (`gate-client`) and the runtime batch publisher
  * (`gateway-publisher`); centralised here so the broker contract has a
  * single source of truth. */
-export const INGEST_PATH = "/v1/audit/ingest";
+export const INGEST_PATH = "/api/v1/audit/ingest";
 
 /** Pinned Gate broker endpoint while the service is in staging. Imported
  * by the CLI install wizard and the control-UI setup form so both ship

@@ -2365,7 +2365,7 @@ describe("e2e: gateway publisher forwards hook events to a mock gateway", () => 
     assert.ok(gateway.received.length >= 1, "expected at least one POST to the gateway");
     for (const req of gateway.received) {
       assert.equal(req.method, "POST");
-      assert.equal(req.url, "/v1/audit/ingest");
+      assert.equal(req.url, "/api/v1/audit/ingest");
       assert.equal(req.headers["x-gateway-api-key"], "sk-gw-e2e-test");
       assert.equal(req.headers["content-type"], "application/json");
     }

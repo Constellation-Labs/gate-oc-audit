@@ -141,16 +141,6 @@ function setSecurityHeaders(res: ServerResponse): void {
   res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
 }
 
-/** Clickjacking + framing defense: refuse to be embedded in a cross-
- * origin iframe. Set on every JSON response and on static HTML so a
- * malicious page can't overlay the Gate setup form with a transparent
- * UI-redress attack. CSP is the modern equivalent; both are sent
- * because older proxies sometimes drop one or the other. */
-function setSecurityHeaders(res: ServerResponse): void {
-  res.setHeader("x-frame-options", "DENY");
-  res.setHeader("content-security-policy", "frame-ancestors 'none'");
-}
-
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
   res.statusCode = status;
@@ -158,7 +148,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-length", String(buf.length));
   res.setHeader("cache-control", "no-store");
-  setSecurityHeaders(res);
   res.end(buf);
 }
 

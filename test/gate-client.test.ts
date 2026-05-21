@@ -21,13 +21,13 @@ function mockFetch(response: Partial<Response> & { url?: string } = {}): {
 }
 
 describe("probeGate", () => {
-  it("posts to /v1/audit/ingest with X-Gateway-Api-Key header", async () => {
+  it("posts to /api/v1/audit/ingest with X-Gateway-Api-Key header", async () => {
     const { fn, calls } = mockFetch({ status: 200, body: '{"accepted":0}' });
     const result = await probeGate("https://gate.example.com", "sk-gw-aaaa", { fetchImpl: fn, machineId: "mach-test" });
 
     assert.equal(result.kind, "ok");
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://gate.example.com/v1/audit/ingest");
+    assert.equal(calls[0].url, "https://gate.example.com/api/v1/audit/ingest");
     const headers = calls[0].init?.headers as Record<string, string>;
     assert.equal(headers["X-Gateway-Api-Key"], "sk-gw-aaaa");
     assert.equal(headers["Content-Type"], "application/json");
@@ -51,7 +51,7 @@ describe("probeGate", () => {
   it("strips trailing slashes from the base URL", async () => {
     const { fn, calls } = mockFetch({ status: 200 });
     await probeGate("https://gate.example.com//", "sk-gw-aaaa", { fetchImpl: fn });
-    assert.equal(calls[0].url, "https://gate.example.com/v1/audit/ingest");
+    assert.equal(calls[0].url, "https://gate.example.com/api/v1/audit/ingest");
   });
 
   it("classifies 401 as unauthorized", async () => {
