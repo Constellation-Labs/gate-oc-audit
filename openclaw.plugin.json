@@ -32,6 +32,10 @@
         "type": "string",
         "description": "Webhook URL for Slack, Discord, or generic notifications on config changes and integrity violations"
       },
+      "reportWebhook": {
+        "type": "string",
+        "description": "Webhook URL for daily and weekly audit digests. Payload is Slack-compatible {text, blocks, projection} — receivers that ignore extras still get a pretty message; ETL receivers parse the full projection (same schema as `audit report`)."
+      },
       "openclawDir": {
         "type": "string",
         "description": "Path to the OpenClaw configuration directory (default: ~/.openclaw)"

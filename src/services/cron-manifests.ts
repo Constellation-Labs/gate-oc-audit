@@ -1,9 +1,12 @@
 /**
- * Parse the `<jobId>.cron.<...>.json` manifest files that the openclaw runtime
- * keeps in the openclaw root and expose them as a small {name, schedule} shape
- * that reports can render. We only read what the user-facing reports need —
- * deeper fields (payload, delivery, sessionTarget, …) stay opaque so a future
- * openclaw schema change can't break the audit reports.
+ * Surface the cron jobs openclaw has configured locally and expose them as a
+ * small {name, schedule} shape that reports can render. Primary source is
+ * openclaw's canonical store at `<openclawDir>/cron/jobs.json` (one entry per
+ * `id` in the `jobs[]` array); legacy `<jobId>.cron.<...>.json` per-file
+ * manifests in the openclaw root are read as a fallback and merged in for ids
+ * not already covered by jobs.json. We only read what the user-facing reports
+ * need — deeper fields (payload, delivery, sessionTarget, …) stay opaque so a
+ * future openclaw schema change can't break the audit reports.
  */
 
 import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync } from "node:fs";
@@ -32,6 +35,11 @@ const MARKER = ".cron.";
  *  symlink (or accidentally-truncated logfile sharing the `.cron.` substring)
  *  can't burn unbounded memory in the audit-report path. */
 const MAX_MANIFEST_BYTES = 64 * 1024;
+
+/** Upper bound for `<openclawDir>/cron/jobs.json`. Larger than a single
+ * `.cron.*.json` because this file aggregates every job (one entry per id),
+ * but still bounded so a planted/corrupt file can't OOM the report path. */
+const MAX_JOBS_JSON_BYTES = 1024 * 1024;
 
 // Strings read out of `.cron.*.json` end up rendered to operator terminals
 // (text/HTML reports) and POSTed to digest webhooks. The manifests are
@@ -118,28 +126,90 @@ function isSafeManifestFile(openclawDir: string, fileName: string): boolean {
   }
 }
 
-/** Lists `<openclawDir>/<stem>.cron.*.json` manifests in stable (locale)
- *  order. Symlinks and oversized files are filtered out. Returns `[]` when
- *  the directory does not exist or cannot be read. */
+/** Canonical path to openclaw's cron store under the configured openclaw
+ * directory. Exported so the config-watcher and inventory paths can keep a
+ * single source of truth. */
+export function jobsJsonPath(openclawDir: string): string {
+  return join(openclawDir, "cron", "jobs.json");
+}
+
+/** Reads `<openclawDir>/cron/jobs.json` — openclaw's canonical cron store —
+ * and returns one entry per job. Each job's `id` field becomes the
+ * `ConfiguredCron.name` so it matches the `jobId` stamped on `cron.executed`
+ * audit events. Returns `[]` if the file is absent, oversize, symlinked, or
+ * structurally invalid. Exported so the inventory path can drive its own
+ * per-job items off the same parser. */
+export function readJobsJson(openclawDir: string): ConfiguredCron[] {
+  const path = jobsJsonPath(openclawDir);
+  if (!existsSync(path)) return [];
+  try {
+    if (lstatSync(path).isSymbolicLink()) return [];
+  } catch {
+    return [];
+  }
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const st = fstatSync(fd);
+    if (st.size > MAX_JOBS_JSON_BYTES) return [];
+    const text = readFileSync(fd, "utf8");
+    const doc = JSON.parse(text) as unknown;
+    if (doc === null || typeof doc !== "object") return [];
+    const jobs = (doc as Record<string, unknown>).jobs;
+    if (!Array.isArray(jobs)) return [];
+    const out: ConfiguredCron[] = [];
+    for (const j of jobs) {
+      if (j === null || typeof j !== "object") continue;
+      const rec = j as Record<string, unknown>;
+      const id = typeof rec.id === "string" ? rec.id : undefined;
+      if (!id) continue;
+      out.push({
+        name: sanitizeOutput(id),
+        schedule: parseSchedule(rec.schedule),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* fd may already be closed; ignore */ }
+    }
+  }
+}
+
+/** Lists configured cron jobs in stable (locale) order. Primary source is
+ * `<openclawDir>/cron/jobs.json` (openclaw's canonical store); legacy
+ * `<openclawDir>/<stem>.cron.*.json` per-file manifests are read as a
+ * fallback and merged in for stems not already covered by jobs.json.
+ * Symlinks and oversized files are filtered out. Returns `[]` when the
+ * directory does not exist or cannot be read. */
 export function listConfiguredCrons(openclawDir: string): ConfiguredCron[] {
   if (!existsSync(openclawDir)) return [];
+  const fromJobs = readJobsJson(openclawDir);
+  const known = new Set(fromJobs.map((c) => c.name));
   let entries;
   try {
     entries = readdirSync(openclawDir, { withFileTypes: true });
   } catch {
-    return [];
+    const sorted = fromJobs.slice();
+    sorted.sort((a, b) => a.name.localeCompare(b.name));
+    return sorted;
   }
-  const out: ConfiguredCron[] = [];
+  const fromFiles: ConfiguredCron[] = [];
   for (const e of entries) {
     if (!e.isFile()) continue;
     if (!isSafeManifestFile(openclawDir, e.name)) continue;
     const stem = e.name.split(MARKER)[0];
     if (!stem) continue;
     // Sanitize the stem too — filenames may legally embed CR/LF on POSIX.
-    out.push(readOne(join(openclawDir, e.name), sanitizeOutput(stem)));
+    const name = sanitizeOutput(stem);
+    if (known.has(name)) continue;
+    fromFiles.push(readOne(join(openclawDir, e.name), name));
   }
-  out.sort((a, b) => a.name.localeCompare(b.name));
-  return out;
+  const merged = [...fromJobs, ...fromFiles];
+  merged.sort((a, b) => a.name.localeCompare(b.name));
+  return merged;
 }
 
 /** Returns the single manifest whose stem matches `jobId`, or null. */

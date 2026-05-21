@@ -91,6 +91,55 @@ describe("inventory: collectInventory", () => {
     assert.equal(cronReport.crons![0].id, "nightly");
   });
 
+  it("lists openclaw cron jobs from cron/jobs.json (one item per job, shared file path)", () => {
+    mkdirSync(join(openclawDir, "cron"));
+    writeFileSync(
+      join(openclawDir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          { id: "daily-report", schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" } },
+          { id: "interval-job", schedule: { kind: "every", everyMs: 60_000 } },
+        ],
+      }),
+    );
+
+    const report = collectInventory(store, "crons", { openclawDir, projectRoot });
+    assert.equal(report.summary.crons, 2);
+    const ids = report.crons!.map((c) => c.id).sort();
+    assert.deepEqual(ids, ["daily-report", "interval-job"]);
+    const expectedPath = join(openclawDir, "cron", "jobs.json");
+    for (const item of report.crons!) {
+      assert.equal(item.path, expectedPath);
+      assert.equal(item.source, "openclaw_root");
+      assert.ok(item.contentHash && item.contentHash.length === 64);
+    }
+    const hashes = new Set(report.crons!.map((c) => c.contentHash));
+    assert.equal(hashes.size, 1, "all items share the jobs.json content hash");
+  });
+
+  it("merges jobs.json with legacy .cron.*.json files; jobs.json wins on id collision", () => {
+    mkdirSync(join(openclawDir, "cron"));
+    writeFileSync(
+      join(openclawDir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [{ id: "shared", schedule: { kind: "every", everyMs: 1000 } }],
+      }),
+    );
+    writeFileSync(
+      join(openclawDir, "shared.cron.yaml"),
+      "schedule: { kind: every, everyMs: 9999 }",
+    );
+    writeFileSync(join(openclawDir, "legacy-only.cron.yaml"), "schedule: { kind: at }");
+
+    const report = collectInventory(store, "crons", { openclawDir, projectRoot });
+    assert.equal(report.summary.crons, 2);
+    const byId = Object.fromEntries(report.crons!.map((c) => [c.id, c.path]));
+    assert.equal(byId["shared"], join(openclawDir, "cron", "jobs.json"));
+    assert.ok(byId["legacy-only"].endsWith("legacy-only.cron.yaml"));
+  });
+
   it("surfaces orphan manifest rows when files no longer exist", () => {
     const ghost = join(openclawDir, "skills", "ghost.ts");
     // Do NOT create the file. Just seed the manifest.

@@ -8,6 +8,7 @@ import {
   listExtensionsPluginDirs,
   listNodeModulesPluginDirs,
 } from "../util/openclaw-paths.js";
+import { jobsJsonPath, readJobsJson } from "./cron-manifests.js";
 
 export type InventoryKind = "plugins" | "skills" | "tools" | "soul" | "crons";
 export type ManifestType = "plugins" | "skills" | "tools" | "soul" | "cron";
@@ -298,8 +299,40 @@ export function collectSoul(store: AuditStore, opts: CollectOptions): InventoryI
   return collectRootScopedFiles(store, "soul", ".soul.", opts);
 }
 
+function collectCronsFromJobsJson(store: AuditStore, opts: CollectOptions): InventoryItem[] {
+  const path = jobsJsonPath(opts.openclawDir);
+  if (!existsSync(path)) return [];
+  const jobs = readJobsJson(opts.openclawDir);
+  if (jobs.length === 0) return [];
+  const manifestByPath = indexByFilePath(store.getManifestsByType("cron"));
+  const manifest = manifestByPath.get(path);
+  const hash = manifest?.contentHash ?? fileHash(path);
+  const mtime = safeStatMtime(path);
+  return jobs.map((j) => ({
+    id: s(j.name)!,
+    kind: "crons" as const,
+    name: s(j.name)!,
+    path,
+    source: "openclaw_root" as const,
+    contentHash: hash,
+    capturedAt: manifest?.capturedAt,
+    filesystemMtime: mtime,
+    capturedInManifests: !!manifest,
+  }));
+}
+
 export function collectCrons(store: AuditStore, opts: CollectOptions): InventoryItem[] {
-  return collectRootScopedFiles(store, "crons", ".cron.", opts);
+  // openclaw's canonical cron store is `<openclawDir>/cron/jobs.json` (a
+  // single file with a jobs[] array); legacy `<id>.cron.*.json` per-file
+  // manifests are still surfaced for back-compat. jobs.json wins on id
+  // collisions so the inventory matches `audit report` semantics.
+  const fromJobs = collectCronsFromJobsJson(store, opts);
+  const knownIds = new Set(fromJobs.map((it) => it.id));
+  const fromFiles = collectRootScopedFiles(store, "crons", ".cron.", opts)
+    .filter((it) => !knownIds.has(it.id));
+  const merged = [...fromJobs, ...fromFiles];
+  merged.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return merged;
 }
 
 function countSummary(store: AuditStore, opts: CollectOptions): InventorySummary {
@@ -313,7 +346,15 @@ function countSummary(store: AuditStore, opts: CollectOptions): InventorySummary
   const liveSkills = walkFiles(join(opts.openclawDir, "skills")).length;
   const liveTools = walkFiles(join(opts.openclawDir, "tools")).length;
   const liveSoul = listRootFilesMatching(opts.openclawDir, ".soul.").length;
-  const liveCrons = listRootFilesMatching(opts.openclawDir, ".cron.").length;
+  const legacyCronStems = new Set(
+    listRootFilesMatching(opts.openclawDir, ".cron.")
+      .map((file) => basename(file).split(".cron.")[0])
+      .filter((stem): stem is string => !!stem),
+  );
+  const jobsJsonCount = existsSync(jobsJsonPath(opts.openclawDir))
+    ? readJobsJson(opts.openclawDir).filter((j) => !legacyCronStems.has(j.name)).length
+    : 0;
+  const liveCrons = legacyCronStems.size + jobsJsonCount;
   return {
     plugins: countPlugins(opts),
     skills: countWith("skills", liveSkills),

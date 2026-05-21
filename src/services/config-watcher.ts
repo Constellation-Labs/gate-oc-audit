@@ -7,6 +7,7 @@ import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
 import { fileHash } from "../util/fs.js";
 import { extractPluginMetadata, listExtensionsPluginDirs, resolveOpenclawDir } from "../util/openclaw-paths.js";
+import { jobsJsonPath } from "./cron-manifests.js";
 import {log} from "../util/logger.js";
 
 interface ManifestEntry {
@@ -48,6 +49,7 @@ export class ConfigWatcher {
   private manifest = new Map<string, ManifestEntry>();
   private watchedDirs: WatchedDir[];
   private openclawDir: string;
+  private jobsJsonPath!: string;
 
   constructor(
     store: AuditStore,
@@ -67,6 +69,7 @@ export class ConfigWatcher {
       { path: resolve(this.openclawDir, "skills"), manifestType: "skills" },
       { path: resolve(this.openclawDir, "tools"), manifestType: "tools" },
     ];
+    this.jobsJsonPath = resolve(jobsJsonPath(this.openclawDir));
   }
 
   async start(): Promise<void> {
@@ -107,7 +110,10 @@ export class ConfigWatcher {
         for (const wd of this.watchedDirs) {
           if (filePath.startsWith(wd.path + sep) || filePath === wd.path) return false;
         }
-        // In the root openclaw dir, only allow soul and cron files
+        // In the root openclaw dir, allow soul/cron filename markers and the
+        // canonical openclaw cron store at `<root>/cron/jobs.json` (chokidar's
+        // depth>=1 walk surfaces it from the subdirectory).
+        if (resolve(filePath) === this.jobsJsonPath) return false;
         const name = basename(filePath);
         if (name.includes(".soul.") || name.includes(".cron.")) return false;
         return true;
@@ -231,6 +237,7 @@ export class ConfigWatcher {
         return wd.manifestType;
       }
     }
+    if (filePath === this.jobsJsonPath) return "cron";
     const name = basename(filePath);
     if (name.includes(".soul.")) return "soul";
     if (name.includes(".cron.")) return "cron";

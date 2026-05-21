@@ -253,9 +253,12 @@ markers, and the SMT skip set all carry over.
 - **`FileWatcher`** — operator-configured glob patterns for arbitrary
   files (`fileWatchPatterns` / `fileWatchIgnorePatterns`); emits
   `file.added` / `file.modified` / `file.removed` events.
-- **`cron-manifests`** — reads `~/.openclaw/<jobId>.cron.*.json` for the
-  status snapshot. Read via `openSync + fstatSync + readFileSync(fd)`
-  so the size check and the read see the same inode .
+- **`cron-manifests`** — reads `~/.openclaw/cron/jobs.json` (openclaw's
+  canonical cron store, one entry per `id` in the `jobs[]` array) and
+  falls back to legacy `~/.openclaw/<jobId>.cron.*.json` per-file
+  manifests for ids not already covered. Read via `openSync +
+  fstatSync + readFileSync(fd)` so the size check and the read see
+  the same inode .
 
 ## Retention and Pruning
 
