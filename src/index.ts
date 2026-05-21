@@ -10,7 +10,7 @@ import {ReportPusherService} from "./services/report-pusher.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
-import {createGatewayPublisher, drainForShutdown, selectAnchorCovering, GATEWAY_HEALTH_NAME} from "./services/gateway-publisher.js";
+import {createGatewayPublisher, drainForShutdown, selectMostRecentAnchorAtOrBefore, GATEWAY_HEALTH_NAME} from "./services/gateway-publisher.js";
 import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
@@ -94,7 +94,9 @@ export default (() => {
                     const webhookUrl = typeof config.notificationWebhook === "string"
                         ? config.notificationWebhook
                         : undefined;
-                    notifier = new NotificationService(webhookUrl);
+                    notifier = new NotificationService(webhookUrl, {
+                        allowPrivateHost: config.webhookAllowPrivateHost === true,
+                    });
                 }
                 return notifier;
             }
@@ -351,7 +353,12 @@ export default (() => {
                                 model: evt.model,
                                 inputTokens: (evt as any).usage?.input,
                                 outputTokens: (evt as any).usage?.output,
-                                cacheTokens: (evt as any).usage?.cacheRead,
+                                // Match the hooks.ts producer key shape so session-projection
+                                // and spend-rollup see one canonical name. The store's spend
+                                // SQL still COALESCEs the legacy `cacheTokens` key from rows
+                                // written before this fix landed.
+                                cacheReadTokens: (evt as any).usage?.cacheRead,
+                                cacheWriteTokens: (evt as any).usage?.cacheWrite,
                                 durationMs: evt.durationMs,
                                 costUsd: evt.costUsd,
                             },
@@ -367,7 +374,9 @@ export default (() => {
             const webhookUrl = typeof config.notificationWebhook === "string"
                 ? config.notificationWebhook
                 : undefined;
-            notifier = new NotificationService(webhookUrl);
+            notifier = new NotificationService(webhookUrl, {
+                allowPrivateHost: config.webhookAllowPrivateHost === true,
+            });
             const scanner = new ToolScanner();
 
             // Capture as const for use in closures below — avoids non-null assertions
@@ -452,9 +461,16 @@ export default (() => {
                 },
             } satisfies PluginHandlerTool as any);
 
+            // `restore_snapshot` is intentionally absent from the agent-callable
+            // action enum below: it overwrites the SMT working state, so an agent
+            // that could call it could rewrite the structure the verifier uses to
+            // detect tampering — defeating the plugin's tamper-evidence
+            // guarantee against the exact actor it exists to constrain. The
+            // corresponding SmtService.restoreSnapshot method stays so a future
+            // CLI/admin surface can expose it under operator-issued authority.
             api.registerTool({
                 name: "audit_smt",
-                description: "Sparse Merkle Tree audit \u2014 generate proofs, verify integrity, manage snapshots",
+                description: "Sparse Merkle Tree audit \u2014 generate proofs, verify integrity, take snapshots",
                 parameters: {
                     type: "object",
                     properties: {
@@ -463,7 +479,7 @@ export default (() => {
                             enum: [
                                 "root", "proof", "verify", "trees", "stats",
                                 "chain", "prune_epoch", "exported_proofs",
-                                "snapshot", "restore_snapshot",
+                                "snapshot",
                             ],
                             description: "Action to perform",
                         },
@@ -472,7 +488,6 @@ export default (() => {
                         proof: {type: "object", description: "Proof object for verify action"},
                         conversationId: {type: "string", description: "Conversation ID for chain action"},
                         epoch: {type: "number", description: "Epoch number for prune_epoch"},
-                        snapshot: {type: "object", description: "Snapshot object for restore"},
                     },
                     required: ["action"],
                 },
@@ -534,12 +549,6 @@ export default (() => {
                             if (!treeKey) return {error: "tree is required"};
                             return smt.createSnapshot(treeKey);
                         }
-                        case "restore_snapshot": {
-                            if (!treeKey) return {error: "tree is required"};
-                            const snapshot = params.snapshot as any;
-                            if (!snapshot) return {error: "snapshot is required"};
-                            return smt.restoreSnapshot(treeKey, snapshot);
-                        }
                         default:
                             return {error: `Unknown action: ${action}`};
                     }
@@ -556,6 +565,7 @@ export default (() => {
                 : undefined;
             const reportPusher = new ReportPusherService(activeStore, reportWebhookUrl, {
                 openclawDir: resolveOpenclawDir(config),
+                allowPrivateHost: config.webhookAllowPrivateHost === true,
             });
             const configWatcher = new ConfigWatcher(activeStore, limiter, scanner, activeNotifier, config);
             deAnchor = createDeAnchorService(activeStore, config, activeNotifier);
@@ -581,8 +591,11 @@ export default (() => {
                     rawHash: activeSmt.computeRawHash(event),
                     censoredHash: activeSmt.computeCensoredHash(event),
                 }),
+                // The function name is "AtOrBefore", not "Covering" — events past
+                // this checkpoint's sequenceEnd are filtered gateway-side. See the
+                // selectMostRecentAnchorAtOrBefore docstring.
                 latestAnchoredCheckpoint: (maxSequence) =>
-                    selectAnchorCovering(activeStore.getCheckpoints(), maxSequence),
+                    selectMostRecentAnchorAtOrBefore(activeStore.getCheckpoints(), maxSequence),
                 onHealthUpdate: (h) => {
                     try {
                         activeStore.upsertServiceHealth(GATEWAY_HEALTH_NAME, h);

@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { ScanFinding } from "./types/events.js";
+import { MAX_HASHABLE_BYTES } from "./util/fs.js";
+import { log } from "./util/logger.js";
 
 interface ScanCheck {
   name: string;
@@ -120,6 +122,22 @@ const CHECKS: ScanCheck[] = [
 
 export class ToolScanner {
   scan(filePath: string): ScanFinding[] {
+    // Stat first so a planted multi-GiB file under ~/.openclaw/skills/
+    // can't OOM the plugin via readFileSync's all-at-once buffer. Same
+    // cap as fileHash/util-fs uses for "read the whole thing".
+    try {
+      const st = statSync(filePath);
+      if (!st.isFile()) return [];
+      if (st.size > MAX_HASHABLE_BYTES) {
+        log.warn(
+          `tool scan skipped: ${filePath} exceeds ${MAX_HASHABLE_BYTES} bytes (size=${st.size})`,
+        );
+        return [];
+      }
+    } catch {
+      return [];
+    }
+
     let content: string;
     try {
       content = readFileSync(filePath, "utf-8");

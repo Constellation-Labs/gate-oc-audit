@@ -121,8 +121,15 @@ describe("SmtService", () => {
     const trees = service.listTrees();
     const treeKey = trees[0].key;
     const chain = service.getChain(treeKey, "s1");
-    assert.equal(chain.length, 2);
-    assert.equal(chain[1].seqNo, 3); // seqNo increments: 1 (raw), 2 (censored), 3 (raw), 4 (censored)
+    // Both raw and censored leaves are tracked in the chain so getChain
+    // callers don't silently miss half the leaves and pruneEpoch can sweep
+    // censored entries from leafValues. seqNo increments:
+    // 1 (raw e1), 2 (censored e1), 3 (raw e2), 4 (censored e2).
+    assert.equal(chain.length, 4);
+    assert.equal(chain[0].seqNo, 1);
+    assert.equal(chain[1].seqNo, 2);
+    assert.equal(chain[2].seqNo, 3);
+    assert.equal(chain[3].seqNo, 4);
   });
 
   it("getCurrentSmtRoot returns root after inserts", () => {

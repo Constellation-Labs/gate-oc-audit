@@ -55,6 +55,9 @@ export interface ReportPusherOptions {
   /** Openclaw root used to populate `cron.configured`. Omit to keep
    *  configured cron manifests out of webhook payloads. */
   openclawDir?: string;
+  /** Allow posting digests to a private/link-local host. Off by default;
+   *  gates the same SSRF policy the gateway publisher applies. */
+  allowPrivateHost?: boolean;
 }
 
 /**
@@ -108,7 +111,7 @@ export class ReportPusherService {
       this.disabled = true;
       return;
     }
-    const reason = isUnsafeWebhookUrl(this.webhookUrl);
+    const reason = isUnsafeWebhookUrl(this.webhookUrl, { allowPrivateHost: opts.allowPrivateHost === true });
     if (reason) {
       log.warn(`reportWebhook URL rejected (${reason}); digest push disabled`);
       this.webhookUrl = undefined;
@@ -122,12 +125,19 @@ export class ReportPusherService {
     // Reset the abort signal so a prior stop()'s abort doesn't bleed into
     // this run and short-circuit every retry sleep on the first try.
     this.abortController = new AbortController();
-    // Initialise the "last reported" markers to *yesterday/last week* so the
-    // first tick doesn't immediately push a stale window. Anything earlier
-    // than this is treated as a missed report and only the most recent
-    // missed window is pushed (no backfill spam after a long downtime).
-    this.state.lastDailyReportedDate = this.dayMostRecentlyCompleted();
-    this.state.lastWeeklyReportedWeek = this.weekMostRecentlyCompleted();
+    // Restore persisted markers first so a hot reload / openclaw re-register
+    // doesn't re-push the previous calendar day on the first tick. After
+    // restore the markers either match the persisted state or fall back
+    // to "yesterday/last week" for a fresh install — anything earlier is
+    // treated as a missed report and only the most-recent missed window
+    // is pushed (no backfill spam after a long downtime).
+    this.restoreState();
+    if (this.state.lastDailyReportedDate === undefined) {
+      this.state.lastDailyReportedDate = this.dayMostRecentlyCompleted();
+    }
+    if (this.state.lastWeeklyReportedWeek === undefined) {
+      this.state.lastWeeklyReportedWeek = this.weekMostRecentlyCompleted();
+    }
     this.persist();
 
     this.timer = setInterval(() => {
@@ -319,6 +329,38 @@ export class ReportPusherService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       log.warn(`failed to persist report-pusher service_health: ${msg}`);
+    }
+  }
+
+  /**
+   * Load the persisted state from service_health into this.state. Tolerates
+   * a missing row , an unparseable payload, or
+   * any field of the wrong shape — bad fields fall back to undefined so the
+   * caller can initialise them from the calendar instead.
+   */
+  private restoreState(): void {
+    try {
+      const row = this.store.getServiceHealth(REPORT_PUSHER_HEALTH_NAME);
+      if (!row || typeof row.payload !== "object" || row.payload === null) return;
+      const p = row.payload as Record<string, unknown>;
+      if (typeof p.lastDailyReportedDate === "string") {
+        this.state.lastDailyReportedDate = p.lastDailyReportedDate;
+      }
+      if (typeof p.lastWeeklyReportedWeek === "string") {
+        this.state.lastWeeklyReportedWeek = p.lastWeeklyReportedWeek;
+      }
+      if (typeof p.lastPushAt === "string") {
+        this.state.lastPushAt = p.lastPushAt;
+      }
+      if (typeof p.lastDailyError === "string") {
+        this.state.lastDailyError = p.lastDailyError;
+      }
+      if (typeof p.lastWeeklyError === "string") {
+        this.state.lastWeeklyError = p.lastWeeklyError;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      log.warn(`failed to restore report-pusher service_health: ${msg}`);
     }
   }
 }

@@ -133,6 +133,7 @@ function startOfUtcDayIso(now: Date = new Date()): string {
 }
 
 export const ANCHOR_HEALTH_NAME = "anchor";
+export const ANCHOR_NOT_FOUND_HEALTH_NAME = "anchor-not-found";
 
 // ---------------------------------------------------------------------------
 // No-op implementation — logs a warning, every method is a stub
@@ -215,6 +216,12 @@ class ActiveAnchorService implements AnchorService {
     private anchorPromise: Promise<void> | undefined;
     private stopped = false;
 
+    // Checkpoint IDs we've already notified about as "not found on DE". The
+    // 404 path leaves `verified_at` NULL so verification keeps retrying, but
+    // the notification surface should only fire once per checkpoint across
+    // restarts — persisted in `service_health` (see persistNotFoundCheckpointIds).
+    private notedNotFoundCheckpointIds = new Set<string>();
+
     constructor(cfg: ActiveAnchorConfig) {
         this.store = cfg.store;
         this.notifier = cfg.notifier;
@@ -243,6 +250,7 @@ class ActiveAnchorService implements AnchorService {
         deAnchorLog.info(`plugin initialized: env=${this.deEnv} baseUrl=${this.deApiUrl}`);
         deAnchorLog.info(`Starting — auth: ${this.authLabel}, threshold: ${this.eventThreshold}, timerMin: ${this.timerMinEvents}, interval: ${this.intervalMs}ms`);
 
+        this.restoreNotFoundCheckpointIds();
         await this.verifyCheckpoints();
         await this.anchorIfNeeded(this.timerMinEvents);
         this.persistHealth();
@@ -293,7 +301,14 @@ class ActiveAnchorService implements AnchorService {
             const lastCheckpoint = this.store.getLastCheckpoint();
             const startSeq = lastCheckpoint ? lastCheckpoint.sequenceEnd + 1 : 1;
 
-            const eventCount = this.store.countSince(startSeq);
+            // One SQL statement so the count and max sequence reflect the same
+            // table snapshot. A separate countSince + maxSequenceSince pair could
+            // race with a concurrent retention prune — the count would observe
+            // the un-pruned rows and the max would observe the empty table.
+            const { count: eventCount, maxSeq: seqEnd } = this.store.countAndMaxSince(startSeq);
+            // No-op tick: don't clobber the counter that drives notifyAppend's
+            // threshold-cross dispatch. The reset belongs on the path where an
+            // anchor attempt actually happened, not on every 5-minute heartbeat.
             if (eventCount < minEvents) return;
 
             const smtRoot = this.smtService?.getCurrentSmtRoot();
@@ -302,10 +317,13 @@ class ActiveAnchorService implements AnchorService {
                 return;
             }
 
-            const seqEnd = this.store.maxSequenceSince(startSeq);
             if (seqEnd === undefined) {
-                // Theoretically unreachable — countSince just confirmed events exist
-                deAnchorLog.error("maxSequenceSince returned undefined despite positive count, skipping anchor");
+                // Defensive: countAndMaxSince guarantees `maxSeq` is defined
+                // whenever `count > 0`, so a undefined `seqEnd` here would mean
+                // the store invariants broke. Log and bail without recording an
+                // attempt — the counter stays untouched so notifyAppend can
+                // still drive the next dispatch.
+                deAnchorLog.error("countAndMaxSince returned undefined max despite positive count, skipping anchor");
                 return;
             }
 
@@ -321,15 +339,18 @@ class ActiveAnchorService implements AnchorService {
                 `Anchored SMT root (${eventCount} events, seq ${startSeq}-${seqEnd}) to DE: ${txHash}`,
             );
             this.persistHealth();
+            // Reset only after a successful anchor consumed events. Earlier
+            // unconditional reset in `finally` clobbered the threshold-cross
+            // path: every no-op timer tick zeroed the counter before
+            // notifyAppend could trip it.
+            this.appendsSinceLastCheckpoint = 0;
         } catch (err) {
             this.recordFailure();
             const message = err instanceof Error ? err.message : "Unknown error";
             deAnchorLog.error(`Anchor failed: ${message}`);
-        } finally {
-            // Reset unconditionally: authoritative gating uses store.countSince(startSeq),
-            // so the counter is only a hint for when notifyAppend should dispatch. Resetting
-            // on failure prevents unbounded growth (which would dispatch on every append
-            // while DE is down); the timer with timerMinEvents=1 handles retry cadence.
+            // Reset on failure too, but only because an attempt was made: keeps
+            // notifyAppend from re-firing on every append while DE is down. The
+            // timer with timerMinEvents=1 carries retry cadence.
             this.appendsSinceLastCheckpoint = 0;
         }
     }
@@ -352,15 +373,18 @@ class ActiveAnchorService implements AnchorService {
                     } catch (err) {
                         if (err instanceof DedApiError && (err as {status: number}).status === 404) {
                             deAnchorLog.error(`Verification failed for checkpoint ${cp.id}: ${deTxHash} not found on DE`);
-                            // Mark verified so restarts don't re-fire the same divergence
-                            // notification. Clear verified_at manually to re-trigger if DE
-                            // state is restored.
-                            store.markCheckpointVerified(cp.id);
+                            // Dedup the not-found notification across restarts via service_health,
+                            // and leave verified_at NULL — marking verified on a 404 would lie about
+                            // the checkpoint's state. If DE is later restored, verification re-runs
+                            // on next startup as intended.
+                            if (this.notedNotFoundCheckpointIds.has(cp.id)) return;
+                            this.notedNotFoundCheckpointIds.add(cp.id);
+                            this.persistNotFoundCheckpointIds();
                             notifier
-                                ?.notifyDeAnchorDivergence(cp.id, cp.smtRoot, "not found on DE")
-                                .catch((notifyErr) => {
+                                ?.notifyDeAnchorNotFound(cp.id, cp.smtRoot)
+                                .catch((notifyErr: unknown) => {
                                     const msg = notifyErr instanceof Error ? notifyErr.message : "Unknown error";
-                                    deAnchorLog.warn(`divergence notification failed for checkpoint ${cp.id}: ${msg}`);
+                                    deAnchorLog.warn(`not-found notification failed for checkpoint ${cp.id}: ${msg}`);
                                 });
                             return;
                         }
@@ -448,6 +472,37 @@ class ActiveAnchorService implements AnchorService {
         } catch (err) {
             const msg = err instanceof Error ? err.message : "Unknown error";
             deAnchorLog.warn(`failed to persist service_health: ${msg}`);
+        }
+    }
+
+    // Persist the not-found dedup set in the audit DB's service_health table
+    // so the same checkpoint doesn't re-fire the notification on every
+    // restart. Persistence failure logs but does not propagate; the
+    // in-memory set still suppresses repeats for this process lifetime.
+    private persistNotFoundCheckpointIds(): void {
+        try {
+            this.store.upsertServiceHealth(
+                ANCHOR_NOT_FOUND_HEALTH_NAME,
+                Array.from(this.notedNotFoundCheckpointIds),
+            );
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            deAnchorLog.warn(`failed to persist anchor not-found set: ${msg}`);
+        }
+    }
+
+    private restoreNotFoundCheckpointIds(): void {
+        try {
+            const row = this.store.getServiceHealth(ANCHOR_NOT_FOUND_HEALTH_NAME);
+            if (!row || !Array.isArray(row.payload)) return;
+            this.notedNotFoundCheckpointIds = new Set(
+                (row.payload as unknown[]).filter(
+                    (id): id is string => typeof id === "string",
+                ),
+            );
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            deAnchorLog.warn(`failed to restore anchor not-found set: ${msg}`);
         }
     }
 }

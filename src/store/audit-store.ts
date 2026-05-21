@@ -37,7 +37,10 @@ export interface QueryOptions {
   afterSequence?: number;
   /** ISO 8601 lower bound (inclusive) compared against created_at. */
   createdAfter?: string;
-  /** ISO 8601 upper bound (inclusive) compared against created_at. */
+  /** ISO 8601 upper bound (exclusive) compared against created_at — the
+   *  rest of the codebase treats windows as `[from, to)` (projection,
+   *  anomalies, spend, session). Pre-`<` SQL means callers no longer
+   *  need to post-filter to drop the boundary event. */
   createdBefore?: string;
   order?: "asc" | "desc";
   /** When true, decompress content_gz and populate event.content. Default: false. */
@@ -218,6 +221,7 @@ export class AuditStore {
     insertCheckpoint: StatementSync;
     countSince: StatementSync;
     maxSequenceSince: StatementSync;
+    countAndMaxSince: StatementSync;
     getOldestCreatedAt: StatementSync;
     getServiceHealth: StatementSync;
     upsertServiceHealth: StatementSync;
@@ -251,8 +255,8 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    process.stderr.write(
-      `[audit-plugin][store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}\n`,
+    log.info(
+      `[store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
     );
 
     // Insert path is unused in read-only mode but the prepared statement is
@@ -309,6 +313,9 @@ export class AuditStore {
       ),
       countSince: this.db.prepare("SELECT COUNT(*) as c FROM audit_events WHERE sequence >= ?"),
       maxSequenceSince: this.db.prepare("SELECT MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
+      // Atomic count + max in one SQL statement so callers reading both for
+      // the same window can't race with a concurrent retention prune.
+      countAndMaxSince: this.db.prepare("SELECT COUNT(*) as c, MAX(sequence) as seq FROM audit_events WHERE sequence >= ?"),
       getOldestCreatedAt: this.db.prepare("SELECT MIN(created_at) AS t FROM audit_events"),
       getServiceHealth: this.db.prepare("SELECT payload, updated_at FROM service_health WHERE name = ?"),
       // Upsert is unused in read-only mode but the prepared statement is a
@@ -663,7 +670,10 @@ export class AuditStore {
       const sequence = returned.sequence;
       const previousHash = returned.previous_hash ?? undefined;
 
-      this.degraded = false;
+      // Sticky on purpose: once `degraded` is set, a subsequent successful
+      // append doesn't recover the events dropped during the degraded
+      // window. Clearing the flag would hide that data loss from operator
+      // surfaces. Recovery paths can opt in to clearing via clearDegraded().
 
       return {
         id,
@@ -717,7 +727,7 @@ export class AuditStore {
       params.createdAfter = opts.createdAfter;
     }
     if (opts.createdBefore !== undefined) {
-      conditions.push("created_at <= @createdBefore");
+      conditions.push("created_at < @createdBefore");
       params.createdBefore = opts.createdBefore;
     }
     // IN filters: bind each value to a numbered param so prepared statements
@@ -776,6 +786,7 @@ export class AuditStore {
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
                 event_type, category, description, metadata${contentCol},
+                content_hash, previous_hash,
                 created_at, received_at, synced_at
          FROM audit_events WHERE id = @id`,
       )
@@ -794,7 +805,7 @@ export class AuditStore {
         .run({ cutoff });
       totalDeleted += Number(syncedResult.changes);
       const unsyncedResult = this.db
-        .prepare("DELETE FROM audit_events WHERE created_at < @cutoff")
+        .prepare("DELETE FROM audit_events WHERE created_at < @cutoff AND synced_at IS NULL")
         .run({ cutoff });
       totalDeleted += Number(unsyncedResult.changes);
 
@@ -939,15 +950,33 @@ export class AuditStore {
     this.stmts.markCheckpointVerified.run(new Date().toISOString(), id);
   }
 
-  /** Returns the count of events at or after a given sequence. */
+  /**
+   * @deprecated Use `countAndMaxSince` when reading both count and max for
+   *   the same window — the paired single-SQL call is atomic against
+   *   concurrent prunes; calling this then `maxSequenceSince` races.
+   */
   countSince(seqStart: number): number {
     return (this.stmts.countSince.get(seqStart) as { c: number }).c;
   }
 
-  /** Returns the highest sequence number at or after a given sequence, or undefined if none. */
+  /**
+   * @deprecated Use `countAndMaxSince` for the paired-read case.
+   */
   maxSequenceSince(seqStart: number): number | undefined {
     const row = this.stmts.maxSequenceSince.get(seqStart) as { seq: number | null };
     return row.seq ?? undefined;
+  }
+
+  /**
+   * Returns the event count and highest sequence at-or-after `seqStart` in
+   * a single SQL statement — atomic against a concurrent retention
+   * prune that would otherwise let `countSince` see N rows and
+   * `maxSequenceSince` see undefined. Returns `maxSeq: undefined` only
+   * when `count === 0`.
+   */
+  countAndMaxSince(seqStart: number): { count: number; maxSeq: number | undefined } {
+    const row = this.stmts.countAndMaxSince.get(seqStart) as { c: number; seq: number | null };
+    return { count: row.c, maxSeq: row.seq ?? undefined };
   }
 
   // --- Report aggregations (used by `audit report daily|weekly`) ---
@@ -1133,6 +1162,13 @@ export class AuditStore {
 
   isDegraded(): boolean {
     return this.degraded;
+  }
+
+  /** Clear the degraded marker. The flag is sticky by design (see comment
+   *  in append); call this only from a recovery path that has reconciled
+   *  the data loss with the operator. */
+  clearDegraded(): void {
+    this.degraded = false;
   }
 
   close(): void {

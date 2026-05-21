@@ -273,7 +273,7 @@ describe("AuditStore", () => {
       assert.equal(closedStore.isDegraded(), false);
     });
 
-    it("sets degraded on append failure and clears it on next successful append", () => {
+    it("sets degraded on append failure and keeps it sticky across recovery", () => {
       // Force a SQLite NOT NULL constraint violation by passing description=null;
       // the prepared statement throws, the catch sets degraded=true.
       const bad = sampleInsert();
@@ -282,9 +282,15 @@ describe("AuditStore", () => {
       assert.equal(failed, undefined);
       assert.equal(store.isDegraded(), true);
 
-      // A subsequent successful append clears the flag.
+      // Sticky on purpose: a subsequent successful append does NOT clear
+      // the flag because data dropped during the degraded window isn't
+      // recovered just because a later write succeeded. Recovery paths
+      // opt in via clearDegraded() once the loss is reconciled.
       const ok = store.append(sampleInsert());
       assert.ok(ok);
+      assert.equal(store.isDegraded(), true);
+
+      store.clearDegraded();
       assert.equal(store.isDegraded(), false);
     });
 
@@ -538,5 +544,31 @@ describe("AuditStore", () => {
       assert.equal(sinceEpoch, 2);
     });
   });
+
+  describe("countAndMaxSince", () => {
+    it("returns count=0 and maxSeq=undefined for an empty range", () => {
+      const result = store.countAndMaxSince(1);
+      assert.equal(result.count, 0);
+      assert.equal(result.maxSeq, undefined);
+    });
+
+    it("returns both count and maxSeq atomically from the same snapshot", () => {
+      for (let i = 0; i < 5; i++) {
+        store.append(sampleInsert({ description: `e-${i}` }));
+      }
+      const result = store.countAndMaxSince(1);
+      assert.equal(result.count, 5);
+      assert.equal(result.maxSeq, 5);
+
+      const partial = store.countAndMaxSince(4);
+      assert.equal(partial.count, 2);
+      assert.equal(partial.maxSeq, 5);
+
+      const future = store.countAndMaxSince(100);
+      assert.equal(future.count, 0);
+      assert.equal(future.maxSeq, undefined);
+    });
+  });
+
 
 });

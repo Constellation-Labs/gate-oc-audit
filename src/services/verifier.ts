@@ -153,7 +153,6 @@ export class Verifier {
     let cpIdx = 0;
     let checkpointsChecked = 0;
     let lastSeqSeen = 0;
-    let offset = 0;
 
     while (lastSeqSeen < maxSeq) {
       const batch = this.store.query({
@@ -186,16 +185,21 @@ export class Verifier {
         break;
       }
 
-      offset += batch.length;
-
       for (const event of batch) {
         if (event.sequence > maxSeq) break;
-        this.applyEvent(store, event, machineId, {
-          seqNos,
-          conversationChains,
-          epochEntries,
-          leafValues,
-        });
+        // Honor the live insert path's decisions: if the live SMT chose
+        // not to track this sequence (frozen-leaf collision or tree-cap
+        // rejection), the replay tree must also skip it. Otherwise the
+        // replay tree contains leaves the live tree never accepted and
+        // every anchored boundary downstream will mismatch.
+        if (!this.smtService.wasSkipped(event.sequence)) {
+          this.applyEvent(store, event, machineId, {
+            seqNos,
+            conversationChains,
+            epochEntries,
+            leafValues,
+          });
+        }
         lastSeqSeen = event.sequence;
 
         while (
@@ -298,7 +302,7 @@ export class Verifier {
       censoredHash,
       conversationId,
       timestamp,
-      maxTreeSize: Number.MAX_SAFE_INTEGER,
+      maxTreeSize: this.smtService.getMaxTreeSize(),
       seqNos: maps.seqNos,
       conversationChains: maps.conversationChains,
       epochEntries: maps.epochEntries,

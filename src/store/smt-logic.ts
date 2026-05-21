@@ -31,7 +31,10 @@ export function getCurrentEpoch(): number {
 }
 
 export function getNextSeqNo(seqNos: SeqNos, treeKey: string): number {
-  const next = (seqNos.get(treeKey) || 0) + 1;
+  // `??` (not `||`): a future migration that pre-populates `seqNos` with
+  // `treeKey -> 0` from an imported snapshot would otherwise double-issue
+  // seq 1 because `0 || 0 + 1 === 1` looks the same as the "absent" case.
+  const next = (seqNos.get(treeKey) ?? 0) + 1;
   seqNos.set(treeKey, next);
   return next;
 }
@@ -145,6 +148,17 @@ export function insertEntry(
     store.add(censoredHash, censoredLeafHash);
     if (opts.leafValues) opts.leafValues.set(censoredHash, censoredLeafValue);
     trackEpochEntry(epochEntries, treeKey, epoch, censoredHash);
+    // Track the censored leaf in the conversation chain too. Without this
+    // entry, pruneEpoch only sweeps raw leaves by chain membership and the
+    // censored leaf would stay in leafValues after a prune — bounded
+    // impact (cache only) but it lets getChain callers see both leaves of
+    // each event.
+    recordChainEntry(conversationChains, treeKey, conversationId, {
+      rawHash: censoredHash,
+      timestamp,
+      seqNo: censoredSeqNo,
+      auditEventId: eventId,
+    });
   }
 
   return {

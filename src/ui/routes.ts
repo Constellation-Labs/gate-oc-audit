@@ -35,6 +35,9 @@ interface AuditUiContext {
   store: AuditStore;
   smtService: SmtService;
   verifier: Verifier;
+  /** In-flight counts, scoped to this registration so a double-register
+   *  call doesn't share state across instances. */
+  concurrency: ConcurrencyState;
   deBaseUrl?: string;
   /**
    * Predicate evaluated at request time so the gate reflects the live
@@ -79,7 +82,6 @@ const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\
  */
 const MAX_CONCURRENT_EXPORTS = 2;
 const EXPORT_LIMIT_HARD_CAP = 10_000_000;
-let inFlightExports = 0;
 
 /**
  * Bound /api/verify the same way. A verification walks every event with
@@ -88,11 +90,31 @@ let inFlightExports = 0;
  * pin the event loop on CPU work.
  */
 const MAX_CONCURRENT_VERIFIES = 2;
-let inFlightVerifies = 0;
+
+/** Per-registration mutable concurrency counters. Held inside the closure
+ *  of registerAuditUiRoutes so a double registration doesn't share state
+ *  across instances. */
+interface ConcurrencyState {
+  exports: number;
+  verifies: number;
+}
+
+function setSecurityHeaders(res: ServerResponse): void {
+  // Defense-in-depth headers for the audit UI/API. The plugin is intended
+  // to run on loopback, so the main goal is to neutralise browser-side
+  // attacks: clickjacking , MIME sniffing,
+  // referrer leakage to externally-loaded resources, and third-party
+  // script execution inside the SPA.
+  res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("x-frame-options", "DENY");
+  res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body));
   res.statusCode = status;
+  setSecurityHeaders(res);
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-length", String(buf.length));
   res.setHeader("cache-control", "no-store");
@@ -101,6 +123,24 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function sendError(res: ServerResponse, status: number, message: string): void {
   sendJson(res, status, { error: message });
+}
+
+/**
+ * Same-origin gate for the /api/* surface. Requests with no Origin pass
+ * through (curl, server-to-server — not browser-driven CSRF); requests
+ * with an Origin must match the request's Host header. Stops a hostile
+ * page the operator visits from dispatching state-changing requests or
+ * scraping raw conversation content even when CORS would block the read,
+ * because the request *dispatch* still hits the server.
+ */
+function isAllowedOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (origin === undefined || origin === "" || origin === "null") return true;
+  let parsed: URL;
+  try { parsed = new URL(origin); } catch { return false; }
+  const host = req.headers.host ?? "";
+  if (host.length === 0) return false;
+  return parsed.host === host;
 }
 
 function parseInt32(value: string | null | undefined): number | undefined {
@@ -182,7 +222,20 @@ function classifyEvent(
   };
 }
 
-function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[]; total: number; limit: number; offset: number } {
+/** Maximum length of a single GET query-parameter value before we reject the
+ *  request. JSON bodies are already bounded by MAX_JSON_BODY_BYTES; URL
+ *  parameters need their own cap so a 1 MiB `?session=AAA...` can't pin the
+ *  event loop in URLSearchParams parsing. */
+const MAX_QUERY_PARAM_LEN = 1024;
+
+function tooLongParam(values: ReadonlyArray<string | null | undefined>): boolean {
+  for (const v of values) {
+    if (typeof v === "string" && v.length > MAX_QUERY_PARAM_LEN) return true;
+  }
+  return false;
+}
+
+function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[]; total: number; limit: number; offset: number } | { tooLong: true } {
   // Cap at 100 — per-row verification requires gunzipping the full content of
   // every returned event, so unbounded page sizes would blow up.
   const limit = clamp(parseInt32(url.searchParams.get("limit")) ?? 10, 1, 100);
@@ -203,6 +256,9 @@ function getQueryEvents(ctx: AuditUiContext, url: URL): { events: EnrichedEvent[
     const eventType = url.searchParams.get("type");
     const category = url.searchParams.get("category");
     const sessionId = url.searchParams.get("session");
+    if (tooLongParam([eventType, category, sessionId])) {
+      return { tooLong: true };
+    }
     if (eventType) opts.eventType = eventType;
     if (category) opts.category = category;
     if (sessionId) opts.sessionId = sessionId;
@@ -314,8 +370,12 @@ async function handleApi(
 
   // GET /api/events
   if (apiPath === "events" && req.method === "GET") {
-    const { events, total, limit, offset } = getQueryEvents(ctx, url);
-    sendJson(res, 200, { events, total, limit, offset, degraded: ctx.store.isDegraded() });
+    const result = getQueryEvents(ctx, url);
+    if ("tooLong" in result) {
+      sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+      return true;
+    }
+    sendJson(res, 200, { ...result, degraded: ctx.store.isDegraded() });
     return true;
   }
 
@@ -377,7 +437,7 @@ async function handleApi(
       );
       return true;
     }
-    if (inFlightVerifies >= MAX_CONCURRENT_VERIFIES) {
+    if (ctx.concurrency.verifies >= MAX_CONCURRENT_VERIFIES) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_VERIFIES} concurrent verifies allowed`);
       return true;
@@ -400,12 +460,12 @@ async function handleApi(
       sendError(res, 400, "from and to must be ISO 8601 timestamps");
       return true;
     }
-    inFlightVerifies++;
+    ctx.concurrency.verifies++;
     try {
       const result = ctx.verifier.verifyRange({ from, to });
       sendJson(res, 200, result);
     } finally {
-      inFlightVerifies--;
+      ctx.concurrency.verifies--;
     }
     return true;
   }
@@ -421,7 +481,7 @@ async function handleApi(
       );
       return true;
     }
-    if (inFlightExports >= MAX_CONCURRENT_EXPORTS) {
+    if (ctx.concurrency.exports >= MAX_CONCURRENT_EXPORTS) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_EXPORTS} concurrent exports allowed`);
       return true;
@@ -450,20 +510,27 @@ async function handleApi(
       }
       limitRows = Math.min(n, EXPORT_LIMIT_HARD_CAP);
     }
+    const exportType = url.searchParams.get("type") ?? undefined;
+    const exportCategory = url.searchParams.get("category") ?? undefined;
+    const exportSession = url.searchParams.get("session") ?? undefined;
+    if (tooLongParam([exportType, exportCategory, exportSession])) {
+      sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+      return true;
+    }
     const filters: ExportFilters = {
       from,
       to,
-      eventType: url.searchParams.get("type") ?? undefined,
-      category: url.searchParams.get("category") ?? undefined,
-      sessionId: url.searchParams.get("session") ?? undefined,
+      eventType: exportType,
+      category: exportCategory,
+      sessionId: exportSession,
       securityOnly: url.searchParams.get("securityOnly") === "true",
       includeContent: url.searchParams.get("includeContent") === "true",
     };
-    inFlightExports++;
+    ctx.concurrency.exports++;
     try {
       await pipeExportToResponse(res, { store: ctx.store, filters, format, limitRows });
     } finally {
-      inFlightExports--;
+      ctx.concurrency.exports--;
     }
     return true;
   }
@@ -659,6 +726,7 @@ export function registerAuditUiRoutes(
     store,
     smtService,
     verifier,
+    concurrency: { exports: 0, verifies: 0 },
     deBaseUrl: opts.deBaseUrl,
     isNonLoopback: opts.isNonLoopback ?? (() => false),
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
@@ -671,6 +739,10 @@ export function registerAuditUiRoutes(
     auth: "plugin",
     match: "prefix",
     handler: async (req, res) => {
+      if (!isAllowedOrigin(req)) {
+        sendError(res, 403, "cross-origin request rejected");
+        return true;
+      }
       const url = parseUrl(req);
       if (!url) {
         sendError(res, 400, "invalid url");

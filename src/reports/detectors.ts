@@ -64,11 +64,20 @@ export function detectDuplicateOutbound(
   for (const bucket of buckets.values()) {
     if (bucket.length < 2) continue;
     bucket.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+    // A run breaks on EITHER (a) an adjacency gap > windowSec, OR (b) the
+    // total span from runStart to the current event exceeding windowSec.
+    // Without the span check, three events at 50s/50s gaps with
+    // windowSec=60 would cluster into one finding spanning 100s — the
+    // operator's window setting is the contract, so the same rule the
+    // R12 spike detectors apply  is used here.
     let runStart = 0;
     for (let i = 1; i <= bucket.length; i++) {
+      const startMs = Date.parse(bucket[runStart].createdAt);
       const prevTime = Date.parse(bucket[i - 1].createdAt);
       const curTime = i < bucket.length ? Date.parse(bucket[i].createdAt) : Number.POSITIVE_INFINITY;
-      const inRun = curTime - prevTime <= windowMs;
+      const adjacencyOk = curTime - prevTime <= windowMs;
+      const spanOk = curTime - startMs <= windowMs;
+      const inRun = adjacencyOk && spanOk;
       if (!inRun) {
         // Close the current run if it contains ≥ 2 events.
         if (i - runStart >= 2) {
