@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://constellationnetwork.io/schemas/openclaw-audit/audit-projection.schema.json",
   "title": "AuditProjection",
-  "description": "Daily / weekly digest projection produced by `openclaw audit report`. Consumed by the gateway dashboard (AG-47, AG-101, AG-102) to render the same digest the CLI prints.",
+  "description": "Daily / weekly digest projection produced by `openclaw audit report`.",
   "type": "object",
   "required": [
     "schemaVersion",

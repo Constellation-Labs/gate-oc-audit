@@ -42,7 +42,7 @@
       },
       "userId": {
         "type": "string",
-        "description": "Identifier stamped on every audit event as user_id (forwarded to the gateway as plugin_user_id). Resolution order at startup: this config value > OPENCLAW_USER_ID env > USER env > unset (NULL). Useful for multi-operator boxes or CI runners that need stable attribution."
+        "description": "Identifier stamped on every audit event as user_id. Resolution order at startup: this config value > OPENCLAW_USER_ID env > USER env > unset (NULL). Useful for multi-operator boxes or CI runners that need stable attribution."
       },
       "deApiKey": {
         "type": "string",
@@ -106,46 +106,6 @@
       "fileWatchUsePolling": {
         "type": "boolean",
         "description": "Use polling instead of native fs events for file watching (default: false). Enable for network mounts."
-      },
-      "gatewayUrl": {
-        "type": "string",
-        "description": "swarm-deck gateway base URL to publish audit events to (e.g. https://gateway.example.com). Events are POSTed to <gatewayUrl>/admin/audit/ingest. Plain http:// is rejected unless the host is loopback (localhost, 127.0.0.1, [::1]); private/link-local IPs are rejected unless gatewayAllowPrivateHost is true. Leave unset to disable gateway publishing."
-      },
-      "gatewayApiKey": {
-        "type": "string",
-        "description": "swarm-deck gateway API key (sk-gw-...) sent in the X-Gateway-Api-Key header. Must match a token grammar (no whitespace, CR/LF, or quotes); validated at construction. Required when gatewayUrl is set."
-      },
-      "gatewayBatchSize": {
-        "type": "number",
-        "description": "Maximum number of events per POST batch (default: 50, clamped to >= 1)"
-      },
-      "gatewayIntervalMs": {
-        "type": "number",
-        "description": "Maximum time between gateway POST attempts in milliseconds (default: 30000, clamped to >= 1000)"
-      },
-      "gatewayTimeoutMs": {
-        "type": "number",
-        "description": "HTTP timeout for gateway POST requests in milliseconds (default: 15000, clamped to >= 1000)"
-      },
-      "gatewayBufferCapacity": {
-        "type": "number",
-        "description": "Maximum number of events buffered in memory awaiting POST. Once full, new events are dropped and a synthetic gateway.dropped audit event is recorded locally on an exponential cadence (default: 10000, clamped to >= 1)"
-      },
-      "gatewayShutdownDeadlineMs": {
-        "type": "number",
-        "description": "Wall-clock deadline for the shutdown drain in milliseconds. Exits early if the gateway is slow so SIGTERM can complete within container grace periods (default: 30000, clamped to >= 1000)"
-      },
-      "gatewayMaxPayloadBytes": {
-        "type": "number",
-        "description": "Maximum JSON payload size for a single POST. Oversized batches are dropped with a warn log rather than retried forever (default: 5000000)"
-      },
-"gatewayAllowPrivateHost": {
-        "type": "boolean",
-        "description": "When true, allows the gateway URL to point at a private/link-local IP (10.x, 172.16-31.x, 192.168.x, 169.254.x, 100.64.0/10, fc00::/7, fe80::/10) over https. Default false (rejected) to mitigate SSRF risk from misconfiguration."
-      },
-      "gatewayEnabled": {
-        "type": "boolean",
-        "description": "Explicit on/off switch for gateway publishing. Defaults to true when gatewayUrl + gatewayApiKey are both set; the only way to disable when both are present is gatewayEnabled: false (literal boolean — string \"false\" is ignored with a warning)."
       },
       "allowExportOnNonLoopback": {
         "type": "boolean",

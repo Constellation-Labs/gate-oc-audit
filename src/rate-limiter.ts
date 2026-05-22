@@ -1,7 +1,6 @@
 import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEvent, AuditEventInsert } from "./types/events.js";
 import type { AnchorService } from "./services/de-anchor.js";
-import type { GatewayPublisher } from "./services/gateway-publisher.js";
 import type { SmtService } from "./services/smt-service.js";
 import {rateLimiterLog} from "./util/logger.js";
 
@@ -24,7 +23,6 @@ interface CoalescedGroup {
 export class RateLimiter {
   private store: AuditStore;
   private deAnchor: AnchorService | undefined;
-  private gatewayPublisher: GatewayPublisher | undefined;
   private smtService: SmtService | undefined;
   private maxPerSec: number;
   private bufferCapacity: number;
@@ -48,10 +46,6 @@ export class RateLimiter {
     this.deAnchor = deAnchor;
   }
 
-  setGatewayPublisher(publisher: GatewayPublisher): void {
-    this.gatewayPublisher = publisher;
-  }
-
   setSmtService(smt: SmtService): void {
     this.smtService = smt;
   }
@@ -72,8 +66,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
-        this.gatewayPublisher?.notifyAppend(result);
-      }
+        }
       return result;
     }
 
@@ -121,8 +114,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
-        this.gatewayPublisher?.notifyAppend(result);
-      }
+        }
       this.windowEvents++;
       drained++;
     }
@@ -239,8 +231,7 @@ export class RateLimiter {
       if (result) {
         this.smtService?.onEventAppended(result);
         this.deAnchor?.notifyAppend();
-        this.gatewayPublisher?.notifyAppend(result);
-      }
+        }
     }
     this.buffer = [];
   }

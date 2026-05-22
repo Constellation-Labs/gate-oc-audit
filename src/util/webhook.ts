@@ -23,7 +23,7 @@ import { validateHttpTargetUrl } from "./network-policy.js";
  * time.
  *
  * Trust model: URLs originate from the plugin's config file. We gate them
- * through the same SSRF policy as the gateway publisher — `http://`
+ * through a shared SSRF policy — `http://`
  * only to loopback, no userinfo, no numeric IP encoding tricks, and
  * private/link-local hosts only when the caller explicitly opts in via
  * `allowPrivateHost: true`. Operators who legitimately need to POST to

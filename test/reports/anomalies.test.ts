@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  detectGatewayDropSpike,
   detectDenialSpike,
   detectInstallEvents,
   type DetectorEvent,
@@ -18,84 +17,6 @@ function evt(over: Partial<DetectorEvent> & { eventType: string }): DetectorEven
   };
 }
 
-describe("detectGatewayDropSpike", () => {
-  it("flags a cluster of >= threshold milestones inside windowSec", () => {
-    const findings = detectGatewayDropSpike(
-      [
-        evt({ eventType: "gateway.dropped", sequence: 1, createdAt: "2026-05-18T20:57:00.000Z", metadata: { cumulativeDropped: 8 } }),
-        evt({ eventType: "gateway.dropped", sequence: 2, createdAt: "2026-05-18T20:58:00.000Z", metadata: { cumulativeDropped: 32 } }),
-        evt({ eventType: "gateway.dropped", sequence: 3, createdAt: "2026-05-18T20:59:00.000Z", metadata: { cumulativeDropped: 128 } }),
-      ],
-      300,
-      3,
-    );
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0].count, 3);
-    assert.equal(findings[0].droppedDelta, 120);
-  });
-
-  it("ignores non-gateway.dropped events", () => {
-    const findings = detectGatewayDropSpike(
-      [
-        evt({ eventType: "gateway.start", sequence: 1, createdAt: "2026-05-18T20:57:00.000Z" }),
-        evt({ eventType: "gateway.start", sequence: 2, createdAt: "2026-05-18T20:57:30.000Z" }),
-        evt({ eventType: "gateway.start", sequence: 3, createdAt: "2026-05-18T20:58:00.000Z" }),
-      ],
-      300,
-      3,
-    );
-    assert.deepEqual(findings, []);
-  });
-
-  it("does not flag when below threshold", () => {
-    const findings = detectGatewayDropSpike(
-      [
-        evt({ eventType: "gateway.dropped", sequence: 1, createdAt: "2026-05-18T20:57:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 2, createdAt: "2026-05-18T20:57:30.000Z" }),
-      ],
-      300,
-      3,
-    );
-    assert.deepEqual(findings, []);
-  });
-
-  it("splits clusters when the gap exceeds the window", () => {
-    const findings = detectGatewayDropSpike(
-      [
-        evt({ eventType: "gateway.dropped", sequence: 1, createdAt: "2026-05-18T20:00:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 2, createdAt: "2026-05-18T20:01:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 3, createdAt: "2026-05-18T20:02:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 4, createdAt: "2026-05-18T23:00:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 5, createdAt: "2026-05-18T23:01:00.000Z" }),
-        evt({ eventType: "gateway.dropped", sequence: 6, createdAt: "2026-05-18T23:02:00.000Z" }),
-      ],
-      300,
-      3,
-    );
-    assert.equal(findings.length, 2);
-  });
-
-  it("bounds the cluster span by windowSec, not just consecutive-pair gaps", () => {
-    // Four drops, each 5 minutes apart. With windowSec=300, every consecutive
-    // gap exactly equals the window, so a gap-only loop would coalesce them
-    // into one 15-minute cluster mislabelled "3+ drops in 300s". The span
-    // bound must cut the cluster off at the first event that pushes total
-    // duration past windowSec.
-    const findings = detectGatewayDropSpike(
-      [
-        evt({ eventType: "gateway.dropped", sequence: 1, createdAt: "2026-05-18T20:00:00.000Z", metadata: { cumulativeDropped: 1 } }),
-        evt({ eventType: "gateway.dropped", sequence: 2, createdAt: "2026-05-18T20:05:00.000Z", metadata: { cumulativeDropped: 2 } }),
-        evt({ eventType: "gateway.dropped", sequence: 3, createdAt: "2026-05-18T20:10:00.000Z", metadata: { cumulativeDropped: 3 } }),
-        evt({ eventType: "gateway.dropped", sequence: 4, createdAt: "2026-05-18T20:15:00.000Z", metadata: { cumulativeDropped: 4 } }),
-      ],
-      300,
-      3,
-    );
-    // With span bound, no cluster of 3 events can fit in 300s (since the
-    // closest 3 span 600s), so nothing should fire.
-    assert.equal(findings.length, 0);
-  });
-});
 
 describe("detectDenialSpike", () => {
   it("clusters denials and tallies by tool + top reason", () => {

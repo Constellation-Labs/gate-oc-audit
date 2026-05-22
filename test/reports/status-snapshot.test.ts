@@ -10,7 +10,6 @@ import { SmtService } from "../../src/services/smt-service.js";
 import { buildStatusSnapshot, STATUS_SCHEMA_VERSION } from "../../src/reports/status-snapshot.js";
 import { formatStatusText } from "../../src/reports/format-status.js";
 import type { AnchorHealth } from "../../src/services/de-anchor.js";
-import type { GatewayHealth } from "../../src/services/gateway-publisher.js";
 import type { RetentionHealth } from "../../src/services/retention.js";
 
 const require2 = createRequire(import.meta.url);
@@ -51,8 +50,6 @@ function baseInputs(store: AuditStore, smtService: SmtService, overrides: Partia
     store,
     smtService,
     anchorHealth: undefined,
-    gatewayHealth: undefined,
-    gatewayUrl: undefined,
     retentionHealth,
     filePatterns: { watched: 0, ignored: 0 },
     inventorySummary: { plugins: 0, skills: 0, tools: 0, soul: 0, crons: 0 },
@@ -86,7 +83,6 @@ describe("buildStatusSnapshot", () => {
     assert.equal(s.integrity.smtRoot, null);
     assert.equal(s.integrity.conversationAccess, "disabled");
     assert.equal(s.anchor.isActive, false);
-    assert.equal(s.gateway.isActive, false);
     assert.equal(s.securityScan.lastScanAt, null);
   });
 
@@ -241,7 +237,7 @@ describe("buildStatusSnapshot", () => {
     assert.deepEqual(keys, sortedCopy);
   });
 
-  it("surfaces anchor and gateway health when present", () => {
+  it("surfaces anchor health when present", () => {
     const anchorHealth: AnchorHealth = {
       isActive: true,
       consecutiveFailures: 0,
@@ -251,24 +247,12 @@ describe("buildStatusSnapshot", () => {
       anchoredToday: 3,
       pendingSinceLastCheckpoint: 12,
     };
-    const gatewayHealth: GatewayHealth = {
-      isActive: true,
-      buffered: 0,
-      droppedToday: 0,
-      circuitOpen: false,
-      lastSuccessAt: "2026-05-19T20:57:00Z",
-      lastErrorAt: undefined,
-    };
     const s = buildStatusSnapshot(baseInputs(store, smt, {
       anchorHealth,
-      gatewayHealth,
-      gatewayUrl: "https://gateway.example",
     }));
     assert.equal(s.anchor.isActive, true);
     assert.equal(s.anchor.anchoredToday, 3);
     assert.equal(s.anchor.lastTxHash?.startsWith("0x4a91"), true);
-    assert.equal(s.gateway.isActive, true);
-    assert.equal(s.gateway.url, "https://gateway.example");
   });
 
   it("reads the most recent security scan and counts findings by severity", () => {
@@ -307,14 +291,13 @@ describe("formatStatusText", () => {
     rmSync(dirname(dbPath), { recursive: true, force: true });
   });
 
-  it("renders the seven PRD-mock sections", () => {
+  it("renders the PRD-mock sections", () => {
     const s = buildStatusSnapshot(baseInputs(store, smt));
     const text = formatStatusText(s);
     assert.match(text, /^@constellation-network\/openclaw-audit-plugin v/);
     assert.match(text, /\nStorage\n/);
     assert.match(text, /\nIntegrity\n/);
     assert.match(text, /\nDigital Evidence anchor\n/);
-    assert.match(text, /\nGateway publisher\n/);
     assert.match(text, /\nFile watching\n/);
     assert.match(text, /\nInventory\n/);
     assert.match(text, /Last security scan/);
@@ -372,7 +355,6 @@ describe("audit-status.schema.json roundtrip", () => {
     };
     const snapshot = buildStatusSnapshot(baseInputs(store, smt, {
       anchorHealth,
-      gatewayUrl: "https://example.test",
     }));
 
     const schemaPath = join(

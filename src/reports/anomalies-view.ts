@@ -5,11 +5,9 @@ import { subtractCalendarDays, type TimeWindow } from "./time-window.js";
 import {
   detectDuplicateOutbound,
   detectFirstSeenTools,
-  detectGatewayDropSpike,
   detectDenialSpike,
   detectInstallEvents,
   type DuplicateOutboundFinding,
-  type GatewayDropSpikeFinding,
   type DenialSpikeFinding,
   type InstallEventFinding,
   type IntegrityViolationFinding,
@@ -28,8 +26,6 @@ export const DEFAULT_DUP_WINDOW_SEC = 60;
 export const DEFAULT_FIRST_SEEN_LOOKBACK_DAYS = 30;
 export const DEFAULT_DENIAL_WINDOW_SEC = 300;
 export const DEFAULT_DENIAL_THRESHOLD = 5;
-export const DEFAULT_DROP_WINDOW_SEC = 300;
-export const DEFAULT_DROP_THRESHOLD = 3;
 
 export type AnomalyViewPeriod = TimeWindow;
 
@@ -38,8 +34,6 @@ export interface AnomalyDetectorConfig {
   lookbackDays: number;
   denialWindowSec: number;
   denialThreshold: number;
-  dropWindowSec: number;
-  dropThreshold: number;
 }
 
 export interface AnomalyView {
@@ -59,7 +53,6 @@ export interface AnomalyView {
   anomalies: {
     duplicateOutbound: DuplicateOutboundFinding[];
     firstSeenTools: string[];
-    gatewayDropSpikes: GatewayDropSpikeFinding[];
     denialSpikes: DenialSpikeFinding[];
     installEvents: InstallEventFinding[];
     integrityViolations: IntegrityViolationFinding;
@@ -71,8 +64,6 @@ export interface BuildAnomalyViewOptions {
   lookbackDays?: number;
   denialWindowSec?: number;
   denialThreshold?: number;
-  dropWindowSec?: number;
-  dropThreshold?: number;
 }
 
 export function buildAnomalyView(
@@ -86,8 +77,6 @@ export function buildAnomalyView(
     lookbackDays: opts.lookbackDays ?? DEFAULT_FIRST_SEEN_LOOKBACK_DAYS,
     denialWindowSec: opts.denialWindowSec ?? DEFAULT_DENIAL_WINDOW_SEC,
     denialThreshold: opts.denialThreshold ?? DEFAULT_DENIAL_THRESHOLD,
-    dropWindowSec: opts.dropWindowSec ?? DEFAULT_DROP_WINDOW_SEC,
-    dropThreshold: opts.dropThreshold ?? DEFAULT_DROP_THRESHOLD,
   };
 
   const { fromIso, toIso } = window;
@@ -129,11 +118,6 @@ export function buildAnomalyView(
   const firstSeenTools = detectFirstSeenTools(todayTools, priorTools);
 
   const detectorEvents: DetectorEvent[] = rawEvents.map(toDetectorEvent);
-  const gatewayDropSpikes = detectGatewayDropSpike(
-    detectorEvents,
-    detectorConfig.dropWindowSec,
-    detectorConfig.dropThreshold,
-  );
   const denialSpikes = detectDenialSpike(
     detectorEvents,
     detectorConfig.denialWindowSec,
@@ -155,7 +139,6 @@ export function buildAnomalyView(
     anomalies: {
       duplicateOutbound,
       firstSeenTools,
-      gatewayDropSpikes,
       denialSpikes,
       installEvents,
       integrityViolations,

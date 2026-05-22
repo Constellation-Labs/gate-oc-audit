@@ -22,7 +22,7 @@ import {log} from "./util/logger.js";
  *     DE anchor — don't try to run inside a synchronous signal callback), but
  *     still feeds the result into `SmtService.onEventAppended` so the leaf is
  *     present in the in-memory SMT before `SmtService.stop` checkpoints it
- *     to disk. The later async services (gateway-publisher, de-anchor) pick
+ *     to disk. The later async services (de-anchor) pick
  *     the row up on next startup via their own replay/backfill paths.
  *
  * `tryClaim()` deduplicates: whichever path runs first writes the row, the

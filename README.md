@@ -6,7 +6,7 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 
 | Job | Command | What you get |
 |---|---|---|
-| Confirm the plugin is healthy | `openclaw audit status` | One-screen snapshot: storage, integrity, anchor, gateway, file-watch, inventory, last security scan |
+| Confirm the plugin is healthy | `openclaw audit status` | One-screen snapshot: storage, integrity, anchor, file-watch, inventory, last security scan |
 | See today's / this week's activity | `openclaw audit report daily` / `… weekly` | Activity, top tools, LLM spend, outbound messaging, anomalies, integrity footer |
 | Track LLM spend | `openclaw audit spend --by model --since 7d` | Token usage and `costUsd` grouped by provider / model / day / session |
 | Prove an event happened | `openclaw audit smt proof <hash>` then `… smt verify` | Inclusion proof against tree roots and DE-anchored checkpoints |
@@ -15,7 +15,6 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 | Daily/weekly digests to a channel | Configure `reportWebhook` | Slack-compatible payload with the same projection as `audit report` |
 | Export the trail for compliance | `openclaw audit export csv --from … --to …` | Streamed NDJSON or CSV with anchor references per row |
 | Re-scan for tampering | `openclaw audit verify` | Full SMT replay + DE checkpoint consistency check; exit 0 if clean |
-| Forward to a central gateway | Configure `gatewayUrl` + `gatewayApiKey` | Batched POSTs to swarm-deck for centralized retention |
 
 If you don't know where to start, run `openclaw audit status` after install — it tells you everything that's wired up and what isn't.
 
@@ -384,51 +383,6 @@ Or directly in the config JSON:
 | Option | Default | Description |
 |---|---|---|
 | `openclawDir` | `~/.openclaw` | Path to the OpenClaw config directory to watch for skill/tool/soul/cron changes |
-
-#### Gateway publishing
-
-Forward audit events to a swarm-deck gateway for centralized retention. Events are POSTed in batches to `<gatewayUrl>/admin/audit/ingest` with the `X-Gateway-Api-Key` header.
-
-```bash
-openclaw config set plugins.entries.openclaw-audit-plugin.config.gatewayUrl "https://gateway.example.com"
-openclaw config set plugins.entries.openclaw-audit-plugin.config.gatewayApiKey "sk-gw-…"
-```
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "openclaw-audit-plugin": {
-        "config": {
-          "gatewayUrl": "https://gateway.example.com",
-          "gatewayApiKey": "sk-gw-…"
-        }
-      }
-    }
-  }
-}
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `gatewayUrl` | — | Gateway base URL. Plain `http://` is rejected unless the host is loopback; `https://` to private/link-local IPs requires `gatewayAllowPrivateHost: true` |
-| `gatewayApiKey` | — | API key sent in `X-Gateway-Api-Key`. Required when `gatewayUrl` is set |
-| `gatewayEnabled` | `true` when url+key set | Explicit on/off switch. Setting `false` disables publishing even when url+key are both present |
-| `gatewayAllowPrivateHost` | `false` | Allow `https://` URLs pointing at RFC1918 / link-local / CGNAT hosts |
-| `gatewayBatchSize` | `50` | Max events per POST batch |
-| `gatewayIntervalMs` | `30000` | Max time between POST attempts (ms, min 1000) |
-| `gatewayTimeoutMs` | `15000` | HTTP timeout per POST (ms, min 1000) |
-| `gatewayBufferCapacity` | `10000` | Max events buffered awaiting POST; overflow records a synthetic `gateway.dropped` event on an exponential cadence |
-| `gatewayShutdownDeadlineMs` | `30000` | Wall-clock deadline for the shutdown drain (ms) |
-| `gatewayMaxPayloadBytes` | `5000000` | Drop batches whose JSON exceeds this size rather than retrying forever |
-
-##### Content forwarding
-
-Event `content` (prompt and message bodies, tool result strings) is always forwarded to the gateway. The gateway hashes it server-side and stores only the SHA-256 digest in `plugin_audit_events.content_hash`; the raw text itself is **not** persisted on the gateway.
-
-This is independent of `redactPromptText` / `redactToolArgs`, which govern only what gets written to the plugin's local SQLite database — they do not affect the gateway payload.
-
-> **Migration note.** Earlier versions exposed a `gatewayIncludeContent` flag (default `false`) that stripped `content` from the gateway payload. The flag has been removed — content is now always forwarded. Deployments that explicitly set `gatewayIncludeContent: false` to keep prompt/message bodies off the gateway should remove the key (it will be rejected by `additionalProperties: false`) and rely on `redactPromptText` if they need the content hashed before it leaves the plugin process.
 
 ### Digital Evidence anchoring
 

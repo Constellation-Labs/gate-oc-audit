@@ -152,51 +152,6 @@ function toRef(e: DetectorEvent): EventRef {
   return { id: e.id, sequence: e.sequence, createdAt: e.createdAt };
 }
 
-// ---------------------------------------------------------------------------
-// Gateway-drop spike
-// ---------------------------------------------------------------------------
-
-export interface GatewayDropSpikeFinding {
-  /** First event in the cluster. */
-  firstAt: string;
-  /** Last event in the cluster. */
-  lastAt: string;
-  /** Number of `gateway.dropped` milestone events in the cluster. */
-  count: number;
-  /** `cumulativeDropped` delta across the cluster (lastDropped − firstDropped). */
-  droppedDelta: number;
-  events: EventRef[];
-}
-
-/**
- * Slide over `gateway.dropped` events ordered by createdAt; emit one finding
- * per maximal run where ≥ `threshold` milestone events fall inside `windowSec`.
- * Milestones are emitted on exponential thresholds by gateway-publisher, so
- * even a small count usually signifies a large absolute drop count — the
- * `droppedDelta` field surfaces the magnitude.
- */
-export function detectGatewayDropSpike(
-  events: ReadonlyArray<DetectorEvent>,
-  windowSec: number,
-  threshold: number,
-): GatewayDropSpikeFinding[] {
-  return walkClusters(events, "gateway.dropped", windowSec, threshold, (cluster) => {
-    const first = cumulativeDropped(cluster[0]);
-    const last = cumulativeDropped(cluster[cluster.length - 1]);
-    return {
-      firstAt: cluster[0].createdAt,
-      lastAt: cluster[cluster.length - 1].createdAt,
-      count: cluster.length,
-      droppedDelta: Math.max(0, last - first),
-      events: cluster.map(toRef),
-    };
-  });
-}
-
-function cumulativeDropped(e: DetectorEvent): number {
-  const v = e.metadata?.cumulativeDropped;
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
 
 // ---------------------------------------------------------------------------
 // Denial spike

@@ -17,10 +17,11 @@ const SENSITIVE_KEY =
 
 const AUDIT_PRIORITY = 200;
 
-// Mirrors gateway DTO caps (spec §11.3 + swarm-deck/apps/gateway-proxy/src/
-// audit-ingest/types.ts) so the publisher never produces a 400-doomed batch.
-// USER_ID_MAX_LEN is retained as an alias for resolveConfiguredUserId, where
-// truncation already happens at config-read time.
+// Defense-in-depth caps to keep individual rows bounded — SQLite would
+// happily accept multi-MB blobs, but downstream readers (reports, exports,
+// UI) struggle with pathological sizes. USER_ID_MAX_LEN is retained as an
+// alias for resolveConfiguredUserId, where truncation already happens at
+// config-read time.
 const MAX_FIELD_LENGTH = 1000;
 const MAX_DESCRIPTION_LENGTH = 4_000;
 const MAX_CONTENT_LENGTH = 64_000;
@@ -40,7 +41,7 @@ function numOrUndef(v: unknown): number | undefined {
 function truncateString(s: string, max: number, label: string): string {
   if (s.length <= max) return s;
   log.warn(
-    `truncating ${label}: ${s.length} → ${max} chars (gateway cap)`,
+    `truncating ${label}: ${s.length} → ${max} chars`,
   );
   let end = max - TRUNCATE_SUFFIX.length;
   if (end < 1) end = max;
@@ -280,9 +281,8 @@ export function registerHooks(
 
   // Resolution order: explicit config > OPENCLAW_USER_ID env > USER env > unset.
   // Stamped on every insert; leaves NULL when nothing resolves. Each candidate
-  // is trimmed, skipped when empty, and truncated to USER_ID_MAX_LEN so an
-  // oversized value can't quietly trip the gateway DTO's length cap and stall
-  // every batch on validation rejection.
+  // is trimmed, skipped when empty, and truncated to USER_ID_MAX_LEN so a
+  // pathological value can't bloat every row.
   const configuredUserId = resolveConfiguredUserId(config);
 
   const safeAppend = (insert: AuditEventInsert): void => {
@@ -296,9 +296,9 @@ export function registerHooks(
     ) {
       insert = { ...insert, content: "sha256:" + sdk.hashDocument(insert.content) };
     }
-    // Mirror the gateway DTO's field caps (spec §11.3) at the single chokepoint
-    // so every hook inherits truncation. Must run before store.append so the
-    // computed contentHash matches what eventually goes on the wire.
+    // Defense-in-depth field caps applied at the single chokepoint so every
+    // hook inherits truncation. Must run before store.append so the computed
+    // contentHash matches what actually lands in the DB.
     insert = applyFieldCaps(insert);
     try {
       if (limiter) {

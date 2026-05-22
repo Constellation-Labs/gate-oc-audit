@@ -20,7 +20,6 @@ export function formatAnomalyViewText(v: AnomalyView): string {
   const anyFinding =
     a.duplicateOutbound.length > 0 ||
     a.firstSeenTools.length > 0 ||
-    a.gatewayDropSpikes.length > 0 ||
     a.denialSpikes.length > 0 ||
     a.installEvents.length > 0 ||
     a.integrityViolations.unverifiedAnchored.length > 0 ||
@@ -47,21 +46,6 @@ export function formatAnomalyViewText(v: AnomalyView): string {
         `  channel=${d.channel} recipient=${d.recipient} sha256=${d.contentSha256.slice(0, 12)}… Δ=${d.deltaSeconds.toFixed(1)}s`,
       );
       for (const e of d.events) {
-        lines.push(`    #${e.sequence} ${e.createdAt} id=${e.id}`);
-      }
-    }
-    lines.push("");
-  }
-
-  if (a.gatewayDropSpikes.length > 0) {
-    lines.push(
-      `=== Gateway-drop spikes (${a.gatewayDropSpikes.length}, window=${cfg.dropWindowSec}s, threshold=${cfg.dropThreshold}) ===`,
-    );
-    for (const s of a.gatewayDropSpikes) {
-      lines.push(
-        `  ${s.firstAt} → ${s.lastAt}  count=${s.count}  cumulativeDroppedΔ=${s.droppedDelta}`,
-      );
-      for (const e of s.events) {
         lines.push(`    #${e.sequence} ${e.createdAt} id=${e.id}`);
       }
     }

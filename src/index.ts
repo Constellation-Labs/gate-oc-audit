@@ -10,8 +10,6 @@ import {ReportPusherService} from "./services/report-pusher.js";
 import {ConfigWatcher} from "./services/config-watcher.js";
 import {createDeAnchorService, resolveExplorerBaseUrl} from "./services/de-anchor.js";
 import type {AnchorService} from "./services/de-anchor.js";
-import {createGatewayPublisher, drainForShutdown, selectMostRecentAnchorAtOrBefore, GATEWAY_HEALTH_NAME} from "./services/gateway-publisher.js";
-import type {GatewayPublisher} from "./services/gateway-publisher.js";
 import {NotificationService} from "./services/notifications.js";
 import {SmtService} from "./services/smt-service.js";
 import {Verifier} from "./services/verifier.js";
@@ -126,7 +124,7 @@ export default (() => {
 
                 audit
                     .command("status")
-                    .description("Runtime health snapshot (storage, integrity, anchor, gateway, inventory)")
+                    .description("Runtime health snapshot (storage, integrity, anchor, inventory)")
                     .option("--json", "Emit the snapshot as JSON (single line)")
                     .action((opts: AuditStatusOptions) =>
                         cliStatusHandler(getStore(), getSmtService(), config, PLUGIN_NAME, PLUGIN_VERSION, opts),
@@ -220,8 +218,6 @@ export default (() => {
                     .option("--lookback-days <n>", "First-seen-tool lookback window (default: 30)")
                     .option("--denial-window-sec <n>", "Denial-spike cluster window (default: 300)")
                     .option("--denial-threshold <n>", "Min denials per cluster (default: 5)")
-                    .option("--drop-window-sec <n>", "Gateway-drop-spike cluster window (default: 300)")
-                    .option("--drop-threshold <n>", "Min drop milestones per cluster (default: 3)")
                     .action((opts: AuditAnomaliesOptions) =>
                         cliAnomaliesHandler(getStore(), getSmtService(), opts),
                     );
@@ -572,41 +568,6 @@ export default (() => {
             deAnchor.setSmtService(activeSmt);
             limiter.setDeAnchor(deAnchor);
 
-            const gatewayPublisher: GatewayPublisher = createGatewayPublisher(config, {
-                onDropMilestone: (cumulativeDropped: number) => {
-                    // Record a synthetic local audit event so a downstream
-                    // verifier can detect the gap between locally-stored
-                    // events and what the gateway received. Bypass the
-                    // rate-limiter (and therefore the publisher's notifyAppend)
-                    // to avoid recursion when buffer is full.
-                    const result = activeStore.append({
-                        eventType: "gateway.dropped",
-                        category: "gateway",
-                        description: `Gateway buffer full — ${cumulativeDropped} event(s) dropped cumulatively`,
-                        metadata: {cumulativeDropped},
-                    });
-                    if (result) activeSmt.onEventAppended(result);
-                },
-                computeHashes: (event) => ({
-                    rawHash: activeSmt.computeRawHash(event),
-                    censoredHash: activeSmt.computeCensoredHash(event),
-                }),
-                // The function name is "AtOrBefore", not "Covering" — events past
-                // this checkpoint's sequenceEnd are filtered gateway-side. See the
-                // selectMostRecentAnchorAtOrBefore docstring.
-                latestAnchoredCheckpoint: (maxSequence) =>
-                    selectMostRecentAnchorAtOrBefore(activeStore.getCheckpoints(), maxSequence),
-                onHealthUpdate: (h) => {
-                    try {
-                        activeStore.upsertServiceHealth(GATEWAY_HEALTH_NAME, h);
-                    } catch (err) {
-                        const msg = err instanceof Error ? err.message : "Unknown error";
-                        log.warn(`gateway service_health upsert failed: ${msg}`);
-                    }
-                },
-            });
-            limiter.setGatewayPublisher(gatewayPublisher);
-
             api.registerService({
                 id: "openclaw-audit-plugin:smt",
                 async start() {
@@ -685,17 +646,6 @@ export default (() => {
                 },
                 async stop() {
                     await deAnchor.stop();
-                },
-            });
-
-            api.registerService({
-                id: "openclaw-audit-plugin:gateway-publisher",
-                async start() {
-                    await gatewayPublisher.start();
-                },
-                async stop() {
-                    gatewayPublisher.stop();
-                    await drainForShutdown(gatewayPublisher);
                 },
             });
 

@@ -26,8 +26,8 @@ function formatRoot(s: string): string {
 export interface NotificationOptions {
   /**
    * Operator opt-in for posting notifications to a private/link-local host
-   * (e.g. an intranet Slack proxy). Off by default; with it off, the same
-   * host policy that gates the gateway publisher applies.
+   * (e.g. an intranet Slack proxy). Off by default; with it off, the shared
+   * outbound-URL policy applies.
    */
   allowPrivateHost?: boolean;
 }

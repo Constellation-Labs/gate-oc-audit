@@ -70,7 +70,7 @@ describe("plugin entry point", () => {
     assert.ok(api.registeredHooks.includes("before_install"));
 
     assert.equal(api.registeredCli.length, 1);
-    assert.equal(api.registeredServices.length, 8); // smt, report-pusher, retention, config-watcher, de-anchor, gateway-publisher, file-watcher, ui-server
+    assert.equal(api.registeredServices.length, 7); // smt, report-pusher, retention, config-watcher, de-anchor, file-watcher, ui-server
 
     // audit_smt verify returns unverifiable when no trees exist
     const smtTool = api.registeredTools.find((t) => t.name === "audit_smt");
