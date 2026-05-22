@@ -43,17 +43,18 @@ export interface CronRollup {
    *  oldest cron.executed beyond `last` was elided. */
   truncated: boolean;
   rows: CronRollupRow[];
-  /** Matching `<jobId>.cron.*.json` manifest, when one exists on the machine
-   *  the rollup was generated on. Null when no `openclawDir` was supplied or
-   *  no manifest matches `jobId`. */
+  /** Matching entry from openclaw's cron store (`<openclawDir>/cron/jobs.json`,
+   *  with legacy `<jobId>.cron.*.json` per-file manifests as a fallback), when
+   *  one exists on the machine the rollup was generated on. Null when no
+   *  `openclawDir` was supplied or nothing matches `jobId`. */
   manifest: ConfiguredCron | null;
 }
 
 export interface BuildCronRollupOptions {
   /** Cap the rollup to the N most recent executions. Default 20, max 1000. */
   last?: number;
-  /** When supplied, the openclaw root searched for the matching
-   *  `<jobId>.cron.*.json` manifest. */
+  /** When supplied, the openclaw root whose `cron/jobs.json` (and legacy
+   *  `<jobId>.cron.*.json` files) are searched for a match. */
   openclawDir?: string;
 }
 

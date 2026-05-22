@@ -31,9 +31,10 @@ export interface CronSection {
   executed: number;
   failed: number;
   byEventType: Array<{ eventType: string; count: number }>;
-  /** Openclaw cron manifests (`<jobId>.cron.*.json`) found on the machine
-   *  the report was generated on. Empty when no `openclawDir` is supplied
-   *  or no manifests exist. */
+  /** Openclaw cron jobs configured on the machine the report was generated
+   *  on. Primary source is `<openclawDir>/cron/jobs.json` (openclaw's canonical
+   *  store); legacy `<jobId>.cron.*.json` per-file manifests are merged in as
+   *  a fallback. Empty when no `openclawDir` is supplied or nothing exists. */
   configured: ConfiguredCron[];
 }
 
@@ -120,8 +121,9 @@ export interface BuildProjectionOptions {
   firstSeenLookbackDays?: number;
   /** Cap for the top-N tools section. Default 10. */
   topToolsLimit?: number;
-  /** When supplied, the openclaw root whose `<jobId>.cron.*.json` manifests
-   *  populate `cron.configured`. Omit to render an empty configured list. */
+  /** When supplied, the openclaw root whose `cron/jobs.json` (and legacy
+   *  `<jobId>.cron.*.json` per-file manifests) populate `cron.configured`.
+   *  Omit to render an empty configured list. */
   openclawDir?: string;
 }
 

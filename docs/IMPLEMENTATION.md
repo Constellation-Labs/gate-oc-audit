@@ -48,7 +48,8 @@ src/
     config-watcher.ts       ConfigWatcher: chokidar + ToolScanner +
                             notify on skill/tool/soul/cron changes
     file-watcher.ts         FileWatcher: operator-configured patterns
-    cron-manifests.ts       Reads ~/.openclaw/<jobId>.cron.*.json with
+    cron-manifests.ts       Reads ~/.openclaw/cron/jobs.json (primary) and
+                            legacy ~/.openclaw/<id>.cron.*.json (fallback) with
                             fd-based size check (no TOCTOU)
     inventory.ts            Plugin/skill/tool/soul/cron inventory
 

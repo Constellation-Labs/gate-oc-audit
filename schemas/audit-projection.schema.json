@@ -83,7 +83,7 @@
         },
         "configured": {
           "type": "array",
-          "description": "Openclaw cron manifests (`<jobId>.cron.*.json`) found in the openclaw root on the machine that generated the report. Empty when the report was generated without filesystem access.",
+          "description": "Openclaw cron jobs configured on the machine that generated the report. Primary source is openclaw's canonical store at `<openclawDir>/cron/jobs.json` (one entry per `id` in the `jobs[]` array); legacy `<jobId>.cron.*.json` per-file manifests in the openclaw root are surfaced as a fallback and merged in for ids not already covered. Empty when the report was generated without filesystem access.",
           "items": {
             "type": "object",
             "required": ["name", "schedule"],

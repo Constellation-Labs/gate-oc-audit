@@ -131,6 +131,122 @@ describe("cron-manifests: listConfiguredCrons", () => {
   });
 });
 
+describe("cron-manifests: listConfiguredCrons (jobs.json)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "audit-crons-"));
+    mkdirSync(join(dir, "cron"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reads the canonical openclaw cron/jobs.json store", () => {
+    writeFileSync(
+      join(dir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          { id: "daily-report", schedule: { kind: "cron", expr: "0 9 * * *", tz: "UTC" } },
+          { id: "interval-job", schedule: { kind: "every", everyMs: 60_000 } },
+        ],
+      }),
+    );
+    const items = listConfiguredCrons(dir);
+    assert.equal(items.length, 2);
+    assert.deepEqual(items.map((c) => c.name), ["daily-report", "interval-job"]);
+    assert.deepEqual(items[0].schedule, { kind: "cron", expr: "0 9 * * *", tz: "UTC" });
+    assert.deepEqual(items[1].schedule, { kind: "every", everyMs: 60_000 });
+  });
+
+  it("merges jobs.json entries with legacy .cron.*.json files (jobs.json wins on id collision)", () => {
+    writeFileSync(
+      join(dir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [{ id: "shared", schedule: { kind: "every", everyMs: 1000 } }],
+      }),
+    );
+    writeFileSync(
+      join(dir, "shared.cron.json"),
+      JSON.stringify({ schedule: { kind: "every", everyMs: 9999 } }),
+    );
+    writeFileSync(
+      join(dir, "legacy-only.cron.json"),
+      JSON.stringify({ schedule: { kind: "at", at: "2026-06-01T09:00:00Z" } }),
+    );
+    const items = listConfiguredCrons(dir);
+    assert.equal(items.length, 2);
+    const byName = Object.fromEntries(items.map((c) => [c.name, c.schedule]));
+    assert.deepEqual(byName["shared"], { kind: "every", everyMs: 1000 });
+    assert.deepEqual(byName["legacy-only"], { kind: "at", at: "2026-06-01T09:00:00Z" });
+  });
+
+  it("skips entries without a string id", () => {
+    writeFileSync(
+      join(dir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          { schedule: { kind: "every", everyMs: 1000 } },
+          { id: 42, schedule: { kind: "every", everyMs: 1000 } },
+          { id: "ok", schedule: { kind: "every", everyMs: 1000 } },
+        ],
+      }),
+    );
+    const items = listConfiguredCrons(dir);
+    assert.deepEqual(items.map((c) => c.name), ["ok"]);
+  });
+
+  it("returns [] for jobs.json with no jobs array", () => {
+    writeFileSync(join(dir, "cron", "jobs.json"), JSON.stringify({ version: 1 }));
+    assert.deepEqual(listConfiguredCrons(dir), []);
+  });
+
+  it("returns [] for unparseable jobs.json", () => {
+    writeFileSync(join(dir, "cron", "jobs.json"), "{ broken");
+    assert.deepEqual(listConfiguredCrons(dir), []);
+  });
+
+  it("rejects symlinked jobs.json so an attacker can't redirect the read", () => {
+    const target = join(dir, "real-jobs.json");
+    writeFileSync(
+      target,
+      JSON.stringify({
+        version: 1,
+        jobs: [{ id: "spoof", schedule: { kind: "every", everyMs: 1000 } }],
+      }),
+    );
+    symlinkSync(target, join(dir, "cron", "jobs.json"));
+    assert.deepEqual(listConfiguredCrons(dir), []);
+  });
+
+  it("sanitises CR/LF/ANSI in the id so report sinks can't be hijacked", () => {
+    writeFileSync(
+      join(dir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [{ id: "evil\r\n  Configured: pwned", schedule: { kind: "every", everyMs: 1000 } }],
+      }),
+    );
+    const items = listConfiguredCrons(dir);
+    assert.equal(items.length, 1);
+    assert.ok(!/[\r\n]/.test(items[0].name), `name still contains CR/LF: ${items[0].name}`);
+  });
+
+  it("findConfiguredCron matches by job id from jobs.json", () => {
+    writeFileSync(
+      join(dir, "cron", "jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [{ id: "daily", schedule: { kind: "cron", expr: "0 9 * * *" } }],
+      }),
+    );
+    const m = findConfiguredCron(dir, "daily");
+    assert.deepEqual(m, { name: "daily", schedule: { kind: "cron", expr: "0 9 * * *" } });
+  });
+});
+
 describe("cron-manifests: findConfiguredCron", () => {
   let dir: string;
   beforeEach(() => {
