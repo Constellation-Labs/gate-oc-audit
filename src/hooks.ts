@@ -164,7 +164,7 @@ const CONVERSATION_ACCESS_WARNING =
   "tool.invoked observed without any preceding llm_input — " +
   "either (a) openclaw 2026.4.24+ dropped the conversation hook registrations " +
   "because the operator opt-in is missing (set " +
-  "plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true), " +
+  "plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess=true), " +
   "or (b) the tool was invoked outside a normal LLM turn. See README.md. " +
   "Fires once per process.";
 

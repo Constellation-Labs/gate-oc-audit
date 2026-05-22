@@ -52,7 +52,7 @@ export default (() => {
     let _gatewayStopCapture: GatewayStopCapture | undefined;
 
     return definePluginEntry({
-        id: "constellation-audit-plugin",
+        id: "openclaw-audit-plugin",
         name: "@constellation-network/openclaw-audit-plugin",
         description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
@@ -608,7 +608,7 @@ export default (() => {
             limiter.setGatewayPublisher(gatewayPublisher);
 
             api.registerService({
-                id: "constellation-audit-plugin:smt",
+                id: "openclaw-audit-plugin:smt",
                 async start() {
                     log.info("Service smt start() called");
                     await activeSmt.start();
@@ -639,7 +639,7 @@ export default (() => {
             // in-flight tick and retry timer are cancelled before retention.stop
             // closes the underlying store.
             api.registerService({
-                id: "constellation-audit-plugin:report-pusher",
+                id: "openclaw-audit-plugin:report-pusher",
                 start() {
                     reportPusher.start();
                 },
@@ -649,7 +649,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "constellation-audit-plugin:retention",
+                id: "openclaw-audit-plugin:retention",
                 start() {
                     retention.start();
                 },
@@ -669,7 +669,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "constellation-audit-plugin:config-watcher",
+                id: "openclaw-audit-plugin:config-watcher",
                 async start() {
                     await configWatcher.start();
                 },
@@ -679,7 +679,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "constellation-audit-plugin:de-anchor",
+                id: "openclaw-audit-plugin:de-anchor",
                 async start() {
                     await deAnchor.start();
                 },
@@ -689,7 +689,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "constellation-audit-plugin:gateway-publisher",
+                id: "openclaw-audit-plugin:gateway-publisher",
                 async start() {
                     await gatewayPublisher.start();
                 },
@@ -702,7 +702,7 @@ export default (() => {
             const fileWatcher = new FileWatcher(activeStore, limiter, config);
 
             api.registerService({
-                id: "constellation-audit-plugin:file-watcher",
+                id: "openclaw-audit-plugin:file-watcher",
                 async start() {
                     await fileWatcher.start();
                 },
@@ -728,7 +728,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "constellation-audit-plugin:ui-server",
+                id: "openclaw-audit-plugin:ui-server",
                 start() {
                     const info = resolveGatewayBaseUrl();
                     log.info(`Audit UI: ${resolveAuditUiUrl()}`);

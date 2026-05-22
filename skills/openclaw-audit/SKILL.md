@@ -2,7 +2,7 @@
 name: openclaw-audit
 description: Inspect and operate the OpenClaw audit trail — runtime health, activity digests, LLM spend, integrity verification, Digital Evidence anchoring, file-watch alerts, and tamper-evident export. Use whenever the user asks "is auditing working?", "what did the agent do today?", "how much am I spending on LLM calls?", "is anchoring active?", "can I prove this event happened?", or wants to set up alerts on watched files.
 metadata:
- { "openclaw": { "emoji": "🔒", "requires": { "config": ["plugins.entries.constellation-audit-plugin.enabled"] } } }
+ { "openclaw": { "emoji": "🔒", "requires": { "config": ["plugins.entries.openclaw-audit-plugin.enabled"] } } }
 ---
 
 # OpenClaw audit trail
@@ -42,7 +42,7 @@ Add `--json` for machine-readable output (single line, parseable with `jq`).
 
 Common follow-ups based on what `status` shows:
 
-- `Conversation hook: DISABLED` → user hasn't set `plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true`; three event types (`prompt.input`, `prompt.response`, `agent.end`) are missing.
+- `Conversation hook: DISABLED` → user hasn't set `plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess=true`; three event types (`prompt.input`, `prompt.response`, `agent.end`) are missing.
 - `Digital Evidence anchor: INACTIVE` → call the `audit_de_setup` tool to see which credentials are missing, then point the user at the DE setup steps.
 - `Circuit: OPEN` (anchor or gateway) → recent failures tripped a breaker; the next section of `status` shows the consecutive-failure count.
 - `Patterns watched: 0` → user hasn't configured `fileWatchPatterns`; alerts on watched files won't fire.
@@ -101,11 +101,11 @@ Each row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smtRoot`, s
 
 ## Setup tasks the agent can help with
 
-These are the configuration moments users most often ask about. All paths are nested under `plugins.entries.constellation-audit-plugin.config.*`.
+These are the configuration moments users most often ask about. All paths are nested under `plugins.entries.openclaw-audit-plugin.config.*`.
 
 | Job | Keys | Notes |
 | --- | --- | --- |
-| Enable full conversation capture | `plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess: true` | Required for `prompt.input`, `prompt.response`, `agent.end`. Not under `config.*` — it's a peer of `config`. |
+| Enable full conversation capture | `plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess: true` | Required for `prompt.input`, `prompt.response`, `agent.end`. Not under `config.*` — it's a peer of `config`. |
 | Slack / Discord / webhook alerts | `notificationWebhook` (incidents) and `reportWebhook` (daily/weekly digests) | Two separate URLs by design. |
 | Stamp a stable user ID | `userId` | Falls back to `OPENCLAW_USER_ID` env, then `USER`, then NULL. |
 | Watch files for changes | `fileWatchPatterns: ["src/**/*.ts", ...]` + `fileWatchIgnorePatterns` | Polling interval `fileWatchIntervalMs`; flip `fileWatchUsePolling: true` for network mounts. |
@@ -118,11 +118,11 @@ These are the configuration moments users most often ask about. All paths are ne
 When documenting config changes, pair the CLI form with the JSON form:
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
 ```
 
 ```json
-{ "plugins": { "entries": { "constellation-audit-plugin": { "config": { "notificationWebhook": "https://hooks.slack.com/services/AAA/BBB/CCC" } } } } }
+{ "plugins": { "entries": { "openclaw-audit-plugin": { "config": { "notificationWebhook": "https://hooks.slack.com/services/AAA/BBB/CCC" } } } } }
 ```
 
 ## Tools exposed to the agent
@@ -134,8 +134,8 @@ openclaw config set plugins.entries.constellation-audit-plugin.config.notificati
 
 ## Common pitfalls
 
-- **Plugin id vs npm name.** Config lives under `constellation-audit-plugin` (the manifest id), **not** `@constellation-network/openclaw-audit-plugin`. OpenClaw logs a warning about the mismatch on load — expected, safe to ignore.
-- **`plugins.allow` empty** silently auto-loads everything with a startup warning. Tell the user to pin: `openclaw config set plugins.allow '["constellation-audit-plugin"]'`. If they already have other allowed plugins, *append* — don't replace.
+- **Plugin id vs npm name.** Config lives under `openclaw-audit-plugin` (the manifest id), **not** `@constellation-network/openclaw-audit-plugin`. OpenClaw logs a warning about the mismatch on load — expected, safe to ignore.
+- **`plugins.allow` empty** silently auto-loads everything with a startup warning. Tell the user to pin: `openclaw config set plugins.allow '["openclaw-audit-plugin"]'`. If they already have other allowed plugins, *append* — don't replace.
 - **Ephemeral signing keys.** When `deSigningKey` is unset, a new key pair is generated each startup and fingerprints from different sessions can't be tied to a single identity. Pin it for cross-session provenance.
 - **HTTP `/api/export` and `/api/report`** are unauthenticated and only safe on loopback. If the gateway binds beyond loopback they return `403` unless `allowExportOnNonLoopback: true` is set. The CLI reads the DB directly and is unaffected.
 - **Fail-open by design.** If the DB is unavailable the plugin silently drops events and the agent continues; a degraded-mode warning appears in `audit list` output. Run `audit status` to confirm health rather than assuming silence = success.

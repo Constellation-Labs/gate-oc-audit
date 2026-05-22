@@ -35,7 +35,7 @@ Two operator-policy opt-ins are required for full functionality. Both are decisi
 
 #### Trust the plugin
 
-Add `constellation-audit-plugin` to `plugins.allow`. When `plugins.allow` is empty, openclaw still auto-loads discovered plugins but logs a warning on every startup:
+Add `openclaw-audit-plugin` to `plugins.allow`. When `plugins.allow` is empty, openclaw still auto-loads discovered plugins but logs a warning on every startup:
 
 ```
 [plugins] plugins.allow is empty; discovered non-bundled plugins may auto-load …
@@ -44,7 +44,7 @@ Add `constellation-audit-plugin` to `plugins.allow`. When `plugins.allow` is emp
 Setting an explicit allowlist silences the warning and locks loading down to the listed ids:
 
 ```bash
-openclaw config set plugins.allow '["constellation-audit-plugin"]'
+openclaw config set plugins.allow '["openclaw-audit-plugin"]'
 ```
 
 Or directly in the config JSON:
@@ -52,25 +52,25 @@ Or directly in the config JSON:
 ```json
 {
   "plugins": {
-    "allow": ["constellation-audit-plugin"]
+    "allow": ["openclaw-audit-plugin"]
   }
 }
 ```
 
-If you already have other trusted plugins in `plugins.allow`, append `"constellation-audit-plugin"` to the existing array rather than replacing it.
+If you already have other trusted plugins in `plugins.allow`, append `"openclaw-audit-plugin"` to the existing array rather than replacing it.
 
 #### Grant conversation access
 
 Non-bundled plugins must explicitly opt in to receive raw conversation content from the `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end` hooks. Without this opt-in, openclaw blocks those hook registrations and logs:
 
 ```
-[plugins] typed hook "llm_input" blocked because non-bundled plugins must set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess=true …
+[plugins] typed hook "llm_input" blocked because non-bundled plugins must set plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess=true …
 ```
 
 Three of the audit plugin's most important event types (`prompt.input`, `prompt.response`, `agent.end`) will be missing from the audit trail until this is set.
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.hooks.allowConversationAccess true
+openclaw config set plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess true
 ```
 
 Or directly in the config JSON:
@@ -79,7 +79,7 @@ Or directly in the config JSON:
 {
   "plugins": {
     "entries": {
-      "constellation-audit-plugin": {
+      "openclaw-audit-plugin": {
         "hooks": { "allowConversationAccess": true }
       }
     }
@@ -207,7 +207,7 @@ Each emitted row carries the DE anchor reference (`anchor.deTxHash`, `anchor.smt
 > **HTTP endpoint and loopback.** `GET /plugins/audit/api/export` is unauthenticated; the plugin relies on the gateway being bound to loopback (`gateway.bind: "loopback"`, the default) for safety. When the gateway binds beyond loopback the export route returns `403` unless you explicitly opt in:
 >
 > ```bash
-> openclaw config set plugins.entries.constellation-audit-plugin.config.allowExportOnNonLoopback true
+> openclaw config set plugins.entries.openclaw-audit-plugin.config.allowExportOnNonLoopback true
 > ```
 >
 > ```json
@@ -242,15 +242,15 @@ Exit codes for `smt verify`:
 
 ## Configuration reference
 
-> **Config key:** in openclaw config this plugin lives under `constellation-audit-plugin` (the manifest id), **not** the npm package name `@constellation-network/openclaw-audit-plugin`. Openclaw logs a warning about the mismatch on load — it's expected and safe to ignore.
+> **Config key:** in openclaw config this plugin lives under `openclaw-audit-plugin` (the manifest id), **not** the npm package name `@constellation-network/openclaw-audit-plugin`. Openclaw logs a warning about the mismatch on load — it's expected and safe to ignore.
 
 Set values via the CLI:
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.enabled true
-openclaw config set plugins.entries.constellation-audit-plugin.config.dbPath "$HOME/.openclaw/audit.db"
-openclaw config set plugins.entries.constellation-audit-plugin.config.localRetentionDays 365
-openclaw config set plugins.entries.constellation-audit-plugin.config.localMaxSizeMb 500
+openclaw config set plugins.entries.openclaw-audit-plugin.enabled true
+openclaw config set plugins.entries.openclaw-audit-plugin.config.dbPath "$HOME/.openclaw/audit.db"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.localRetentionDays 365
+openclaw config set plugins.entries.openclaw-audit-plugin.config.localMaxSizeMb 500
 ```
 
 Or directly in the config JSON:
@@ -259,7 +259,7 @@ Or directly in the config JSON:
 {
   "plugins": {
     "entries": {
-      "constellation-audit-plugin": {
+      "openclaw-audit-plugin": {
         "enabled": true,
         "config": {
           "dbPath": "~/.openclaw/audit.db",
@@ -292,8 +292,8 @@ Or directly in the config JSON:
 Two channels, deliberately separate so incident pokes and periodic digests can be routed to different rooms:
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
-openclaw config set plugins.entries.constellation-audit-plugin.config.reportWebhook "https://hooks.slack.com/services/AAA/BBB/DDD"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.notificationWebhook "https://hooks.slack.com/services/AAA/BBB/CCC"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.reportWebhook "https://hooks.slack.com/services/AAA/BBB/DDD"
 ```
 
 ```json
@@ -319,7 +319,7 @@ openclaw config set plugins.entries.constellation-audit-plugin.config.reportWebh
 Stamp a stable user identifier on every event. Resolved once at plugin startup and applied to every insert (locally as `user_id`, on the gateway as `plugin_user_id`).
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.userId "alice@example.com"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.userId "alice@example.com"
 ```
 
 ```json
@@ -344,8 +344,8 @@ Hashes allow independent verification — anyone with the original plaintext can
 Nested under the `smt` key. Set values via the CLI:
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.smt.treeKey "auto"
-openclaw config set plugins.entries.constellation-audit-plugin.config.smt.maxTreeSize 500000
+openclaw config set plugins.entries.openclaw-audit-plugin.config.smt.treeKey "auto"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.smt.maxTreeSize 500000
 ```
 
 Or directly in the config JSON:
@@ -390,15 +390,15 @@ Or directly in the config JSON:
 Forward audit events to a swarm-deck gateway for centralized retention. Events are POSTed in batches to `<gatewayUrl>/admin/audit/ingest` with the `X-Gateway-Api-Key` header.
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.gatewayUrl "https://gateway.example.com"
-openclaw config set plugins.entries.constellation-audit-plugin.config.gatewayApiKey "sk-gw-…"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.gatewayUrl "https://gateway.example.com"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.gatewayApiKey "sk-gw-…"
 ```
 
 ```json
 {
   "plugins": {
     "entries": {
-      "constellation-audit-plugin": {
+      "openclaw-audit-plugin": {
         "config": {
           "gatewayUrl": "https://gateway.example.com",
           "gatewayApiKey": "sk-gw-…"
@@ -437,9 +437,9 @@ Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.conste
 **Option 1 — API key**
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.deApiKey "your-api-key"
-openclaw config set plugins.entries.constellation-audit-plugin.config.deOrgId "your-org-uuid"
-openclaw config set plugins.entries.constellation-audit-plugin.config.deTenantId "your-tenant-uuid"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.deApiKey "your-api-key"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.deOrgId "your-org-uuid"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.deTenantId "your-tenant-uuid"
 ```
 
 Or in the config JSON:
@@ -448,7 +448,7 @@ Or in the config JSON:
 {
   "plugins": {
     "entries": {
-      "constellation-audit-plugin": {
+      "openclaw-audit-plugin": {
         "enabled": true,
         "config": {
           "deApiKey": "your-api-key",
@@ -466,7 +466,7 @@ Create a free account at https://evidence.constellationnetwork.io and generate a
 **Option 2 — Wallet key file (x402 micropayments)**
 
 ```bash
-openclaw config set plugins.entries.constellation-audit-plugin.config.deWalletKeyFile "/path/to/wallet.key"
+openclaw config set plugins.entries.openclaw-audit-plugin.config.deWalletKeyFile "/path/to/wallet.key"
 ```
 
 Or in the config JSON:
@@ -475,7 +475,7 @@ Or in the config JSON:
 {
   "plugins": {
     "entries": {
-      "constellation-audit-plugin": {
+      "openclaw-audit-plugin": {
         "enabled": true,
         "config": {
           "deWalletKeyFile": "/path/to/wallet.key"
@@ -669,7 +669,7 @@ To install the plugin from a local checkout into OpenClaw, build a tarball with 
 npm install
 npm run build
 TGZ=$(npm pack --silent)
-openclaw plugins uninstall constellation-audit-plugin || true
+openclaw plugins uninstall openclaw-audit-plugin || true
 openclaw plugins install "./$TGZ"
 openclaw gateway restart
 rm -f "./$TGZ"
@@ -678,6 +678,6 @@ rm -f "./$TGZ"
 The `uninstall` step ensures a clean reinstall when iterating; the `|| true` guards against errors when no prior install exists. To also wipe the local extension directory and audit database for a fully clean state (development only):
 
 ```bash
-rm -rf ~/.openclaw/extensions/constellation-audit-plugin/
+rm -rf ~/.openclaw/extensions/openclaw-audit-plugin/
 rm -f ~/.openclaw/audit.db*
 ```
