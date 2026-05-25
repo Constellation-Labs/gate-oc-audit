@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://constellationnetwork.io/schemas/openclaw-audit/audit-status.schema.json",
   "title": "AuditStatus",
-  "description": "Runtime health snapshot produced by `openclaw audit status --json`. Consumed by the gateway dashboard so a remote viewer renders the same one-screen health view a local operator sees. See Local Reporting PRD §R1.",
+  "description": "Runtime health snapshot produced by `openclaw audit status --json`. See Local Reporting PRD §R1.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -10,14 +10,13 @@
     "storage",
     "integrity",
     "anchor",
-    "gateway",
     "fileWatch",
     "inventory",
     "securityScan"
   ],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "header": {
       "type": "object",
       "required": ["pluginName", "pluginVersion", "machineId", "generatedAt"],
@@ -113,28 +112,6 @@
         "lastAnchorAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
         "lastTxHash": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
         "pendingSinceLastCheckpoint": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "gateway": {
-      "type": "object",
-      "required": [
-        "isActive",
-        "url",
-        "buffered",
-        "droppedToday",
-        "circuitOpen",
-        "lastSuccessAt",
-        "lastErrorAt"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "isActive": { "type": "boolean" },
-        "url": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-        "buffered": { "type": "integer", "minimum": 0 },
-        "droppedToday": { "type": "integer", "minimum": 0 },
-        "circuitOpen": { "type": "boolean" },
-        "lastSuccessAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
-        "lastErrorAt": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
       }
     },
     "fileWatch": {

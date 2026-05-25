@@ -37,8 +37,6 @@ src/
                             self-hash for tamper detection
     de-anchor.ts            ActiveAnchorService (API-key + x402 wallet)
                             + NoOpAnchorService + circuit breaker
-    gateway-publisher.ts    Batched outbound publisher; validators;
-                            selectMostRecentAnchorAtOrBefore helper
     notifications.ts        NotificationService: 4 incident notifiers
     report-pusher.ts        ReportPusherService: daily/weekly digest
                             push with restoreState persistence
@@ -60,8 +58,8 @@ src/
     status-snapshot.ts        `audit status` shape builder
     cron-rollup.ts            Per-cron-job rollup
     anomalies-view.ts         Anomalies CLI view assembly
-    detectors.ts              5 anomaly detectors (dup, first-seen,
-                              drop spike, denial spike, install events)
+    detectors.ts              4 anomaly detectors (dup, first-seen,
+                              denial spike, install events)
     time-window.ts            parseInstant, parseSince, parseDate,
                               parseWeek with TZ + sub-ms rejection
     format-{text,html,blocks,session,status,anomalies-*}.ts
@@ -84,7 +82,7 @@ src/
   util/
     network-policy.ts         validateHttpTargetUrl + private/loopback/
                               numeric-IP / userinfo policy used by
-                              both the gateway and webhooks
+                              outbound webhooks
     webhook.ts                postJsonWebhook + isUnsafeWebhookUrl
                               (calls network-policy)
     gateway-url.ts            UI URL resolution
@@ -292,43 +290,12 @@ breaker, and the anchor lifecycle:
    `notifyDeAnchorNotFound` (persisted via `service_health` so it
    doesn't re-fire on every restart).
 
-## Gateway Publisher
-
-`createGatewayPublisher(deps)` returns either `NoOpPublisher` or
-`ActivePublisher`. Validation:
-
-- `validateGatewayUrl(raw, {allowPrivateHost})` — delegates to the
-  shared `util/network-policy.ts` and appends the gateway-specific
-  config hint when a private host is rejected.
-- `validateGatewayApiKey(key)` — length + character whitelist (no CR,
-  no LF, no quotes).
-
-The publisher buffers events and flushes on size, age, or
-`notifyAppend`. Each batch's `smtCheckpoint` envelope field is
-populated by `selectMostRecentAnchorAtOrBefore(checkpoints, maxSeq)`
-. The
-batch's max sequence is computed via `reduce` (the spread form
-overflows V8's argument limit at ~7500 entries).
-
-Failure modes:
-
-- **413** — split the batch in half via `sendWithSplit`.
-- **429 / `Retry-After`** — set `rateLimitedUntil` and pause.
-- **Network / 5xx** — record on a consecutive-failure circuit breaker.
-
-Outbound `fetch` calls use `redirect: "manual"` so a 302 from a
-compromised gateway can't steer the POST  to a private network host.
-
-Drops: when the buffer overflows we record a `gateway.dropped` audit
-row . A drop-throttle ensures we don't
-emit one health upsert per dropped event.
-
 ## Hook Chokepoint
 
 Every hook funnels through `safeAppend()` in `src/hooks.ts`:
 
-1. `applyFieldCaps()` clamps the per-field strings against gateway DTO
-   caps.
+1. `applyFieldCaps()` clamps the per-field strings against the
+   defense-in-depth caps.
 2. `safeDesc` / `safeComposite` clamp the operator-visible description.
 3. `truncateMetadataStrings` walks the metadata and clamps strings.
 4. `sanitize()` redacts sensitive-key values.
@@ -365,8 +332,7 @@ of truth for outbound URL safety:
 - `https://` to private/link-local IPs → reject unless
   `allowPrivateHost` is set
 
-Used by `validateGatewayUrl` (gateway publisher) and
-`isUnsafeWebhookUrl` (notification + report webhooks).
+Used by `isUnsafeWebhookUrl` (notification + report webhooks).
 
 ## UI Authorization Posture
 

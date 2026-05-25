@@ -9,11 +9,10 @@
 import type { AuditStore } from "../store/audit-store.js";
 import type { SmtService } from "../services/smt-service.js";
 import type { AnchorHealth } from "../services/de-anchor.js";
-import type { GatewayHealth } from "../services/gateway-publisher.js";
 import type { RetentionHealth } from "../services/retention.js";
 import type { InventorySummary } from "../services/inventory.js";
 
-export const STATUS_SCHEMA_VERSION = 1 as const;
+export const STATUS_SCHEMA_VERSION = 2 as const;
 
 export interface StatusHeader {
   pluginName: string;
@@ -65,16 +64,6 @@ export interface AnchorSection {
   pendingSinceLastCheckpoint: number;
 }
 
-export interface GatewaySection {
-  isActive: boolean;
-  url: string | null;
-  buffered: number;
-  droppedToday: number;
-  circuitOpen: boolean;
-  lastSuccessAt: string | null;
-  lastErrorAt: string | null;
-}
-
 export interface FileWatchSection {
   patternsWatched: number;
   patternsIgnored: number;
@@ -100,7 +89,6 @@ export interface StatusSnapshot {
   storage: StorageSection;
   integrity: IntegritySection;
   anchor: AnchorSection;
-  gateway: GatewaySection;
   fileWatch: FileWatchSection;
   inventory: InventorySection;
   securityScan: SecurityScanSection;
@@ -115,8 +103,6 @@ export interface StatusInputs {
   store: AuditStore;
   smtService: SmtService;
   anchorHealth: AnchorHealth | undefined;
-  gatewayHealth: GatewayHealth | undefined;
-  gatewayUrl: string | undefined;
   retentionHealth: RetentionHealth;
   filePatterns: { watched: number; ignored: number };
   inventorySummary: InventorySummary;
@@ -133,8 +119,6 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
     store,
     smtService,
     anchorHealth,
-    gatewayHealth,
-    gatewayUrl,
     retentionHealth,
     filePatterns,
     inventorySummary,
@@ -242,15 +226,6 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
       lastAnchorAt: anchorHealth?.lastAnchorAt ?? null,
       lastTxHash: anchorHealth?.lastTxHash ?? null,
       pendingSinceLastCheckpoint: anchorHealth?.pendingSinceLastCheckpoint ?? 0,
-    },
-    gateway: {
-      isActive: gatewayHealth?.isActive ?? false,
-      url: gatewayUrl ?? null,
-      buffered: gatewayHealth?.buffered ?? 0,
-      droppedToday: gatewayHealth?.droppedToday ?? 0,
-      circuitOpen: gatewayHealth?.circuitOpen ?? false,
-      lastSuccessAt: gatewayHealth?.lastSuccessAt ?? null,
-      lastErrorAt: gatewayHealth?.lastErrorAt ?? null,
     },
     fileWatch: {
       patternsWatched: filePatterns.watched,

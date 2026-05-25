@@ -56,7 +56,7 @@ export interface ReportPusherOptions {
    *  configured cron manifests out of webhook payloads. */
   openclawDir?: string;
   /** Allow posting digests to a private/link-local host. Off by default;
-   *  gates the same SSRF policy the gateway publisher applies. */
+   *  gates the shared outbound-URL SSRF policy. */
   allowPrivateHost?: boolean;
 }
 

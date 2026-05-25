@@ -18,21 +18,13 @@ import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import { registerHooks, _resetConversationAccessWarningStateForTests } from "../src/hooks.js";
-import { gatewayPublisherLog } from "../src/util/logger.js";
-import { captureLogger } from "./test-utils/capture-logger.js";
 import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
 import { ApiKeyAnchorService } from "../src/services/de-anchor.js";
-import {
-  createGatewayPublisher,
-  drainForShutdown,
-  selectAnchorCovering,
-  type GatewayPublisher,
-} from "../src/services/gateway-publisher.js";
 import type { AuditEvent } from "../src/types/events.js";
 import {
   cliAnomaliesHandler,
@@ -107,7 +99,6 @@ interface Rig {
   limiter: RateLimiter;
   api: MockApi;
   gatewayStopCapture: GatewayStopCapture;
-  gatewayPublisher?: GatewayPublisher;
 }
 
 async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
@@ -137,36 +128,9 @@ async function createRig(extra: Record<string, unknown> = {}): Promise<Rig> {
   const api = createMockApi(config);
   const gatewayStopCapture = new GatewayStopCapture(store);
 
-  // Opt-in gateway publisher: mirrors src/index.ts wiring so e2e cases can
-  // exercise the full hook → rate-limiter → publisher → POST pipeline.
-  // Created and started BEFORE registerHooks so notifyAppend is in place
-  // for the very first hook fire.
-  let gatewayPublisher: GatewayPublisher | undefined;
-  if (typeof config.gatewayUrl === "string") {
-    gatewayPublisher = createGatewayPublisher(config, {
-      onDropMilestone: (cumulativeDropped: number) => {
-        const result = store.append({
-          eventType: "gateway.dropped",
-          category: "gateway",
-          description: `Gateway buffer full — ${cumulativeDropped} event(s) dropped cumulatively`,
-          metadata: { cumulativeDropped },
-        });
-        if (result) smt.onEventAppended(result);
-      },
-      computeHashes: (event) => ({
-        rawHash: smt.computeRawHash(event),
-        censoredHash: smt.computeCensoredHash(event),
-      }),
-      latestAnchoredCheckpoint: (maxSequence) =>
-        selectAnchorCovering(store.getCheckpoints(), maxSequence),
-    });
-    limiter.setGatewayPublisher(gatewayPublisher);
-    await gatewayPublisher.start();
-  }
-
   registerHooks(api, store, limiter, config, gatewayStopCapture);
 
-  return { dir, dbPath, store, smt, limiter, api, gatewayStopCapture, gatewayPublisher };
+  return { dir, dbPath, store, smt, limiter, api, gatewayStopCapture };
 }
 
 async function destroyRig(rig: Rig) {
@@ -174,14 +138,6 @@ async function destroyRig(rig: Rig) {
   // Belt-and-suspenders against a future test that opts into installSignalFallback().
   rig.gatewayStopCapture.detachSignalListeners();
   rig.limiter.flush();
-  // Gateway shutdown: matches src/index.ts ordering — stop the timer, then
-  // drain buffered events with the configured deadline, before closing the
-  // store (drain reads from the in-memory publisher buffer, not the store,
-  // but the WARN log on abandoned events still references rig state).
-  if (rig.gatewayPublisher) {
-    rig.gatewayPublisher.stop();
-    await drainForShutdown(rig.gatewayPublisher);
-  }
   await rig.smt.stop();
   rig.store.close();
   rmSync(rig.dir, { recursive: true, force: true });
@@ -1278,8 +1234,6 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
         lookbackDays: "14",
         denialWindowSec: "60",
         denialThreshold: "7",
-        dropWindowSec: "180",
-        dropThreshold: "4",
       }),
     );
     const cfg = JSON.parse(tuned.stdout.split("\n").filter(Boolean)[0]).detectorConfig;
@@ -1287,8 +1241,6 @@ describe("e2e: CLI handlers run against a store populated by the hook pipeline",
     assert.equal(cfg.lookbackDays, 14);
     assert.equal(cfg.denialWindowSec, 60);
     assert.equal(cfg.denialThreshold, 7);
-    assert.equal(cfg.dropWindowSec, 180);
-    assert.equal(cfg.dropThreshold, 4);
 
     // A representative bad value is rejected at the boundary.
     await assert.rejects(
@@ -1538,15 +1490,15 @@ describe("e2e: audit status — CLI handler over a hook-populated store", () => 
 
   after(async () => { await destroyRig(rig); });
 
-  it("renders the PRD seven-section snapshot over hook-populated state", async () => {
+  it("renders the PRD snapshot over hook-populated state", async () => {
     const { stdout, stderr } = await captureConsoleAsync(() =>
-      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "constellation-audit-plugin", "0.0.0-test"),
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "openclaw-audit-plugin", "0.0.0-test"),
     );
     assert.equal(stderr, "", `unexpected stderr: ${stderr}`);
     // Header
-    assert.match(stdout, /constellation-audit-plugin v0\.0\.0-test/);
-    // The seven PRD-mock sections — keep loose so a section-title tweak doesn't flap.
-    for (const section of ["Storage", "Integrity", "Digital Evidence anchor", "Gateway publisher", "File watching", "Inventory", "Last security scan"]) {
+    assert.match(stdout, /openclaw-audit-plugin v0\.0\.0-test/);
+    // The PRD-mock sections — keep loose so a section-title tweak doesn't flap.
+    for (const section of ["Storage", "Integrity", "Digital Evidence anchor", "File watching", "Inventory", "Last security scan"]) {
       assert.ok(stdout.includes(section), `expected section "${section}" in status output`);
     }
     // Sequence head reflects the seeded events (5 from seedSession, all in a single SMT).
@@ -1559,12 +1511,12 @@ describe("e2e: audit status — CLI handler over a hook-populated store", () => 
 
   it("--json emits a single-line, parseable snapshot", async () => {
     const { stdout } = await captureConsoleAsync(() =>
-      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "constellation-audit-plugin", "0.0.0-test", { json: true }),
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "openclaw-audit-plugin", "0.0.0-test", { json: true }),
     );
     const lines = stdout.split("\n").filter((l) => l.trim().length > 0);
     assert.equal(lines.length, 1, "JSON mode must emit exactly one line");
     const snap = JSON.parse(lines[0]!) as Record<string, Record<string, unknown>>;
-    assert.equal(snap.header!.pluginName, "constellation-audit-plugin");
+    assert.equal(snap.header!.pluginName, "openclaw-audit-plugin");
     assert.equal(snap.header!.pluginVersion, "0.0.0-test");
     assert.equal(snap.integrity!.sequenceAtHead, 5);
     assert.equal((snap.fileWatch as { patternsWatched: number }).patternsWatched, 1);
@@ -2162,14 +2114,14 @@ describe("e2e: registration failure on before_install records system.install_hoo
   });
 });
 
-describe("e2e: oversized metadata fields are truncated per gateway DTO caps, not dropped", () => {
+describe("e2e: oversized metadata fields are truncated, not dropped", () => {
   let rig: Rig;
   before(async () => { rig = await createRig(); });
   after(async () => { await destroyRig(rig); });
 
   it("clamps individual metadata strings to MAX_FIELD_LENGTH and keeps the SMT proof valid", () => {
     // A hostile install request stuffs >1MB into a sender-controlled scalar.
-    // The hook layer's per-string cap (mirrors gateway DTO MAX_FIELD_LENGTH=1000)
+    // The hook layer's per-string cap (MAX_FIELD_LENGTH=1000)
     // now catches this BEFORE the store sees it — the store's total-size cap
     // (which would have produced a $auditTruncation marker) only fires if many
     // distinct fields still sum past 1MB after per-string clipping.
@@ -2248,323 +2200,3 @@ describe("e2e: every PluginHookName is registered and exercised", () => {
   });
 });
 
-// ── mock gateway ─────────────────────────────────────────────────────
-
-interface ReceivedGatewayRequest {
-  url: string;
-  method: string;
-  headers: NodeJS.Dict<string | string[]>;
-  body: { events: (AuditEvent & { rawHash: string; censoredHash: string })[] };
-}
-
-type RespondFn = (req: IncomingMessage, body: string) => { status: number; body: string };
-
-interface MockGateway {
-  port: number;
-  received: ReceivedGatewayRequest[];
-  setRespond: (fn: RespondFn) => void;
-  stop: () => Promise<void>;
-}
-
-async function startMockGateway(): Promise<MockGateway> {
-  const received: ReceivedGatewayRequest[] = [];
-  let respond: RespondFn = () => ({ status: 202, body: '{"accepted":1}' });
-  const server = createServer((req, res) => {
-    let raw = "";
-    req.on("data", (c) => (raw += c));
-    req.on("end", () => {
-      try {
-        received.push({
-          url: req.url ?? "",
-          method: req.method ?? "",
-          headers: req.headers,
-          body: JSON.parse(raw),
-        });
-      } catch {
-        received.push({
-          url: req.url ?? "",
-          method: req.method ?? "",
-          headers: req.headers,
-          body: { events: [] },
-        });
-      }
-      try {
-        const { status, body } = respond(req, raw);
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(body);
-      } catch {
-        // Respond fn opted to leak the response — leave the connection open
-        // until socket timeout. Used to simulate a stuck gateway.
-      }
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
-  const port = (server.address() as { port: number }).port;
-  return {
-    port,
-    received,
-    setRespond: (fn) => {
-      respond = fn;
-    },
-    stop: () => new Promise<void>((r) => server.close(() => r())),
-  };
-}
-
-describe("e2e: gateway publisher forwards hook events to a mock gateway", () => {
-  let gateway: MockGateway;
-
-  before(async () => {
-    gateway = await startMockGateway();
-  });
-
-  after(async () => {
-    await gateway.stop();
-  });
-
-  it("forwards a representative openclaw session through the publisher", async () => {
-    gateway.received.length = 0;
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 1,
-      gatewayIntervalMs: 60_000,
-    });
-    try {
-      const sessionId = "sess-e2e-gw";
-      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-      fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
-      fire(rig.api, "message_received",
-        { from: "user", content: "hello world" },
-        { ...ctx, conversationId: sessionId },
-      );
-      fire(rig.api, "llm_input",
-        { provider: "p", model: "m", prompt: "what is 2+2?", historyMessages: [], imagesCount: 0 },
-        ctx,
-      );
-      fire(rig.api, "before_tool_call",
-        { toolName: "Read", params: { file_path: "/tmp/x.txt" } },
-        { ...ctx, toolName: "Read" },
-      );
-      fire(rig.api, "after_tool_call",
-        { toolName: "Read", durationMs: 5, result: "file contents", params: {} },
-        { ...ctx, toolName: "Read" },
-      );
-      fire(rig.api, "llm_output",
-        { provider: "p", model: "m", assistantTexts: ["4"], usage: {} },
-        ctx,
-      );
-      fire(rig.api, "session_end", { sessionId, sessionKey: sessionId, reason: "user" }, ctx);
-
-      // Wait for the auto-chained flushes (batchSize=1 fires on every notifyAppend).
-      // Anything still buffered drains in destroyRig.
-      await new Promise((r) => setTimeout(r, 100));
-    } finally {
-      await destroyRig(rig);
-    }
-
-    assert.ok(gateway.received.length >= 1, "expected at least one POST to the gateway");
-    for (const req of gateway.received) {
-      assert.equal(req.method, "POST");
-      assert.equal(req.url, "/v1/audit/ingest");
-      assert.equal(req.headers["x-gateway-api-key"], "sk-gw-e2e-test");
-      assert.equal(req.headers["content-type"], "application/json");
-    }
-
-    // Sequence numbers must be monotonic across batches — that's the
-    // ordering guarantee the gateway relies on for tamper-evident reads.
-    const seenSequences: number[] = [];
-    const seenTypes = new Set<string>();
-    for (const req of gateway.received) {
-      for (const evt of req.body.events) {
-        seenSequences.push(evt.sequence);
-        seenTypes.add(evt.eventType);
-      }
-    }
-    for (let i = 1; i < seenSequences.length; i++) {
-      assert.ok(
-        seenSequences[i] > seenSequences[i - 1],
-        `sequence regression at index ${i}: ${seenSequences[i - 1]} → ${seenSequences[i]}`,
-      );
-    }
-    for (const expected of ["message.received", "prompt.input", "tool.invoked", "tool.result", "prompt.response"]) {
-      assert.ok(seenTypes.has(expected), `expected event type ${expected} in gateway batch`);
-    }
-  });
-
-  it("wire rawHash and censoredHash match smt.computeRawHash / computeCensoredHash on the original event", async () => {
-    gateway.received.length = 0;
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 1,
-      gatewayIntervalMs: 60_000,
-    });
-    try {
-      const sessionId = "sess-e2e-projection";
-      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-      fire(rig.api, "before_tool_call",
-        { toolName: "Read", params: { file_path: "/tmp/projection-check.txt" } },
-        { ...ctx, toolName: "Read" },
-      );
-      await new Promise((r) => setTimeout(r, 100));
-
-      assert.equal(gateway.received.length, 1);
-      const wire = gateway.received[0].body.events[0];
-      const stored = rig.store.query({ category: "tool", eventType: "tool.invoked", limit: 1, includeContent: true })[0];
-      assert.ok(stored, "tool.invoked event should be in the store");
-      // Independently project the stored event through SMT and compare —
-      // catches a misordered projection (e.g. rawHash/censoredHash swapped)
-      // that a mocked unit test wouldn't surface.
-      assert.equal(wire.rawHash, rig.smt.computeRawHash(stored),
-        "wire.rawHash must equal smt.computeRawHash(original)");
-      assert.equal(wire.censoredHash, rig.smt.computeCensoredHash(stored),
-        "wire.censoredHash must equal smt.computeCensoredHash(original)");
-    } finally {
-      await destroyRig(rig);
-    }
-  });
-
-  it("batches multiple events per POST when gatewayBatchSize > 1", async () => {
-    gateway.received.length = 0;
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 3,
-      gatewayIntervalMs: 60_000,
-    });
-    try {
-      const sessionId = "sess-e2e-batch";
-      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-      fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
-      for (let i = 0; i < 6; i++) {
-        fire(rig.api, "before_tool_call",
-          { toolName: "Read", params: { file_path: `/tmp/${i}.txt` } },
-          { ...ctx, toolName: "Read" },
-        );
-      }
-      await new Promise((r) => setTimeout(r, 200));
-    } finally {
-      await destroyRig(rig);
-    }
-    // 7 events total (1 session_start + 6 tool calls), batchSize=3:
-    //   two full batches auto-chain, the remainder drains on shutdown.
-    const totalEvents = gateway.received.reduce((n, r) => n + r.body.events.length, 0);
-    assert.equal(totalEvents, 7, "every event must reach the gateway across the batches");
-    assert.equal(gateway.received[0].body.events.length, 3, "first batch should be full");
-    assert.equal(gateway.received[1].body.events.length, 3, "second batch should be full");
-  });
-
-  it("drainForShutdown delivers buffered events when the timer hasn't fired yet", async () => {
-    gateway.received.length = 0;
-    // batchSize=100 + intervalMs=60s + no auto-chain ⇒ nothing flushes
-    // until destroyRig calls drainForShutdown.
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 100,
-      gatewayIntervalMs: 60_000,
-    });
-    const sessionId = "sess-e2e-drain";
-    const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-    fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
-    for (let i = 0; i < 4; i++) {
-      fire(rig.api, "before_tool_call",
-        { toolName: "Read", params: { file_path: `/tmp/${i}.txt` } },
-        { ...ctx, toolName: "Read" },
-      );
-    }
-    assert.equal(gateway.received.length, 0, "no POSTs should have fired before shutdown");
-    assert.ok(rig.gatewayPublisher!.bufferedCount() > 0, "events should be buffered, awaiting flush");
-
-    await destroyRig(rig);
-
-    const totalEvents = gateway.received.reduce((n, r) => n + r.body.events.length, 0);
-    assert.equal(totalEvents, 5, "drainForShutdown should flush every buffered event");
-  });
-
-  it("records a synthetic gateway.dropped event when the publisher buffer fills", async () => {
-    gateway.received.length = 0;
-    // Stall every response so batches never complete — buffer fills, drops accumulate.
-    gateway.setRespond(() => {
-      throw new Error("stall");
-    });
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 100,
-      gatewayBufferCapacity: 2,
-      gatewayIntervalMs: 60_000,
-      gatewayShutdownDeadlineMs: 1_000,
-    });
-    try {
-      const sessionId = "sess-e2e-dropped";
-      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-      // 1 session_start + 5 tool invocations ⇒ 6 events, buffer cap 2 ⇒ ≥4 drops.
-      fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
-      for (let i = 0; i < 5; i++) {
-        fire(rig.api, "before_tool_call",
-          { toolName: "Read", params: { file_path: `/tmp/${i}.txt` } },
-          { ...ctx, toolName: "Read" },
-        );
-      }
-      await new Promise((r) => setTimeout(r, 50));
-
-      const dropped = rig.store.query({ category: "gateway", eventType: "gateway.dropped", limit: 10 });
-      assert.ok(
-        dropped.length >= 1,
-        `expected at least one gateway.dropped event in the local store, got ${dropped.length}`,
-      );
-      // Newest milestone wins on read order; assert metadata carries the count.
-      const meta = dropped[0].metadata as { cumulativeDropped?: number };
-      assert.ok(
-        typeof meta.cumulativeDropped === "number" && meta.cumulativeDropped >= 1,
-        `expected cumulativeDropped >= 1, got ${meta.cumulativeDropped}`,
-      );
-    } finally {
-      // Reset the responder so destroyRig's drain doesn't loop on a stalled mock.
-      gateway.setRespond(() => ({ status: 202, body: '{"accepted":1}' }));
-      await destroyRig(rig);
-    }
-  });
-
-  it("requeues events on 5xx and abandons them with a WARN if the gateway stays down", async () => {
-    gateway.received.length = 0;
-    gateway.setRespond(() => ({ status: 500, body: "down" }));
-
-    // The abandonment WARN goes through the gateway publisher's subsystem
-    // logger now, not console.error — capture it via captureLogger so the
-    // assertion runs against the real log call rather than a side-channel.
-    const captured = captureLogger(gatewayPublisherLog);
-
-    const rig = await createRig({
-      gatewayUrl: `http://localhost:${gateway.port}`,
-      gatewayApiKey: "sk-gw-e2e-test",
-      gatewayBatchSize: 1,
-      gatewayIntervalMs: 60_000,
-      gatewayShutdownDeadlineMs: 500,
-    });
-    try {
-      const sessionId = "sess-e2e-5xx";
-      const ctx = { sessionId, conversationId: sessionId, channelId: "terminal" };
-      fire(rig.api, "session_start", { sessionId, sessionKey: sessionId }, ctx);
-      await new Promise((r) => setTimeout(r, 100));
-
-      assert.ok(gateway.received.length >= 1, "the publisher must have attempted at least one POST");
-      assert.ok(
-        rig.gatewayPublisher!.bufferedCount() > 0,
-        "5xx must requeue the event rather than dropping it",
-      );
-    } finally {
-      await destroyRig(rig);
-      captured.restore();
-      // Restore default response for the next case.
-      gateway.setRespond(() => ({ status: 202, body: '{"accepted":1}' }));
-    }
-
-    const abandoned = captured.messages.find((m) => m.includes("abandoning") && m.includes("buffered event"));
-    assert.ok(
-      abandoned,
-      `expected drainForShutdown to log an abandoned-events WARN; saw: ${captured.messages.join(" | ")}`,
-    );
-  });
-});

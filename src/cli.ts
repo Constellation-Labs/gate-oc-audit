@@ -20,7 +20,6 @@ import { buildCronRollup, formatCronRollupText, formatCronRollupHtml, DEFAULT_LA
 import { buildStatusSnapshot } from "./reports/status-snapshot.js";
 import { formatStatusText } from "./reports/format-status.js";
 import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "./services/de-anchor.js";
-import { GATEWAY_HEALTH_NAME, type GatewayHealth } from "./services/gateway-publisher.js";
 import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "./services/retention.js";
 import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "./reports/spend-rollup.js";
 
@@ -487,8 +486,6 @@ export interface AuditAnomaliesOptions {
   lookbackDays?: string;
   denialWindowSec?: string;
   denialThreshold?: string;
-  dropWindowSec?: string;
-  dropThreshold?: string;
 }
 
 export async function cliAnomaliesHandler(
@@ -508,8 +505,6 @@ export async function cliAnomaliesHandler(
     lookbackDays: parsePositiveInt(opts.lookbackDays, "--lookback-days", 365),
     denialWindowSec: parsePositiveInt(opts.denialWindowSec, "--denial-window-sec", 86_400),
     denialThreshold: parsePositiveInt(opts.denialThreshold, "--denial-threshold", 1_000_000),
-    dropWindowSec: parsePositiveInt(opts.dropWindowSec, "--drop-window-sec", 86_400),
-    dropThreshold: parsePositiveInt(opts.dropThreshold, "--drop-threshold", 1_000_000),
   });
 
   if (opts.json === true) {
@@ -551,7 +546,6 @@ export async function cliStatusHandler(
   }
 
   const anchorHealth = readHealth<AnchorHealth>(store, ANCHOR_HEALTH_NAME);
-  const gatewayHealth = readHealth<GatewayHealth>(store, GATEWAY_HEALTH_NAME);
   // Health row is populated on every prune tick. When absent (service never
   // ran in this DB lifecycle) we still want a meaningful Retention line —
   // fall back to the configured values, matching what RetentionService would
@@ -571,7 +565,6 @@ export async function cliStatusHandler(
     watched: Array.isArray(config.fileWatchPatterns) ? (config.fileWatchPatterns as unknown[]).length : 0,
     ignored: Array.isArray(config.fileWatchIgnorePatterns) ? (config.fileWatchIgnorePatterns as unknown[]).length : 0,
   };
-  const gatewayUrl = typeof config.gatewayUrl === "string" ? config.gatewayUrl : undefined;
   const allowConversationAccess = config.allowConversationAccess === true;
 
   const snapshot = buildStatusSnapshot({
@@ -582,8 +575,6 @@ export async function cliStatusHandler(
     store,
     smtService,
     anchorHealth,
-    gatewayHealth,
-    gatewayUrl,
     retentionHealth,
     filePatterns,
     inventorySummary: inventoryReport.summary,

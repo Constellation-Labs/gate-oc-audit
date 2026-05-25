@@ -1,6 +1,5 @@
 /**
- * URL host policy shared by the gateway publisher and the webhook senders
- * . Centralised so a single source of truth gates
+ * URL host policy shared by the webhook senders . Centralised so a single source of truth gates
  * any outbound HTTP target an operator configures.
  *
  * Trust model: callers pass URLs sourced from the plugin config file. The
@@ -76,9 +75,8 @@ export function isNumericIpEncoding(host: string): boolean {
 }
 
 /**
- * Apply the shared host policy to a configured URL string. Used by both the
- * gateway publisher and the webhook senders so they can't drift on host
- * classification.
+ * Apply the shared host policy to a configured URL string. Used by the
+ * webhook senders so they can't drift on host classification.
  *
  * - Rejects malformed URLs and non-http(s) protocols.
  * - Rejects URLs that carry userinfo  so credentials

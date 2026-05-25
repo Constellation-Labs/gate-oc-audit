@@ -18,11 +18,11 @@ import {log} from "./util/logger.js";
  *     the row lands in the WAL even when openclaw's async shutdown is
  *     preempted (observed in CI: container can exit ~250ms after SIGTERM
  *     with no further log lines past "received SIGTERM; shutting down").
- *     Bypasses the rate limiter (so its async side-effects — gateway publish,
- *     DE anchor — don't try to run inside a synchronous signal callback), but
+ *     Bypasses the rate limiter (so its async side-effects — the DE-anchor
+ *    notification — don't try to run inside a synchronous signal callback), but
  *     still feeds the result into `SmtService.onEventAppended` so the leaf is
  *     present in the in-memory SMT before `SmtService.stop` checkpoints it
- *     to disk. The later async services (gateway-publisher, de-anchor) pick
+ *     to disk. The later async services (de-anchor) pick
  *     the row up on next startup via their own replay/backfill paths.
  *
  * `tryClaim()` deduplicates: whichever path runs first writes the row, the

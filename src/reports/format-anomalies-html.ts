@@ -57,25 +57,6 @@ function renderBody(v: AnomalyView): string {
     }
   }
 
-  if (a.gatewayDropSpikes.length > 0) {
-    sections.push(
-      `<h2>Gateway-drop spikes (${a.gatewayDropSpikes.length}, window ${cfg.dropWindowSec}s, threshold ${cfg.dropThreshold})</h2>`,
-    );
-    for (const s of a.gatewayDropSpikes) {
-      const events = s.events
-        .map(
-          (e) =>
-            `<div class="anomaly-event">#${e.sequence} ${escape(e.createdAt)} id=${escape(e.id)}</div>`,
-        )
-        .join("");
-      sections.push(
-        `<div class="anomaly bad">
-  <div class="anomaly-head">${escape(s.firstAt)} → ${escape(s.lastAt)} — ${s.count} drop milestone(s), cumulativeDroppedΔ=${s.droppedDelta}</div>
-  ${events}
-</div>`,
-      );
-    }
-  }
 
   if (a.denialSpikes.length > 0) {
     sections.push(

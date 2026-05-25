@@ -1480,7 +1480,7 @@ describe("registerHooks — userId resolution", () => {
     assert.equal(readUserId(), "alice@example.com");
   });
 
-  it("truncates oversize values (matches gateway DTO cap) with a one-shot warn", () => {
+  it("truncates oversize values to defense-in-depth caps with a one-shot warn", () => {
     const original = console.warn;
     const warnings: string[] = [];
     console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));

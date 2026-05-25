@@ -69,21 +69,6 @@ export function formatStatusText(s: StatusSnapshot): string {
   row("Circuit", `${circuitState}   •   ${s.anchor.consecutiveFailures} consecutive failures`);
   lines.push("");
 
-  // Gateway publisher
-  lines.push("Gateway publisher");
-  const gwStatus = s.gateway.isActive ? "ACTIVE" : "INACTIVE";
-  const gwSuffix = s.gateway.url ? `  •  ${s.gateway.url}` : "";
-  row("Status", `${gwStatus}${gwSuffix}`);
-  row("Buffered", `${s.gateway.buffered}   •   dropped today ${s.gateway.droppedToday}   •   circuit ${s.gateway.circuitOpen ? "OPEN" : "closed"}`);
-  if (s.gateway.lastSuccessAt) {
-    row("Last successful", formatInstant(s.gateway.lastSuccessAt));
-  } else if (s.gateway.lastErrorAt) {
-    row("Last error", formatInstant(s.gateway.lastErrorAt));
-  } else {
-    row("Last successful", "(none this process)");
-  }
-  lines.push("");
-
   // File watching
   lines.push("File watching");
   row("Patterns watched", `${s.fileWatch.patternsWatched}   •   ignored ${s.fileWatch.patternsIgnored}`);

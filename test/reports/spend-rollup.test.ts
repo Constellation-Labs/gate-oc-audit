@@ -138,7 +138,9 @@ describe("buildSpendRollup", () => {
     backdate(dbPath, a, "2026-05-18T10:00:00.000Z");
     backdate(dbPath, b, "2026-05-19T10:00:00.000Z");
 
-    const window = parseSince("7d", undefined, "utc");
+    // Fixed `now` so the 7d window stays anchored at [2026-05-18, 2026-05-25)
+    // regardless of when the test runs.
+    const window = parseSince("7d", undefined, "utc", new Date("2026-05-25T00:00:00.000Z"));
     const r = buildSpendRollup(store, window, "day");
     assert.equal(r.rows.length, 2);
     // Day grouping is ordered ascending
