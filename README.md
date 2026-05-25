@@ -99,7 +99,6 @@ This is the single best command to confirm the plugin is recording. It prints on
 - **Storage** — DB size vs cap, event count, oldest event, next prune
 - **Integrity** — sequence head, SMT trees + root, last checkpoint, conversation-hook state (`ENABLED` / `DISABLED` / `ENABLED-but-silent` if no `prompt.input` seen in 24h)
 - **Digital Evidence anchor** — active / inactive, anchors today, last anchor tx hash, circuit-breaker state
-- **Gateway publisher** — buffer depth, dropped today, last success / error
 - **File watching** — patterns watched / ignored, changes in last 24h
 - **Inventory** — plugins / skills / tools / cron counts
 - **Last security scan** — timestamp + finding counts

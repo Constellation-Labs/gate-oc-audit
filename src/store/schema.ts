@@ -9,7 +9,7 @@ const PRAGMAS = [
   "PRAGMA foreign_keys = ON",
   "PRAGMA auto_vacuum = INCREMENTAL",
   // Wait up to 5s for the write lock before returning SQLITE_BUSY. Multi-
-  // process writers (gateway + CLI, multiple gateway instances) would
+  // process writers (openclaw + CLI processes sharing the same DB) would
   // otherwise drop events on transient contention; this absorbs normal
   // contention and WAL checkpoint pauses without JS-level retry logic.
   "PRAGMA busy_timeout = 5000",
@@ -100,7 +100,7 @@ const DDL = [
   )`,
 ];
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -229,6 +229,14 @@ export function initializeSchema(db: DatabaseSync): void {
       //     metadata.jobId for the per-cron rollup (`audit report cron`).
       //     CREATE INDEX IF NOT EXISTS in DDL above; no procedural body
       //     needed beyond the version record.
+
+      // v8: Cleanup of the stale `service_health` row keyed `'gateway'`
+      // written by the prior swarm-deck gateway publisher (removed in
+      // 0.2.5-beta.1). The row is harmless but references a feature that
+      // no longer exists. Safe to run on dbs that never had the row.
+      if (current < 8) {
+        db.exec("DELETE FROM service_health WHERE name = 'gateway'");
+      }
 
       db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
         .run(CURRENT_SCHEMA_VERSION, new Date().toISOString());

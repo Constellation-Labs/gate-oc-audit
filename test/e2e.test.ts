@@ -18,7 +18,7 @@ import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { AuditStore } from "../src/store/audit-store.js";
 import { SmtService } from "../src/services/smt-service.js";
 import { RateLimiter } from "../src/rate-limiter.js";

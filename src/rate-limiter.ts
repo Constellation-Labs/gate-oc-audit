@@ -191,7 +191,7 @@ export class RateLimiter {
 
     // Multiple events — create summary.
     //
-    // Coalescing contract (consumed by the gateway and any downstream verifier):
+    // Coalescing contract (consumed by any downstream verifier):
     //   - The summary occupies one sequence number; raw events do not get their
     //     own sequences (we never call store.append for them). Sequence streams
     //     remain dense — there are NO seq gaps to detect.

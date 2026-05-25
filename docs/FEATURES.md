@@ -82,25 +82,6 @@ service re-verifies any un-verified checkpoint by tx hash; 404s leave
 `verified_at` NULL and fire a one-shot "anchor not found" notification
 .
 
-## Gateway Publisher
-
-When `gatewayUrl` is configured the plugin batches audit events to the
-gateway via `fetch` with an `X-Gateway-Api-Key` header. Batches honor
-`gatewayBatchSize`, `gatewayMaxPayloadBytes`, and a configurable flush
-interval. On 413 the batch is split in half and retried; on rate-limit
-the publisher pauses until the configured window. Each batch carries the
-most-recent DE-anchored checkpoint covering its sequence range as
-`smtCheckpoint` so the gateway can mark each event verified or
-anchor-pending. Drop events on overflow are themselves audit rows so
-the operator sees the loss.
-
-Outbound requests set `redirect: "manual"` so a compromised gateway
-can't 302 the POST  to an unintended host. The
-gateway URL is validated against the shared `validateHttpTargetUrl`
-network policy: `http://` only to loopback, no private/link-local hosts
-unless `gatewayAllowPrivateHost: true`, no numeric-IP encodings, no
-userinfo.
-
 ## CLI Commands
 
 All commands run read-only against the audit DB (the writer is the
@@ -108,7 +89,7 @@ in-process gateway lifecycle).
 
 - **`audit list`** — view recent events; filters `--last/--type/--category/--session/--limit/--offset`.
 - **`audit verify`** — verify SMT roots against DE-anchored checkpoints; reports the exact tampered range on failure.
-- **`audit status [--json]`** — runtime snapshot: storage health, SMT pending, anchor health, gateway health, configured cron manifests, inventory counts.
+- **`audit status [--json]`** — runtime snapshot: storage health, SMT pending, anchor health, configured cron manifests, inventory counts.
 - **`audit ui`** — print the local audit UI URL.
 - **`audit export [json|csv]`** — stream events with optional filters; rows include the covering DE anchor reference. Capped at 2 concurrent.
 - **`audit inventory [kind]`** — list installed plugins / skills / tools / soul files / configured crons under `~/.openclaw`.
@@ -194,8 +175,6 @@ Run by `audit anomalies` and the daily/weekly digests:
   matches the operator's contract.
 - **`detectFirstSeenTools`** — tool names invoked today that weren't
   present in the prior `lookbackDays` window.
-- **`detectGatewayDropSpike`** — clusters of `gateway.dropped` events
-  exceeding `dropThreshold` within `dropWindowSec`.
 - **`detectDenialSpike`** — clusters of `tool.denied` events exceeding
   `denialThreshold` within `denialWindowSec`.
 - **`detectInstallEvents`** — surfaces artifact install events

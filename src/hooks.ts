@@ -83,7 +83,7 @@ function resolveConfiguredUserId(config: Record<string, unknown>): string | unde
     if (trimmed.length === 0) continue;
     if (trimmed.length > USER_ID_MAX_LEN) {
       log.warn(
-        `${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating. Gateway would otherwise reject every batch on validation.`,
+        `${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating to stay within the local DB's defense-in-depth caps.`,
       );
       return trimmed.slice(0, USER_ID_MAX_LEN);
     }

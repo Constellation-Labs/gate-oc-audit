@@ -16,7 +16,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "header": {
       "type": "object",
       "required": ["pluginName", "pluginVersion", "machineId", "generatedAt"],

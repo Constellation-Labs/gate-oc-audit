@@ -12,7 +12,7 @@ import type { AnchorHealth } from "../services/de-anchor.js";
 import type { RetentionHealth } from "../services/retention.js";
 import type { InventorySummary } from "../services/inventory.js";
 
-export const STATUS_SCHEMA_VERSION = 1 as const;
+export const STATUS_SCHEMA_VERSION = 2 as const;
 
 export interface StatusHeader {
   pluginName: string;

@@ -11,7 +11,7 @@
  * tamper-evident Digital Evidence reference without a second lookup.
  *
  * The plugin's local export is the operator-side complement to the
- * gateway-side workspace export described in PRD A12 — same on-the-wire
+ * workspace export described in PRD A12 — same on-the-wire
  * shape, but scoped to the events this plugin actually persisted.
  */
 import type { ServerResponse } from "node:http";
