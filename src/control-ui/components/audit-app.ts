@@ -10,6 +10,7 @@ import "./session-view.ts";
 import "./anomalies-view.ts";
 import "./spend-view.ts";
 import "./inventory-view.ts";
+import "./smt-tools.ts";
 
 type Route =
   | "status"
@@ -22,7 +23,8 @@ type Route =
   | "reports/session"
   | "anomalies"
   | "spend"
-  | "inventory";
+  | "inventory"
+  | "smt-tools";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
@@ -38,6 +40,7 @@ function parseRoute(): Route {
     || hash === "anomalies"
     || hash === "spend"
     || hash === "inventory"
+    || hash === "smt-tools"
   ) {
     return hash;
   }
@@ -129,6 +132,7 @@ export class AuditApp extends LitElement {
           <a href="#/inventory" class=${this.route === "inventory" ? "active" : ""}>Inventory</a>
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
+          <a href="#/smt-tools" class=${this.route === "smt-tools" ? "active" : ""}>SMT tools</a>
         </nav>
       </header>
       <main>
@@ -152,7 +156,9 @@ export class AuditApp extends LitElement {
                           ? html`<inventory-view></inventory-view>`
                           : this.route === "trees"
                             ? html`<trees-overview></trees-overview>`
-                            : html`<verify-panel></verify-panel>`}
+                            : this.route === "smt-tools"
+                              ? html`<smt-tools></smt-tools>`
+                              : html`<verify-panel></verify-panel>`}
       </main>
     `;
   }

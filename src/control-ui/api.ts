@@ -406,6 +406,57 @@ export interface CronRollup {
   manifest: ConfiguredCron | null;
 }
 
+// ── SMT power tools ───────────────────────────────────────────────────────
+
+export interface SmtProofObject {
+  root: string;
+  key: string;
+  siblings: string[];
+  membership: boolean;
+  [k: string]: unknown;
+}
+
+export interface SmtProofResponse {
+  proof: SmtProofObject;
+}
+
+export type SmtVerifyResult =
+  | { status: "valid" }
+  | { status: "invalid"; reason: string }
+  | { status: "unverifiable"; reason: string };
+
+export interface SmtChainEntry {
+  rawHash: string;
+  timestamp: number;
+  seqNo: number;
+  auditEventId: string;
+}
+
+export interface SmtChainResponse {
+  tree: string;
+  conversationId: string;
+  chain: SmtChainEntry[];
+}
+
+export function smtCreateProof(hash: string, tree?: string): Promise<SmtProofResponse> {
+  const params = new URLSearchParams({ hash });
+  if (tree) params.set("tree", tree);
+  return fetchJson<SmtProofResponse>(`smt/proof?${params.toString()}`);
+}
+
+export function smtVerifyProof(proof: SmtProofObject): Promise<SmtVerifyResult> {
+  return fetchJson<SmtVerifyResult>("smt/verify-proof", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ proof }),
+  });
+}
+
+export function smtGetChain(tree: string, conversationId: string): Promise<SmtChainResponse> {
+  const params = new URLSearchParams({ tree, conversationId });
+  return fetchJson<SmtChainResponse>(`smt/chain?${params.toString()}`);
+}
+
 // ── Inventory ─────────────────────────────────────────────────────────────
 
 export type InventoryKind = "plugins" | "skills" | "tools" | "soul" | "crons";

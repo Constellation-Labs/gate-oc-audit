@@ -1616,3 +1616,124 @@ describe("ui: /api/inventory endpoint", () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/smt/* — mirrors of `audit smt proof|verify-proof|chain`
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/smt power tools", () => {
+  it("smt/proof rejects missing hash with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/proof returns 404 when tree key is unknown", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=abcdef&tree=nope`);
+      assert.equal(res.status, 404);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/proof returns a proof for a leaf in the default tree", async () => {
+    const rig = await createUiRig();
+    try {
+      const ev = rig.appendTracked(sampleInsert());
+      // SMT leaf hash is computed by the service from the audit event.
+      const rawHash = rig.smt.computeRawHash(ev);
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=${rawHash}`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { proof: Record<string, unknown> };
+      assert.equal(typeof body.proof.root, "string");
+      assert.equal(body.proof.membership, true);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/verify-proof returns 'valid' for a freshly generated proof", async () => {
+    const rig = await createUiRig();
+    try {
+      const ev = rig.appendTracked(sampleInsert());
+      const rawHash = rig.smt.computeRawHash(ev);
+      const proofRes = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=${rawHash}`);
+      const { proof } = (await proofRes.json()) as { proof: Record<string, unknown> };
+      const verifyRes = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ proof }),
+      });
+      assert.equal(verifyRes.status, 200);
+      const body = (await verifyRes.json()) as { status: string };
+      assert.equal(body.status, "valid");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/verify-proof rejects a malformed body with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/chain rejects missing conversationId/tree with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const r1 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain`);
+      assert.equal(r1.status, 400);
+      const r2 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=default`);
+      assert.equal(r2.status, 400);
+      const r3 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?conversationId=sess-x`);
+      assert.equal(r3.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/chain returns an empty chain for an unknown conversation", async () => {
+    const rig = await createUiRig();
+    try {
+      const tree = rig.smt.listTrees()[0]?.key ?? "default";
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=${tree}&conversationId=no-such-conv`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { chain: unknown[] };
+      assert.equal(body.chain.length, 0);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks each smt endpoint when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const p = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=abc`);
+      assert.equal(p.status, 403);
+      const v = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ proof: {} }),
+      });
+      assert.equal(v.status, 403);
+      const c = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=default&conversationId=sess-x`);
+      assert.equal(c.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});

@@ -796,6 +796,98 @@ async function handleApi(
   return true;
   }
 
+  // GET /api/smt/proof?hash=&tree=
+  if (apiPath === "smt/proof" && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit smt is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const hash = url.searchParams.get("hash") ?? "";
+  if (!hash) {
+  sendError(res, 400, "hash is required");
+  return true;
+  }
+  if (tooLongParam([hash, url.searchParams.get("tree")])) {
+  sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+  return true;
+  }
+  await ctx.smtService.ensureReady();
+  const tree = url.searchParams.get("tree") ?? undefined;
+  const proof = ctx.smtService.createProof(hash, tree);
+  if (!proof) {
+  sendError(res, 404, "tree not found");
+  return true;
+  }
+  sendJson(res, 200, { proof });
+  return true;
+  }
+
+  // POST /api/smt/verify-proof  { proof }
+  if (apiPath === "smt/verify-proof" && req.method === "POST") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit smt is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  let body: unknown;
+  try {
+  body = await readJsonBody(req);
+  } catch (err) {
+  sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+  return true;
+  }
+  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  if (!b.proof || typeof b.proof !== "object") {
+  sendError(res, 400, "proof is required (object)");
+  return true;
+  }
+  await ctx.smtService.ensureReady();
+  const knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
+  const result = ctx.smtService.verifyProofWithRoots(b.proof as SmtProof, knownRoots);
+  sendJson(res, 200, result);
+  return true;
+  }
+
+  // GET /api/smt/chain?conversationId=&tree=
+  if (apiPath === "smt/chain" && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit smt is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const conversationId = url.searchParams.get("conversationId") ?? "";
+  if (!conversationId) {
+  sendError(res, 400, "conversationId is required");
+  return true;
+  }
+  const tree = url.searchParams.get("tree");
+  if (!tree) {
+  sendError(res, 400, "tree is required");
+  return true;
+  }
+  if (tooLongParam([conversationId, tree])) {
+  sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+  return true;
+  }
+  await ctx.smtService.ensureReady();
+  const chain = ctx.smtService.getChain(tree, conversationId);
+  sendJson(res, 200, { tree, conversationId, chain });
+  return true;
+  }
+
   // GET /api/spend?by=&since=&until=&tz=&limit=
   if (apiPath === "spend" && req.method === "GET") {
   if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
