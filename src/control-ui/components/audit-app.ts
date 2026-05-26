@@ -7,6 +7,7 @@ import "./status-dashboard.ts";
 import "./report-projection.ts";
 import "./report-cron.ts";
 import "./session-view.ts";
+import "./anomalies-view.ts";
 
 type Route =
   | "status"
@@ -16,11 +17,11 @@ type Route =
   | "reports/daily"
   | "reports/weekly"
   | "reports/cron"
-  | "reports/session";
+  | "reports/session"
+  | "anomalies";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-  // session route includes an id parameter after the slash
   if (hash.startsWith("reports/session/")) return "reports/session";
   if (
     hash === "events"
@@ -30,6 +31,7 @@ function parseRoute(): Route {
     || hash === "reports/daily"
     || hash === "reports/weekly"
     || hash === "reports/cron"
+    || hash === "anomalies"
   ) {
     return hash;
   }
@@ -116,6 +118,7 @@ export class AuditApp extends LitElement {
           <a href="#/reports/daily" class=${this.route === "reports/daily" ? "active" : ""}>Daily</a>
           <a href="#/reports/weekly" class=${this.route === "reports/weekly" ? "active" : ""}>Weekly</a>
           <a href="#/reports/cron" class=${this.route === "reports/cron" ? "active" : ""}>Cron</a>
+          <a href="#/anomalies" class=${this.route === "anomalies" ? "active" : ""}>Anomalies</a>
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
         </nav>
@@ -133,9 +136,11 @@ export class AuditApp extends LitElement {
                   ? html`<report-cron></report-cron>`
                   : this.route === "reports/session"
                     ? html`<session-view></session-view>`
-                    : this.route === "trees"
-                  ? html`<trees-overview></trees-overview>`
-                  : html`<verify-panel></verify-panel>`}
+                    : this.route === "anomalies"
+                      ? html`<anomalies-view></anomalies-view>`
+                      : this.route === "trees"
+                        ? html`<trees-overview></trees-overview>`
+                        : html`<verify-panel></verify-panel>`}
       </main>
     `;
   }

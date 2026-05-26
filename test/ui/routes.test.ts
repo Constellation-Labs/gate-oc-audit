@@ -1398,3 +1398,80 @@ describe("ui: /api/report/session/:id endpoint", () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/anomalies — mirror of `audit anomalies --json` for the SPA view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/anomalies endpoint", () => {
+  it("returns an empty anomaly view on a fresh store", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.anomalies.duplicateOutbound.length, 0);
+      assert.equal(body.anomalies.firstSeenTools.length, 0);
+      assert.equal(body.counts.totalEventsInWindow, 0);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("echoes detector knobs in detectorConfig", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?dupWindowSec=120&lookbackDays=7&denialWindowSec=600&denialThreshold=3`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { detectorConfig: Record<string, number> };
+      assert.equal(body.detectorConfig.dupWindowSec, 120);
+      assert.equal(body.detectorConfig.lookbackDays, 7);
+      assert.equal(body.detectorConfig.denialWindowSec, 600);
+      assert.equal(body.detectorConfig.denialThreshold, 3);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an out-of-range detector knob with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?dupWindowSec=-1`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an invalid since duration with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?since=not-a-duration`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks anomalies when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows anomalies on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});

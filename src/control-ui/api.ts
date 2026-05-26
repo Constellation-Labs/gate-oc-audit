@@ -406,6 +406,104 @@ export interface CronRollup {
   manifest: ConfiguredCron | null;
 }
 
+// ── Anomalies view ────────────────────────────────────────────────────────
+// Wire-compatible mirror of `AnomalyView` (src/reports/anomalies-view.ts).
+
+export interface EventRef {
+  id: string;
+  sequence: number;
+  createdAt: string;
+}
+
+export interface DenialSpikeFinding {
+  firstAt: string;
+  lastAt: string;
+  count: number;
+  byTool: Array<{ toolName: string; count: number }>;
+  topReason: string | null;
+  events: EventRef[];
+}
+
+export interface InstallEventFinding {
+  id: string;
+  sequence: number;
+  createdAt: string;
+  targetType: string;
+  targetName: string;
+  version: string | null;
+  requestMode: string | null;
+  scanStatus: string | null;
+  scanCritical: number;
+  scanWarn: number;
+  elevated: boolean;
+}
+
+export interface UnverifiedAnchoredCheckpoint {
+  checkpointId: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  smtRoot: string;
+  deTxHash: string | null;
+  createdAt: string;
+}
+
+export interface TamperedEventRef extends EventRef {
+  eventType: string;
+}
+
+export interface IntegrityViolationFinding {
+  unverifiedAnchored: UnverifiedAnchoredCheckpoint[];
+  tamperedEvents: TamperedEventRef[];
+  note: string | null;
+}
+
+export interface AnomalyView {
+  schemaVersion: number;
+  generatedAt: string;
+  period: { fromIso: string; toIso: string; label: string; tz: "local" | "utc" };
+  detectorConfig: {
+    dupWindowSec: number;
+    lookbackDays: number;
+    denialWindowSec: number;
+    denialThreshold: number;
+  };
+  counts: {
+    totalEventsInWindow: number;
+    capped: boolean;
+  };
+  anomalies: {
+    duplicateOutbound: DuplicateOutboundFinding[];
+    firstSeenTools: string[];
+    denialSpikes: DenialSpikeFinding[];
+    installEvents: InstallEventFinding[];
+    integrityViolations: IntegrityViolationFinding;
+  };
+  degraded: boolean;
+}
+
+export interface AnomaliesQuery {
+  since?: string;
+  until?: string;
+  tz?: "local" | "utc";
+  dupWindowSec?: number;
+  lookbackDays?: number;
+  denialWindowSec?: number;
+  denialThreshold?: number;
+}
+
+export function getAnomalies(q: AnomaliesQuery = {}): Promise<AnomalyView> {
+  const params = new URLSearchParams();
+  if (q.since) params.set("since", q.since);
+  if (q.until) params.set("until", q.until);
+  if (q.tz) params.set("tz", q.tz);
+  if (q.dupWindowSec !== undefined) params.set("dupWindowSec", String(q.dupWindowSec));
+  if (q.lookbackDays !== undefined) params.set("lookbackDays", String(q.lookbackDays));
+  if (q.denialWindowSec !== undefined) params.set("denialWindowSec", String(q.denialWindowSec));
+  if (q.denialThreshold !== undefined) params.set("denialThreshold", String(q.denialThreshold));
+  const qs = params.toString();
+  return fetchJson<AnomalyView>(`anomalies${qs ? "?" + qs : ""}`);
+}
+
 // ── Per-session rollup ────────────────────────────────────────────────────
 
 export interface SessionTimelineEntry {

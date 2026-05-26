@@ -25,6 +25,8 @@ import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "../services/de-anchor.js"
 import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "../services/retention.js";
 import { collectInventory } from "../services/inventory.js";
 import { buildSessionProjection } from "../reports/session-projection.js";
+import { buildAnomalyView } from "../reports/anomalies-view.js";
+import { parseSince } from "../reports/time-window.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -736,6 +738,60 @@ async function handleApi(
   ? projection
   : { ...projection, timeline: projection.timeline.map(({ metadata: _omit, ...rest }) => rest) };
   sendJson(res, 200, { ...body, degraded: ctx.store.isDegraded() });
+  return true;
+  }
+
+  // GET /api/anomalies?since=&until=&tz=&dupWindowSec=&lookbackDays=&denialWindowSec=&denialThreshold=
+  if (apiPath === "anomalies" && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit anomalies is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const tzParam = url.searchParams.get("tz");
+  if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
+  sendError(res, 400, "tz must be 'local' or 'utc'");
+  return true;
+  }
+  const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
+  let window;
+  try {
+  window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
+  } catch (err) {
+  sendError(res, 400, err instanceof Error ? err.message : "invalid window");
+  return true;
+  }
+  const dupWindow = parseOptPositiveInt(url.searchParams.get("dupWindowSec"), 86_400);
+  const lookback = parseOptPositiveInt(url.searchParams.get("lookbackDays"), 365);
+  const denialWindow = parseOptPositiveInt(url.searchParams.get("denialWindowSec"), 86_400);
+  const denialThreshold = parseOptPositiveInt(url.searchParams.get("denialThreshold"), 1_000_000);
+  if (
+  dupWindow === "invalid"
+  || lookback === "invalid"
+  || denialWindow === "invalid"
+  || denialThreshold === "invalid"
+  ) {
+  sendError(res, 400, "detector knobs must be positive integers within their range");
+  return true;
+  }
+  // SMT cursor matters for the integrity-violation detector — load it
+  // best-effort, same as cliAnomaliesHandler.
+  try {
+  await ctx.smtService.ensureReady();
+  } catch {
+  // continue with whatever SMT state is in memory
+  }
+  const view = buildAnomalyView(ctx.store, ctx.smtService, window, {
+  dupWindowSec: dupWindow,
+  lookbackDays: lookback,
+  denialWindowSec: denialWindow,
+  denialThreshold: denialThreshold,
+  });
+  sendJson(res, 200, { ...view, degraded: ctx.store.isDegraded() });
   return true;
   }
 
