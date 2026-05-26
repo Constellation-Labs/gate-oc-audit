@@ -20,6 +20,10 @@ import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from
 import { buildProjection } from "../reports/projection.js";
 import { formatProjectionHtml } from "../reports/format-html.js";
 import { buildCronRollup, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAST, MAX_LAST as CRON_MAX_LAST } from "../reports/cron-rollup.js";
+import { buildStatusSnapshot } from "../reports/status-snapshot.js";
+import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "../services/de-anchor.js";
+import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "../services/retention.js";
+import { collectInventory } from "../services/inventory.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -64,6 +68,20 @@ interface AuditUiContext {
    * from the HTTP response.
    */
   openclawDir?: string;
+  /**
+   * Runtime metadata + config snapshot required by /api/status. Carrying
+   * the same triple here that `cliStatusHandler` receives means the HTTP
+   * route is a pure mirror of the CLI handler — no duplicated config
+   * lookup logic. When undefined the /api/status route returns 503.
+   */
+  statusContext?: StatusContext;
+}
+
+export interface StatusContext {
+  pluginName: string;
+  pluginVersion: string;
+  /** Plugin config as passed by openclaw; read by reference (no copy). */
+  config: Record<string, unknown>;
 }
 
 /**
@@ -664,7 +682,80 @@ async function handleApi(
     return true;
   }
 
+  // GET /api/status
+  if (apiPath === "status" && req.method === "GET") {
+    // Same loopback gate as /api/report. The snapshot surfaces aggregate
+    // anchor / retention / inventory metadata, including a recent
+    // security-scan summary — same blast radius as a digest slice.
+    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+      sendError(
+        res,
+        403,
+        "audit status is disabled when the gateway binds beyond loopback. " +
+          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+      );
+      return true;
+    }
+    if (!ctx.statusContext) {
+      sendError(res, 503, "audit status is not configured on this plugin instance");
+      return true;
+    }
+    const snapshot = buildStatusFromContext(ctx);
+    sendJson(res, 200, { ...snapshot, degraded: ctx.store.isDegraded() });
+    return true;
+  }
+
   return false;
+}
+
+/**
+ * HTTP-side equivalent of `cliStatusHandler` (src/cli.ts). The CLI handler
+ * walks the same inputs and calls `buildStatusSnapshot`; mirroring it here
+ * keeps the projection identical to `openclaw audit status --json` so a
+ * dashboard pinned against the published schema sees the same payload from
+ * either source.
+ */
+function buildStatusFromContext(ctx: AuditUiContext): ReturnType<typeof buildStatusSnapshot> {
+  const { store, smtService, statusContext } = ctx;
+  if (!statusContext) {
+    // Caller has already guarded; keep the check for type narrowing.
+    throw new Error("statusContext required");
+  }
+  const { pluginName, pluginVersion, config } = statusContext;
+  const anchorHealth = readHealth<AnchorHealth>(store, ANCHOR_HEALTH_NAME);
+  const persistedRetention = readHealth<RetentionHealth>(store, RETENTION_HEALTH_NAME);
+  const retentionHealth: RetentionHealth = persistedRetention ?? {
+    nextPruneAt: undefined,
+    retentionDays: typeof config.localRetentionDays === "number" ? config.localRetentionDays : DEFAULT_RETENTION_DAYS,
+    maxSizeMb: typeof config.localMaxSizeMb === "number" ? config.localMaxSizeMb : DEFAULT_MAX_SIZE_MB,
+  };
+  const inventoryReport = collectInventory(store, "summary", {
+    openclawDir: ctx.openclawDir ?? "",
+    projectRoot: process.cwd(),
+  });
+  const filePatterns = {
+    watched: Array.isArray(config.fileWatchPatterns) ? (config.fileWatchPatterns as unknown[]).length : 0,
+    ignored: Array.isArray(config.fileWatchIgnorePatterns) ? (config.fileWatchIgnorePatterns as unknown[]).length : 0,
+  };
+  return buildStatusSnapshot({
+    pluginName,
+    pluginVersion,
+    machineId: smtService.getMachineId(),
+    now: new Date(),
+    store,
+    smtService,
+    anchorHealth,
+    retentionHealth,
+    filePatterns,
+    inventorySummary: inventoryReport.summary,
+    allowConversationAccess: config.allowConversationAccess === true,
+  });
+}
+
+function readHealth<T>(store: AuditStore, name: string): T | undefined {
+  const row = store.getServiceHealth(name);
+  if (!row) return undefined;
+  return row.payload as T;
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {
@@ -711,6 +802,12 @@ export interface AuditUiOptions {
   allowVerifyOnNonLoopback?: boolean;
   /** Openclaw root used to populate `cron.configured` in /api/report. */
   openclawDir?: string;
+  /**
+   * Runtime metadata + config snapshot used by /api/status. Mirror of the
+   * inputs passed to `cliStatusHandler` (src/cli.ts). Omit to disable the
+   * status endpoint .
+   */
+  statusContext?: StatusContext;
 }
 
 export function registerAuditUiRoutes(
@@ -732,6 +829,7 @@ export function registerAuditUiRoutes(
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
     openclawDir: opts.openclawDir,
+    statusContext: opts.statusContext,
   };
 
   api.registerHttpRoute({

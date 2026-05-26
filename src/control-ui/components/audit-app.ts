@@ -3,13 +3,14 @@ import { customElement, state } from "lit/decorators.js";
 import "./event-table.ts";
 import "./trees-overview.ts";
 import "./verify-panel.ts";
+import "./status-dashboard.ts";
 
-type Route = "events" | "trees" | "verify";
+type Route = "status" | "events" | "trees" | "verify";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-  if (hash === "trees" || hash === "verify") return hash;
-  return "events";
+  if (hash === "events" || hash === "trees" || hash === "verify" || hash === "status") return hash;
+  return "status";
 }
 
 @customElement("audit-app")
@@ -87,17 +88,20 @@ export class AuditApp extends LitElement {
       <header>
         <h1>Audit Trail</h1>
         <nav>
+          <a href="#/status" class=${this.route === "status" ? "active" : ""}>Status</a>
           <a href="#/events" class=${this.route === "events" ? "active" : ""}>Events</a>
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
         </nav>
       </header>
       <main>
-        ${this.route === "events"
-          ? html`<event-table></event-table>`
-          : this.route === "trees"
-            ? html`<trees-overview></trees-overview>`
-            : html`<verify-panel></verify-panel>`}
+        ${this.route === "status"
+          ? html`<status-dashboard></status-dashboard>`
+          : this.route === "events"
+            ? html`<event-table></event-table>`
+            : this.route === "trees"
+              ? html`<trees-overview></trees-overview>`
+              : html`<verify-panel></verify-panel>`}
       </main>
     `;
   }

@@ -168,3 +168,87 @@ export function verifyRange(from: string, to: string): Promise<VerifyResult> {
     body: JSON.stringify({ from, to }),
   });
 }
+
+// ── Status snapshot ────────────────────────────────────────────────────────
+// Wire-compatible mirror of `StatusSnapshot` (src/reports/status-snapshot.ts).
+// Re-declared here so the SPA bundle has no node-side dependency.
+
+export interface StatusHeader {
+  pluginName: string;
+  pluginVersion: string;
+  machineId: string;
+  generatedAt: string;
+}
+
+export interface StorageSection {
+  dbSizeMb: number;
+  maxSizeMb: number;
+  eventCount: number;
+  oldestEventAt: string | null;
+  oldestEventAgeDays: number | null;
+  retentionDays: number;
+  nextPruneAt: string | null;
+}
+
+export interface IntegritySection {
+  sequenceAtHead: number;
+  smtTreeCount: number;
+  smtTreeKeys: readonly string[];
+  smtRoot: string | null;
+  smtEntryCount: number;
+  smtNodeCount: number;
+  lastInsertedSequence: number;
+  lastCheckpoint: {
+    id: string;
+    sequenceEnd: number;
+    createdAt: string;
+  } | null;
+  pendingSinceLastCheckpoint: number;
+  conversationAccess: "enabled" | "enabled-but-silent" | "disabled";
+}
+
+export interface AnchorSection {
+  isActive: boolean;
+  circuitOpen: boolean;
+  consecutiveFailures: number;
+  anchoredToday: number;
+  lastAnchorAt: string | null;
+  lastTxHash: string | null;
+  pendingSinceLastCheckpoint: number;
+}
+
+export interface FileWatchSection {
+  patternsWatched: number;
+  patternsIgnored: number;
+  recentChanges24h: number;
+}
+
+export interface InventorySection {
+  plugins: number;
+  skills: number;
+  tools: number;
+  crons: number;
+}
+
+export interface SecurityScanSection {
+  lastScanAt: string | null;
+  highFindings: number;
+  mediumFindings: number;
+}
+
+export interface StatusSnapshot {
+  schemaVersion: number;
+  header: StatusHeader;
+  storage: StorageSection;
+  integrity: IntegritySection;
+  anchor: AnchorSection;
+  fileWatch: FileWatchSection;
+  inventory: InventorySection;
+  securityScan: SecurityScanSection;
+  /** Sticky flag echoed by every audit endpoint that touches the store. */
+  degraded: boolean;
+}
+
+export function getStatus(): Promise<StatusSnapshot> {
+  return fetchJson<StatusSnapshot>("status");
+}

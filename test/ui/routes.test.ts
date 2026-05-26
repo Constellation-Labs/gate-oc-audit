@@ -50,6 +50,9 @@ async function createUiRig(opts: {
   isNonLoopback?: () => boolean;
   allowExportOnNonLoopback?: boolean;
   allowVerifyOnNonLoopback?: boolean;
+  openclawDir?: string;
+  withStatusContext?: boolean;
+  statusConfig?: Record<string, unknown>;
 } = {}): Promise<UiRig> {
   const dir = mkdtempSync(join(tmpdir(), "audit-ui-test-"));
   const dbPath = join(dir, "audit.db");
@@ -70,6 +73,14 @@ async function createUiRig(opts: {
     isNonLoopback: opts.isNonLoopback,
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback,
+    openclawDir: opts.openclawDir,
+    statusContext: opts.withStatusContext
+      ? {
+          pluginName: "@constellation-network/openclaw-audit-plugin",
+          pluginVersion: "0.0.0-test",
+          config: opts.statusConfig ?? {},
+        }
+      : undefined,
   });
 
   // Longest path wins so /plugins/audit/api/ matches before /plugins/audit/.
@@ -1181,6 +1192,106 @@ describe("ui: /api/report/cron/<job-id> endpoint", () => {
       assert.equal(res.status, 200);
     } finally {
       await local.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/status — mirror of `audit status --json` for the SPA dashboard
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/status endpoint", () => {
+  it("returns a snapshot when statusContext is configured", async () => {
+    const rig = await createUiRig({
+      withStatusContext: true,
+      statusConfig: {
+        localRetentionDays: 60,
+        localMaxSizeMb: 200,
+        fileWatchPatterns: ["src/**/*.ts", "config/*.json"],
+        fileWatchIgnorePatterns: ["**/*.test.ts"],
+      },
+    });
+    try {
+      rig.appendTracked(sampleInsert());
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.header.pluginName, "@constellation-network/openclaw-audit-plugin");
+      assert.equal(body.header.pluginVersion, "0.0.0-test");
+      assert.equal(typeof body.header.machineId, "string");
+      assert.equal(typeof body.header.generatedAt, "string");
+      assert.equal(typeof body.storage.eventCount, "number");
+      assert.equal(body.storage.retentionDays, 60);
+      assert.equal(body.storage.maxSizeMb, 200);
+      assert.equal(body.fileWatch.patternsWatched, 2);
+      assert.equal(body.fileWatch.patternsIgnored, 1);
+      assert.equal(body.integrity.conversationAccess, "disabled");
+      assert.equal(body.degraded, false);
+      assert.equal(body.schemaVersion, 2);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("returns 503 when statusContext is not configured on this plugin instance", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 503);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /not configured/);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks status when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({
+      isNonLoopback: () => true,
+      allowExportOnNonLoopback: false,
+      withStatusContext: true,
+    });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 403);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /allowExportOnNonLoopback/);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows status on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({
+      isNonLoopback: () => true,
+      allowExportOnNonLoopback: true,
+      withStatusContext: true,
+    });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("reports conversationAccess=\"enabled\" when allowConversationAccess and a recent prompt.input exist", async () => {
+    const rig = await createUiRig({
+      withStatusContext: true,
+      statusConfig: { allowConversationAccess: true },
+    });
+    try {
+      rig.appendTracked(sampleInsert({
+        eventType: "prompt.input" as any,
+        category: "prompt" as any,
+        description: "user prompt",
+      }));
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { integrity: { conversationAccess: string } };
+      assert.equal(body.integrity.conversationAccess, "enabled");
+    } finally {
+      await rig.destroy();
     }
   });
 });

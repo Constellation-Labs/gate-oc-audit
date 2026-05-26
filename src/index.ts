@@ -675,6 +675,11 @@ export default (() => {
                 allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
                 allowVerifyOnNonLoopback: config.allowVerifyOnNonLoopback === true,
                 openclawDir: resolveOpenclawDir(config),
+            statusContext: {
+                pluginName: PLUGIN_NAME,
+                pluginVersion: PLUGIN_VERSION,
+                config,
+            },
             });
 
             api.registerService({
