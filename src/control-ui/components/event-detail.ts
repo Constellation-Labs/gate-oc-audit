@@ -219,7 +219,9 @@ export class EventDetail extends LitElement {
       <div class="row"><span class="k">created at</span><span class="v">${ev.createdAt}</span></div>
       <div class="row"><span class="k">source</span><span class="v">${ev.source}</span></div>
       <div class="row"><span class="k">category</span><span class="v">${ev.category}</span></div>
-      <div class="row"><span class="k">session</span><span class="v">${ev.sessionId ?? "—"}</span></div>
+      <div class="row"><span class="k">session</span><span class="v">${ev.sessionId
+  ? html`<a href="#/reports/session/${encodeURIComponent(ev.sessionId)}" title="View session rollup">${ev.sessionId}</a>`
+  : "—"}</span></div>
       <div class="row"><span class="k">description</span><span class="v">${ev.description}</span></div>
 
       <h3>Integrity</h3>

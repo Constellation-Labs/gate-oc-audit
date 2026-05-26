@@ -1295,3 +1295,106 @@ describe("ui: /api/status endpoint", () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/report/session/:id — mirror of `audit report session --json` for the
+// SPA per-conversation drilldown.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/report/session/:id endpoint", () => {
+  it("returns a projection for an existing session", async () => {
+    const rig = await createUiRig();
+    try {
+      const sessionId = "sess-rollup-1";
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "session.start" as any,
+        category: "agent" as any,
+        description: "session start",
+      }));
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "tool.invoked" as any,
+        category: "tool" as any,
+        description: "tool fired",
+        metadata: { toolName: "Bash" },
+      }));
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.sessionId, sessionId);
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.timeline.length >= 1, true);
+      assert.equal(body.integrity.eventCount >= 2, true);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("strips metadata from timeline entries by default", async () => {
+    const rig = await createUiRig();
+    try {
+      const sessionId = "sess-meta-strip";
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "tool.invoked" as any,
+        category: "tool" as any,
+        description: "tool fired",
+        metadata: { toolName: "Bash", command: "secret-command" },
+      }));
+      const stripped = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}`);
+      const strippedBody = (await stripped.json()) as { timeline: Array<Record<string, unknown>> };
+      assert.equal("metadata" in (strippedBody.timeline[0] ?? {}), false);
+
+      const full = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}?includeMetadata=true`);
+      const fullBody = (await full.json()) as { timeline: Array<{ metadata?: Record<string, unknown> }> };
+      assert.equal(fullBody.timeline[0]?.metadata?.command, "secret-command");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("returns an empty timeline for an unknown session id", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/no-such-session`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { timeline: unknown[]; integrity: { eventCount: number } };
+      assert.equal(body.timeline.length, 0);
+      assert.equal(body.integrity.eventCount, 0);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects a non-positive limit with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x?limit=0`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks the rollup when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows the rollup on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});

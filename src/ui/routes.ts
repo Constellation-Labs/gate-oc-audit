@@ -24,6 +24,7 @@ import { buildStatusSnapshot } from "../reports/status-snapshot.js";
 import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "../services/de-anchor.js";
 import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "../services/retention.js";
 import { collectInventory } from "../services/inventory.js";
+import { buildSessionProjection } from "../reports/session-projection.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -680,6 +681,62 @@ async function handleApi(
     }
     sendJson(res, 200, rollup);
     return true;
+  }
+
+  // GET /api/report/session/:id?raw=&limit=&includeMetadata=
+  if (apiPath.startsWith("report/session/") && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit report is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const sessionId = decodeURIComponent(apiPath.slice("report/session/".length));
+  if (!sessionId) {
+  sendError(res, 400, "missing session id");
+  return true;
+  }
+  if (sessionId.length > MAX_QUERY_PARAM_LEN) {
+  sendError(res, 400, `session id exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+  return true;
+  }
+  const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), 50_000);
+  if (limitParam === "invalid") {
+  sendError(res, 400, "limit must be a positive integer in 1..50000");
+  return true;
+  }
+  const raw = url.searchParams.get("raw") === "true";
+  const includeMetadata = url.searchParams.get("includeMetadata") === "true";
+  // SmtService is best-effort: when the cursor isn't loaded yet we still
+  // return a projection (no proof verification) rather than failing the
+  // whole request, matching cliReportSessionHandler.
+  let smtForProjection;
+  let knownRoots: Set<string> | undefined;
+  try {
+  await ctx.smtService.ensureReady();
+  knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
+  smtForProjection = ctx.smtService;
+  } catch {
+  smtForProjection = undefined;
+  }
+  const projection = buildSessionProjection(ctx.store, sessionId, {
+  raw,
+  limit: limitParam,
+  smtService: smtForProjection,
+  knownRoots,
+  });
+  // Match the CLI's --include-metadata gate: tool args live in
+  // event.metadata which the human formatter never prints; drop them by
+  // default so a fetch from a non-interactive caller doesn't leak more
+  // than the text view would.
+  const body = includeMetadata
+  ? projection
+  : { ...projection, timeline: projection.timeline.map(({ metadata: _omit, ...rest }) => rest) };
+  sendJson(res, 200, { ...body, degraded: ctx.store.isDegraded() });
+  return true;
   }
 
   // GET /api/status

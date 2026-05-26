@@ -6,6 +6,7 @@ import "./verify-panel.ts";
 import "./status-dashboard.ts";
 import "./report-projection.ts";
 import "./report-cron.ts";
+import "./session-view.ts";
 
 type Route =
   | "status"
@@ -14,10 +15,13 @@ type Route =
   | "verify"
   | "reports/daily"
   | "reports/weekly"
-  | "reports/cron";
+  | "reports/cron"
+  | "reports/session";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
+  // session route includes an id parameter after the slash
+  if (hash.startsWith("reports/session/")) return "reports/session";
   if (
     hash === "events"
     || hash === "trees"
@@ -127,7 +131,9 @@ export class AuditApp extends LitElement {
                 ? html`<report-projection kind="weekly"></report-projection>`
                 : this.route === "reports/cron"
                   ? html`<report-cron></report-cron>`
-                  : this.route === "trees"
+                  : this.route === "reports/session"
+                    ? html`<session-view></session-view>`
+                    : this.route === "trees"
                   ? html`<trees-overview></trees-overview>`
                   : html`<verify-panel></verify-panel>`}
       </main>

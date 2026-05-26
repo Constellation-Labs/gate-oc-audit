@@ -406,6 +406,110 @@ export interface CronRollup {
   manifest: ConfiguredCron | null;
 }
 
+// ── Per-session rollup ────────────────────────────────────────────────────
+
+export interface SessionTimelineEntry {
+  sequence: number;
+  id: string;
+  createdAt: string;
+  eventType: string;
+  category: string;
+  description: string;
+  contentHash: string;
+  contentPreview?: string;
+  metadata?: Record<string, unknown>;
+  collapsedCount?: number;
+  collapsedSequences?: number[];
+}
+
+export interface SessionToolUsage {
+  toolName: string;
+  calls: number;
+  errors: number;
+  totalDurationMs: number;
+}
+
+export interface SessionLlmModelUsage {
+  provider: string | null;
+  model: string;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+export interface SessionLlmCost {
+  totalCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalCostUsd: number;
+  byModel: SessionLlmModelUsage[];
+}
+
+export interface SessionOutboundSend {
+  sequence: number;
+  id: string;
+  createdAt: string;
+  channel: string;
+  recipient: string;
+  contentHash: string;
+  contentLength: number | null;
+  success: boolean | null;
+}
+
+export interface SessionOutboundMessage {
+  contentHash: string;
+  bodyPreview?: string;
+  sends: SessionOutboundSend[];
+}
+
+export interface SessionIntegrity {
+  eventCount: number;
+  firstSequence: number | null;
+  lastSequence: number | null;
+  proofsVerified: number;
+  proofsFailed: number;
+  proofsUnavailable: number;
+  smtRoot: string | null;
+}
+
+export interface SessionProjection {
+  schemaVersion: number;
+  generatedAt: string;
+  sessionId: string;
+  jobId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationMs: number | null;
+  raw: boolean;
+  timeline: SessionTimelineEntry[];
+  toolsUsed: SessionToolUsage[];
+  llmCost: SessionLlmCost;
+  outboundMessages: SessionOutboundMessage[];
+  integrity: SessionIntegrity;
+  truncated: boolean;
+  degraded: boolean;
+}
+
+export interface SessionQuery {
+  raw?: boolean;
+  limit?: number;
+  includeMetadata?: boolean;
+}
+
+export function getSessionRollup(sessionId: string, q: SessionQuery = {}): Promise<SessionProjection> {
+  const params = new URLSearchParams();
+  if (q.raw) params.set("raw", "true");
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.includeMetadata) params.set("includeMetadata", "true");
+  const qs = params.toString();
+  return fetchJson<SessionProjection>(`report/session/${encodeURIComponent(sessionId)}${qs ? "?" + qs : ""}`);
+}
+
 export function getCronRollup(jobId: string, last?: number): Promise<CronRollup> {
   const params = new URLSearchParams();
   params.set("format", "json");
