@@ -23,7 +23,7 @@ import { buildCronRollup, formatCronRollupHtml, DEFAULT_LAST as CRON_DEFAULT_LAS
 import { buildStatusSnapshot } from "../reports/status-snapshot.js";
 import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "../services/de-anchor.js";
 import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "../services/retention.js";
-import { collectInventory } from "../services/inventory.js";
+import { collectInventory, INVENTORY_KINDS, type InventoryKind } from "../services/inventory.js";
 import { buildSessionProjection } from "../reports/session-projection.js";
 import { buildAnomalyView } from "../reports/anomalies-view.js";
 import { parseSince } from "../reports/time-window.js";
@@ -834,6 +834,33 @@ async function handleApi(
   const limit = limitParam ?? DEFAULT_SPEND_LIMIT;
   const rollup = buildSpendRollup(ctx.store, window, groupBy, { limit });
   sendJson(res, 200, { ...rollup, degraded: ctx.store.isDegraded() });
+  return true;
+  }
+
+  // GET /api/inventory?kind=summary|plugins|skills|tools|crons|soul
+  if (apiPath === "inventory" && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit inventory is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const kindParam = url.searchParams.get("kind") ?? "summary";
+  if (kindParam !== "summary" && !(INVENTORY_KINDS as ReadonlyArray<string>).includes(kindParam)) {
+  sendError(res, 400, `kind must be summary|${INVENTORY_KINDS.join("|")}`);
+  return true;
+  }
+  const kind = kindParam as InventoryKind | "summary";
+  const report = collectInventory(ctx.store, kind, {
+  // Mirrors the CLI: when no openclawDir is configured the inventory
+  // reads from the empty string and skips filesystem-side discovery.
+  openclawDir: ctx.openclawDir ?? "",
+  projectRoot: process.cwd(),
+  });
+  sendJson(res, 200, { ...report, degraded: ctx.store.isDegraded() });
   return true;
   }
 

@@ -1549,3 +1549,70 @@ describe("ui: /api/spend endpoint", () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/inventory — mirror of `audit inventory --json` for the SPA browser.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/inventory endpoint", () => {
+  it("returns a summary report by default", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(typeof body.summary, "object");
+      assert.equal(typeof body.summary.plugins, "number");
+      assert.equal(typeof body.summary.skills, "number");
+      assert.equal(typeof body.summary.tools, "number");
+      assert.equal(typeof body.summary.crons, "number");
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an unknown kind with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory?kind=bogus`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("accepts each known kind", async () => {
+    const rig = await createUiRig();
+    try {
+      for (const kind of ["plugins", "skills", "tools", "soul", "crons"]) {
+        const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory?kind=${kind}`);
+        assert.equal(res.status, 200, `kind=${kind}`);
+        const body = (await res.json()) as Record<string, any>;
+        assert.equal(Array.isArray(body[kind]), true, `${kind} should be an array`);
+      }
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks inventory when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows inventory on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});

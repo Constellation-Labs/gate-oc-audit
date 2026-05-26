@@ -406,6 +406,46 @@ export interface CronRollup {
   manifest: ConfiguredCron | null;
 }
 
+// ── Inventory ─────────────────────────────────────────────────────────────
+
+export type InventoryKind = "plugins" | "skills" | "tools" | "soul" | "crons";
+export const INVENTORY_KINDS: readonly InventoryKind[] = ["plugins", "skills", "tools", "soul", "crons"];
+
+export interface InventoryItem {
+  id: string;
+  kind: InventoryKind;
+  name: string;
+  version?: string;
+  path: string;
+  source: string;
+  contentHash?: string;
+  capturedAt?: string;
+  filesystemMtime?: string;
+  capturedInManifests: boolean;
+}
+
+export interface InventorySummary {
+  plugins: number;
+  skills: number;
+  tools: number;
+  soul: number;
+  crons: number;
+}
+
+export interface InventoryReport {
+  summary: InventorySummary;
+  plugins?: InventoryItem[];
+  skills?: InventoryItem[];
+  tools?: InventoryItem[];
+  soul?: InventoryItem[];
+  crons?: InventoryItem[];
+  degraded: boolean;
+}
+
+export function getInventory(kind: InventoryKind | "summary" = "summary"): Promise<InventoryReport> {
+  return fetchJson<InventoryReport>(`inventory?kind=${kind}`);
+}
+
 // ── Spend rollup ──────────────────────────────────────────────────────────
 
 export type SpendGroupBy = "provider" | "model" | "day" | "session";

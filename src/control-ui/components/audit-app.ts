@@ -9,6 +9,7 @@ import "./report-cron.ts";
 import "./session-view.ts";
 import "./anomalies-view.ts";
 import "./spend-view.ts";
+import "./inventory-view.ts";
 
 type Route =
   | "status"
@@ -20,7 +21,8 @@ type Route =
   | "reports/cron"
   | "reports/session"
   | "anomalies"
-  | "spend";
+  | "spend"
+  | "inventory";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
@@ -35,6 +37,7 @@ function parseRoute(): Route {
     || hash === "reports/cron"
     || hash === "anomalies"
     || hash === "spend"
+    || hash === "inventory"
   ) {
     return hash;
   }
@@ -123,6 +126,7 @@ export class AuditApp extends LitElement {
           <a href="#/reports/cron" class=${this.route === "reports/cron" ? "active" : ""}>Cron</a>
           <a href="#/anomalies" class=${this.route === "anomalies" ? "active" : ""}>Anomalies</a>
           <a href="#/spend" class=${this.route === "spend" ? "active" : ""}>Spend</a>
+          <a href="#/inventory" class=${this.route === "inventory" ? "active" : ""}>Inventory</a>
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
         </nav>
@@ -144,9 +148,11 @@ export class AuditApp extends LitElement {
                       ? html`<anomalies-view></anomalies-view>`
                       : this.route === "spend"
                         ? html`<spend-view></spend-view>`
+                        : this.route === "inventory"
+                          ? html`<inventory-view></inventory-view>`
                           : this.route === "trees"
-                          ? html`<trees-overview></trees-overview>`
-                          : html`<verify-panel></verify-panel>`}
+                            ? html`<trees-overview></trees-overview>`
+                            : html`<verify-panel></verify-panel>`}
       </main>
     `;
   }
