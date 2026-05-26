@@ -50,6 +50,7 @@ async function createUiRig(opts: {
   isNonLoopback?: () => boolean;
   allowExportOnNonLoopback?: boolean;
   allowVerifyOnNonLoopback?: boolean;
+  requireGatewayAuth?: boolean;
   openclawDir?: string;
   withStatusContext?: boolean;
   statusConfig?: Record<string, unknown>;
@@ -73,6 +74,7 @@ async function createUiRig(opts: {
     isNonLoopback: opts.isNonLoopback,
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback,
+    requireGatewayAuth: opts.requireGatewayAuth,
     openclawDir: opts.openclawDir,
     statusContext: opts.withStatusContext
       ? {
@@ -934,6 +936,17 @@ describe("ui: export endpoint", () => {
     }
   });
 
+  it("requireGatewayAuth subsumes the loopback gate — export serves off-loopback with no export opt-in", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, requireGatewayAuth: true });
+    try {
+      local.appendTracked(sampleInsert({ description: "behind gateway auth" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+
   it("400s on non-ISO from/to (Date.parse-tolerated strings rejected)", async () => {
     // `2020-1-1` (no zero-padding, no time, no TZ) is happily accepted by
     // Date.parse but doesn't match the stored ISO timestamps lexicographically.
@@ -1735,5 +1748,36 @@ describe("ui: /api/smt power tools", () => {
     } finally {
       await rig.destroy();
     }
+  });
+});
+
+describe("ui: gateway-auth registration mode", () => {
+  function registeredAuth(opts: { requireGatewayAuth?: boolean }): string[] {
+    const dir = mkdtempSync(join(tmpdir(), "audit-ui-auth-"));
+    const dbPath = join(dir, "audit.db");
+    const store = new AuditStore(dbPath);
+    const smt = new SmtService({ dbPath, smt: { checkpointDir: join(dir, "smt"), checkpointIntervalMs: 0 } });
+    const verifier = new Verifier(store, smt);
+    const routes: RouteEntry[] = [];
+    const api = { registerHttpRoute: (r: RouteEntry) => { routes.push(r); } };
+    try {
+      registerAuditUiRoutes(api as never, store, smt, verifier, opts);
+      return routes.map((r) => r.auth);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("defaults to auth: \"plugin\" for every route", () => {
+    const auths = registeredAuth({});
+    assert.ok(auths.length >= 2);
+    assert.ok(auths.every((a) => a === "plugin"), `expected all "plugin", got ${auths.join(",")}`);
+  });
+
+  it("registers auth: \"gateway\" for every route when requireGatewayAuth is set", () => {
+    const auths = registeredAuth({ requireGatewayAuth: true });
+    assert.ok(auths.length >= 2);
+    assert.ok(auths.every((a) => a === "gateway"), `expected all "gateway", got ${auths.join(",")}`);
   });
 });

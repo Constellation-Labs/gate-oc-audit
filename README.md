@@ -24,6 +24,18 @@ If you don't know where to start, run `openclaw audit status` after install — 
 
 Every SPA route is backed by an HTTP endpoint under `/plugins/audit/api/`. The endpoints introduced alongside the SPA views (`/status`, `/anomalies`, `/spend`, `/inventory`, `/report/session/:id`, `/smt/proof`, `/smt/verify-proof`, `/smt/chain`) follow the same loopback policy as `/api/report` — `403` outside loopback unless `allowExportOnNonLoopback: true` is set. The wire JSON is byte-identical to the matching CLI `--json` output, so dashboards can pin against the same schemas.
 
+> **Reaching the UI from outside loopback.** By default the routes register with `auth: "plugin"` (no verification) and lean on the loopback bind for safety. To expose the UI/API on a shared network, set `requireGatewayAuth: true` so the routes register with `auth: "gateway"` and the openclaw gateway authenticates every request:
+>
+> ```bash
+> openclaw config set plugins.entries.openclaw-audit-plugin.config.requireGatewayAuth true
+> ```
+>
+> ```json
+> { "config": { "requireGatewayAuth": true } }
+> ```
+>
+> Because the gateway then authenticates every caller, `requireGatewayAuth` subsumes the loopback gate: status, reports, anomalies, spend, inventory, SMT tools, export, and verify all serve normally off-loopback, no further opt-in needed. This is the recommended single knob for external access. The `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback` flags exist for the narrower case of exposing those routes off-loopback *without* gateway auth (e.g. behind your own reverse proxy) — leave them off when `requireGatewayAuth` is set.
+
 ## Installation
 
 ```bash

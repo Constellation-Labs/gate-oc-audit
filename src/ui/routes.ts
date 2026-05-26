@@ -1,8 +1,13 @@
-// TODO(audit-ui-auth): all routes here are currently registered with
-// auth: "plugin" and perform no verification. The plugin relies on the
-// gateway being bound to loopback (the openclaw default) for safety. Before
-// shipping to networks that don't, switch to auth: "gateway" or implement
-// a shared-secret / device-pairing check here.
+// Auth posture: routes default to auth: "plugin" (pass-through, no
+// verification), relying on the gateway being bound to loopback (the openclaw
+// default) for safety. The loopback gate (see `gateBlocked`) then 403s the
+// sensitive/expensive routes off-loopback unless an opt-in is set. Setting the
+// `requireGatewayAuth` option registers the routes with auth: "gateway",
+// delegating request authentication to the openclaw gateway so the UI/API can
+// be reached from outside loopback — and since the gateway then authenticates
+// every caller, it subsumes the loopback gate (gateBlocked stops firing). A
+// shared-secret / device-pairing check remains a possible future alternative
+// if gateway auth is unavailable.
 
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -50,8 +55,18 @@ interface AuditUiContext {
   /**
    * Predicate evaluated at request time so the gate reflects the live
    * gateway bind setting, not the value at plugin-registration time.
+   * Reports the raw network fact (gateway bound beyond loopback); whether
+   * that should actually block a route is decided by `gateBlocked`, which
+   * also accounts for `requireGatewayAuth`.
    */
   isNonLoopback: () => boolean;
+  /**
+   * When true the routes are registered with `auth: "gateway"`, so the
+   * gateway authenticates every caller. That subsumes the loopback gate —
+   * whose only job is to keep anonymous off-box callers out — so the
+   * per-route gates treat an authenticated non-loopback bind as safe.
+   */
+  requireGatewayAuth: boolean;
   /**
    * Operator opt-in to keep /api/export enabled when the gateway binds
    * beyond loopback. Off by default — the export is the highest-blast-
@@ -178,6 +193,17 @@ function clamp(n: number, lo: number, hi: number): number {
 function parseUrl(req: IncomingMessage): URL | undefined {
   if (!req.url) return undefined;
   try { return new URL(req.url, "http://localhost"); } catch { return undefined; }
+}
+
+/**
+ * Decide whether a sensitive/expensive route must be blocked. The gate only
+ * fires when the route is reachable by *unauthenticated off-box* callers: the
+ * gateway is bound beyond loopback AND gateway auth isn't in front AND the
+ * per-route opt-in is off. With `requireGatewayAuth` the gateway authenticates
+ * every caller, so the gate's purpose is already served and we let it through.
+ */
+function gateBlocked(ctx: AuditUiContext, allowOptIn: boolean): boolean {
+  return ctx.isNonLoopback() && !ctx.requireGatewayAuth && !allowOptIn;
 }
 
 const MAX_JSON_BODY_BYTES = 64 * 1024;
@@ -450,7 +476,7 @@ async function handleApi(
 
   // POST /api/verify
   if (apiPath === "verify" && req.method === "POST") {
-    if (ctx.isNonLoopback() && !ctx.allowVerifyOnNonLoopback) {
+    if (gateBlocked(ctx, ctx.allowVerifyOnNonLoopback)) {
       sendError(
         res,
         403,
@@ -494,7 +520,7 @@ async function handleApi(
 
   // GET /api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=
   if (apiPath === "export" && req.method === "GET") {
-    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
       sendError(
         res,
         403,
@@ -574,7 +600,7 @@ async function handleApi(
     // also leak similar metadata without this gate, but those predate the
     // explicit non-loopback policy switch — new routes opt in to the gate
     // so the policy can be tightened by default in a later pass.
-    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
       sendError(
         res,
         403,
@@ -645,7 +671,7 @@ async function handleApi(
     // Same loopback gate as /api/report. The rollup surfaces aggregated
     // run-level metadata (jobId, runId, sessionId, error strings) — narrow
     // by intent but the same blast radius as a digest slice.
-    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
       sendError(
         res,
         403,
@@ -688,7 +714,7 @@ async function handleApi(
 
   // GET /api/report/session/:id?raw=&limit=&includeMetadata=
   if (apiPath.startsWith("report/session/") && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -744,7 +770,7 @@ async function handleApi(
 
   // GET /api/anomalies?since=&until=&tz=&dupWindowSec=&lookbackDays=&denialWindowSec=&denialThreshold=
   if (apiPath === "anomalies" && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -798,7 +824,7 @@ async function handleApi(
 
   // GET /api/smt/proof?hash=&tree=
   if (apiPath === "smt/proof" && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -829,7 +855,7 @@ async function handleApi(
 
   // POST /api/smt/verify-proof  { proof }
   if (apiPath === "smt/verify-proof" && req.method === "POST") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -859,7 +885,7 @@ async function handleApi(
 
   // GET /api/smt/chain?conversationId=&tree=
   if (apiPath === "smt/chain" && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -890,7 +916,7 @@ async function handleApi(
 
   // GET /api/spend?by=&since=&until=&tz=&limit=
   if (apiPath === "spend" && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -931,7 +957,7 @@ async function handleApi(
 
   // GET /api/inventory?kind=summary|plugins|skills|tools|crons|soul
   if (apiPath === "inventory" && req.method === "GET") {
-  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(
   res,
   403,
@@ -961,7 +987,7 @@ async function handleApi(
     // Same loopback gate as /api/report. The snapshot surfaces aggregate
     // anchor / retention / inventory metadata, including a recent
     // security-scan summary — same blast radius as a digest slice.
-    if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
       sendError(
         res,
         403,
@@ -1082,6 +1108,16 @@ export interface AuditUiOptions {
    * status endpoint .
    */
   statusContext?: StatusContext;
+  /**
+   * Register the routes with the gateway's auth layer (`auth: "gateway"`)
+   * instead of the pass-through `auth: "plugin"`. Off by default to preserve
+   * the loopback-only posture; turn it on to let the openclaw gateway
+   * authenticate requests so the UI/API can be reached from outside loopback.
+   * Because the gateway then authenticates every caller, it subsumes the
+   * loopback gate — `gateBlocked` stops firing, so the gated routes serve
+   * off-loopback without the `allow*OnNonLoopback` opt-ins.
+   */
+  requireGatewayAuth?: boolean;
 }
 
 export function registerAuditUiRoutes(
@@ -1093,6 +1129,7 @@ export function registerAuditUiRoutes(
 ): void {
   // Back-compat overload: the previous signature took deBaseUrl as a string.
   const opts: AuditUiOptions = typeof options === "string" ? { deBaseUrl: options } : options;
+  const auth = opts.requireGatewayAuth === true ? "gateway" : "plugin";
   const ctx: AuditUiContext = {
     store,
     smtService,
@@ -1100,6 +1137,7 @@ export function registerAuditUiRoutes(
     concurrency: { exports: 0, verifies: 0 },
     deBaseUrl: opts.deBaseUrl,
     isNonLoopback: opts.isNonLoopback ?? (() => false),
+    requireGatewayAuth: opts.requireGatewayAuth === true,
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback === true,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback === true,
     openclawDir: opts.openclawDir,
@@ -1108,7 +1146,7 @@ export function registerAuditUiRoutes(
 
   api.registerHttpRoute({
     path: API_BASE,
-    auth: "plugin",
+    auth,
     match: "prefix",
     handler: async (req, res) => {
       if (!isAllowedOrigin(req)) {
@@ -1142,7 +1180,7 @@ export function registerAuditUiRoutes(
 
   api.registerHttpRoute({
     path: UI_BASE,
-    auth: "plugin",
+    auth,
     match: "prefix",
     handler: async (req, res) => {
       const url = parseUrl(req);
