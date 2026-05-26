@@ -252,3 +252,140 @@ export interface StatusSnapshot {
 export function getStatus(): Promise<StatusSnapshot> {
   return fetchJson<StatusSnapshot>("status");
 }
+
+// ── Daily/weekly projection ───────────────────────────────────────────────
+// Wire-compatible mirror of `AuditProjection` (src/reports/projection.ts).
+
+export type ParsedCronSchedule =
+  | { kind: "at"; at: string }
+  | { kind: "every"; everyMs: number; anchorMs?: number }
+  | { kind: "cron"; expr: string; tz?: string; staggerMs?: number }
+  | { kind: "unknown"; raw: string };
+
+export interface ConfiguredCron {
+  name: string;
+  schedule: ParsedCronSchedule;
+}
+
+export interface ProjectionPeriod {
+  kind: "daily" | "weekly";
+  fromIso: string;
+  toIso: string;
+  label: string;
+  tz: "local" | "utc";
+}
+
+export interface ActivitySection {
+  totalEvents: number;
+  byCategory: Array<{ category: string; count: number }>;
+}
+
+export interface CronSection {
+  executed: number;
+  failed: number;
+  byEventType: Array<{ eventType: string; count: number }>;
+  configured: ConfiguredCron[];
+}
+
+export interface TopTool {
+  toolName: string;
+  invocations: number;
+}
+
+export interface LlmModelUsage {
+  model: string;
+  provider: string | null;
+  callCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+export interface LlmSpendSection {
+  totalCalls: number;
+  totalCostUsd: number;
+  byModel: LlmModelUsage[];
+}
+
+export interface OutboundChannel {
+  channel: string;
+  count: number;
+}
+
+export interface OutboundMessagingSection {
+  totalSent: number;
+  byChannel: OutboundChannel[];
+}
+
+export interface DuplicateOutboundFinding {
+  contentSha256: string;
+  channel: string;
+  recipient: string;
+  events: Array<{ id: string; sequence: number; createdAt: string; sessionId?: string }>;
+  deltaSeconds: number;
+}
+
+export interface AnomaliesSection {
+  duplicateOutbound: DuplicateOutboundFinding[];
+  duplicateOutboundTruncated: boolean;
+  firstSeenTools: string[];
+}
+
+export interface IntegrityCheckpointRef {
+  checkpointId: string;
+  deTxHash: string | null;
+  smtRoot: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  createdAt: string;
+}
+
+export interface IntegrityFooter {
+  lastSequence: number | null;
+  lastEventId: string | null;
+  lastEventCreatedAt: string | null;
+  lastEventContentHash: string | null;
+  lastCheckpoint: IntegrityCheckpointRef | null;
+}
+
+export interface AuditProjection {
+  schemaVersion: number;
+  generatedAt: string;
+  period: ProjectionPeriod;
+  detectorConfig: {
+    duplicateOutboundWindowSec: number;
+    firstSeenLookbackDays: number;
+  };
+  activity: ActivitySection;
+  cron: CronSection;
+  topTools: TopTool[];
+  llmSpend: LlmSpendSection;
+  outboundMessaging: OutboundMessagingSection;
+  anomalies: AnomaliesSection;
+  integrity: IntegrityFooter;
+}
+
+export interface ReportQuery {
+  period: "daily" | "weekly";
+  date?: string;
+  week?: string;
+  tz?: "local" | "utc";
+  dupWindowSec?: number;
+  lookbackDays?: number;
+  topTools?: number;
+}
+
+export function getReport(q: ReportQuery): Promise<AuditProjection> {
+  const params = new URLSearchParams();
+  params.set("period", q.period);
+  params.set("format", "json");
+  if (q.date) params.set("date", q.date);
+  if (q.week) params.set("week", q.week);
+  if (q.tz) params.set("tz", q.tz);
+  if (q.dupWindowSec !== undefined) params.set("dupWindowSec", String(q.dupWindowSec));
+  if (q.lookbackDays !== undefined) params.set("lookbackDays", String(q.lookbackDays));
+  if (q.topTools !== undefined) params.set("topTools", String(q.topTools));
+  return fetchJson<AuditProjection>(`report?${params.toString()}`);
+}
