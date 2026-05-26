@@ -377,6 +377,42 @@ export interface ReportQuery {
   topTools?: number;
 }
 
+// ── Per-cron rollup ───────────────────────────────────────────────────────
+
+export type CronRunStatus = "ok" | "failed" | "incomplete";
+
+export interface CronRollupRow {
+  jobId: string;
+  runId: string | null;
+  sessionId: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  status: CronRunStatus;
+  error: string | null;
+  events: {
+    toolInvocations: number;
+    llmCalls: number;
+    messagesSent: number;
+  };
+}
+
+export interface CronRollup {
+  schemaVersion: number;
+  generatedAt: string;
+  jobId: string;
+  truncated: boolean;
+  rows: CronRollupRow[];
+  manifest: ConfiguredCron | null;
+}
+
+export function getCronRollup(jobId: string, last?: number): Promise<CronRollup> {
+  const params = new URLSearchParams();
+  params.set("format", "json");
+  if (last !== undefined) params.set("last", String(last));
+  return fetchJson<CronRollup>(`report/cron/${encodeURIComponent(jobId)}?${params.toString()}`);
+}
+
 export function getReport(q: ReportQuery): Promise<AuditProjection> {
   const params = new URLSearchParams();
   params.set("period", q.period);

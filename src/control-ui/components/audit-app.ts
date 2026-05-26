@@ -5,6 +5,7 @@ import "./trees-overview.ts";
 import "./verify-panel.ts";
 import "./status-dashboard.ts";
 import "./report-projection.ts";
+import "./report-cron.ts";
 
 type Route =
   | "status"
@@ -12,7 +13,8 @@ type Route =
   | "trees"
   | "verify"
   | "reports/daily"
-  | "reports/weekly";
+  | "reports/weekly"
+  | "reports/cron";
 
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
@@ -23,6 +25,7 @@ function parseRoute(): Route {
     || hash === "status"
     || hash === "reports/daily"
     || hash === "reports/weekly"
+    || hash === "reports/cron"
   ) {
     return hash;
   }
@@ -108,6 +111,7 @@ export class AuditApp extends LitElement {
           <a href="#/events" class=${this.route === "events" ? "active" : ""}>Events</a>
           <a href="#/reports/daily" class=${this.route === "reports/daily" ? "active" : ""}>Daily</a>
           <a href="#/reports/weekly" class=${this.route === "reports/weekly" ? "active" : ""}>Weekly</a>
+          <a href="#/reports/cron" class=${this.route === "reports/cron" ? "active" : ""}>Cron</a>
           <a href="#/trees" class=${this.route === "trees" ? "active" : ""}>Trees & checkpoints</a>
           <a href="#/verify" class=${this.route === "verify" ? "active" : ""}>Verify</a>
         </nav>
@@ -121,7 +125,9 @@ export class AuditApp extends LitElement {
               ? html`<report-projection kind="daily"></report-projection>`
               : this.route === "reports/weekly"
                 ? html`<report-projection kind="weekly"></report-projection>`
-                : this.route === "trees"
+                : this.route === "reports/cron"
+                  ? html`<report-cron></report-cron>`
+                  : this.route === "trees"
                   ? html`<trees-overview></trees-overview>`
                   : html`<verify-panel></verify-panel>`}
       </main>
