@@ -27,6 +27,7 @@ import { collectInventory } from "../services/inventory.js";
 import { buildSessionProjection } from "../reports/session-projection.js";
 import { buildAnomalyView } from "../reports/anomalies-view.js";
 import { parseSince } from "../reports/time-window.js";
+import { buildSpendRollup, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "../reports/spend-rollup.js";
 
 const ROUTE_BASE = "/plugins/audit";
 const UI_BASE = `${ROUTE_BASE}/`;
@@ -792,6 +793,47 @@ async function handleApi(
   denialThreshold: denialThreshold,
   });
   sendJson(res, 200, { ...view, degraded: ctx.store.isDegraded() });
+  return true;
+  }
+
+  // GET /api/spend?by=&since=&until=&tz=&limit=
+  if (apiPath === "spend" && req.method === "GET") {
+  if (ctx.isNonLoopback() && !ctx.allowExportOnNonLoopback) {
+  sendError(
+  res,
+  403,
+  "audit spend is disabled when the gateway binds beyond loopback. " +
+  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
+  );
+  return true;
+  }
+  const byParam = url.searchParams.get("by") ?? "model";
+  if (!(SPEND_GROUP_BY_VALUES as ReadonlyArray<string>).includes(byParam)) {
+  sendError(res, 400, `by must be one of ${SPEND_GROUP_BY_VALUES.join("|")}`);
+  return true;
+  }
+  const groupBy = byParam as SpendGroupBy;
+  const tzParam = url.searchParams.get("tz");
+  if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
+  sendError(res, 400, "tz must be 'local' or 'utc'");
+  return true;
+  }
+  const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
+  let window;
+  try {
+  window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
+  } catch (err) {
+  sendError(res, 400, err instanceof Error ? err.message : "invalid window");
+  return true;
+  }
+  const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), MAX_SPEND_LIMIT);
+  if (limitParam === "invalid") {
+  sendError(res, 400, `limit must be a positive integer in 1..${MAX_SPEND_LIMIT}`);
+  return true;
+  }
+  const limit = limitParam ?? DEFAULT_SPEND_LIMIT;
+  const rollup = buildSpendRollup(ctx.store, window, groupBy, { limit });
+  sendJson(res, 200, { ...rollup, degraded: ctx.store.isDegraded() });
   return true;
   }
 

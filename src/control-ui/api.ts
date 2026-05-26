@@ -406,6 +406,60 @@ export interface CronRollup {
   manifest: ConfiguredCron | null;
 }
 
+// ── Spend rollup ──────────────────────────────────────────────────────────
+
+export type SpendGroupBy = "provider" | "model" | "day" | "session";
+
+export interface SpendRollupRow {
+  bucket: string;
+  callCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+export interface SpendRollupTotals {
+  callCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+export interface SpendRollup {
+  schemaVersion: number;
+  generatedAt: string;
+  groupBy: SpendGroupBy;
+  limit: number;
+  truncated: boolean;
+  window: { fromIso: string; toIso: string; label: string; tz: "local" | "utc" };
+  rows: SpendRollupRow[];
+  totals: SpendRollupTotals;
+  degraded: boolean;
+}
+
+export interface SpendQuery {
+  by?: SpendGroupBy;
+  since?: string;
+  until?: string;
+  tz?: "local" | "utc";
+  limit?: number;
+}
+
+export function getSpend(q: SpendQuery = {}): Promise<SpendRollup> {
+  const params = new URLSearchParams();
+  if (q.by) params.set("by", q.by);
+  if (q.since) params.set("since", q.since);
+  if (q.until) params.set("until", q.until);
+  if (q.tz) params.set("tz", q.tz);
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  const qs = params.toString();
+  return fetchJson<SpendRollup>(`spend${qs ? "?" + qs : ""}`);
+}
+
 // ── Anomalies view ────────────────────────────────────────────────────────
 // Wire-compatible mirror of `AnomalyView` (src/reports/anomalies-view.ts).
 

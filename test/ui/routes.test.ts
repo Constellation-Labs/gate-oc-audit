@@ -1475,3 +1475,77 @@ describe("ui: /api/anomalies endpoint", () => {
     }
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/spend — mirror of `audit spend --json` for the SPA spend view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/spend endpoint", () => {
+  it("returns an empty rollup grouped by model on a fresh store", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.groupBy, "model");
+      assert.equal(body.rows.length, 0);
+      assert.equal(body.totals.callCount, 0);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("honours the by= group parameter", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?by=session`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { groupBy: string };
+      assert.equal(body.groupBy, "session");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an unknown by= value with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?by=bogus`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects a non-positive limit with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?limit=0`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks spend when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows spend on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
