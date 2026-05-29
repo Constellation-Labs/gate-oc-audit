@@ -674,7 +674,13 @@ export default (() => {
                 isNonLoopback: () => resolveGatewayBaseUrl().nonLoopback,
                 allowExportOnNonLoopback: config.allowExportOnNonLoopback === true,
                 allowVerifyOnNonLoopback: config.allowVerifyOnNonLoopback === true,
+                requireGatewayAuth: config.requireGatewayAuth === true,
                 openclawDir: resolveOpenclawDir(config),
+            statusContext: {
+                pluginName: PLUGIN_NAME,
+                pluginVersion: PLUGIN_VERSION,
+                config,
+            },
             });
 
             api.registerService({
@@ -682,10 +688,11 @@ export default (() => {
                 start() {
                     const info = resolveGatewayBaseUrl();
                     log.info(`Audit UI: ${resolveAuditUiUrl()}`);
-                    if (info.nonLoopback) {
+                    if (info.nonLoopback && config.requireGatewayAuth !== true) {
                         log.warn(
                             `Gateway is bound to "${info.bindMode}" — the audit UI is exposed beyond loopback ` +
-                            `and currently has no auth check. Bind the gateway to loopback or add auth before ` +
+                            `and currently has no auth check. Bind the gateway to loopback, set ` +
+                            `'requireGatewayAuth: true' to delegate auth to the gateway, or add auth before ` +
                             `running on a shared network.`,
                         );
                     }

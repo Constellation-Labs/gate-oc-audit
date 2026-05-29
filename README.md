@@ -4,19 +4,37 @@ Tamper-evident audit trail for AI coding agent activity. Records every session, 
 
 ## What this does for you
 
-| Job | Command | What you get |
-|---|---|---|
-| Confirm the plugin is healthy | `openclaw audit status` | One-screen snapshot: storage, integrity, anchor, file-watch, inventory, last security scan |
-| See today's / this week's activity | `openclaw audit report daily` / `… weekly` | Activity, top tools, LLM spend, outbound messaging, anomalies, integrity footer |
-| Track LLM spend | `openclaw audit spend --by model --since 7d` | Token usage and `costUsd` grouped by provider / model / day / session |
-| Prove an event happened | `openclaw audit smt proof <hash>` then `… smt verify` | Inclusion proof against tree roots and DE-anchored checkpoints |
-| Independent third-party proof | Configure Digital Evidence anchoring (see below) | SMT roots anchored on the Constellation Digital Evidence network |
-| Alert on file changes | Configure `fileWatchPatterns` + `notificationWebhook` | Slack/Discord/webhook ping when a watched path changes |
-| Daily/weekly digests to a channel | Configure `reportWebhook` | Slack-compatible payload with the same projection as `audit report` |
-| Export the trail for compliance | `openclaw audit export csv --from … --to …` | Streamed NDJSON or CSV with anchor references per row |
-| Re-scan for tampering | `openclaw audit verify` | Full SMT replay + DE checkpoint consistency check; exit 0 if clean |
+| Job | CLI | SPA (in the gateway UI) | What you get |
+|---|---|---|---|
+| Confirm the plugin is healthy | `openclaw audit status` | `#/status` (default route) | One-screen snapshot: storage, integrity, anchor, file-watch, inventory, last security scan |
+| See today's / this week's activity | `openclaw audit report daily` / `… weekly` | `#/reports/daily`, `#/reports/weekly` | Activity, top tools, LLM spend, outbound messaging, anomalies, integrity footer |
+| Per-cron rollup | `openclaw audit report cron <job-id>` | `#/reports/cron?jobId=…` | One row per execution: started/ended, status, tool/LLM/outbound counts |
+| Per-conversation rollup | `openclaw audit report session <id>` | `#/reports/session/<id>` | Timeline, tools, LLM cost, outbound, integrity |
+| Surface anomalies | `openclaw audit anomalies --since 24h` | `#/anomalies` | Tamper, duplicate-outbound, denial spikes, installs, first-seen tools |
+| Track LLM spend | `openclaw audit spend --by model --since 7d` | `#/spend` | Token usage and `costUsd` grouped by provider / model / day / session |
+| Browse installed plugins/skills/tools/crons | `openclaw audit inventory [kind]` | `#/inventory` | Summary counters + per-kind tables (cron rows link to per-cron rollup) |
+| Prove an event happened | `openclaw audit smt proof <hash>` then `… smt verify` | `#/smt-tools` | Inclusion proof against tree roots and DE-anchored checkpoints |
+| Independent third-party proof | Configure Digital Evidence anchoring (see below) | — | SMT roots anchored on the Constellation Digital Evidence network |
+| Alert on file changes | Configure `fileWatchPatterns` + `notificationWebhook` | — | Slack/Discord/webhook ping when a watched path changes |
+| Daily/weekly digests to a channel | Configure `reportWebhook` | — | Slack-compatible payload with the same projection as `audit report` |
+| Export the trail for compliance | `openclaw audit export csv --from … --to …` | `#/events` → Download button | Streamed NDJSON or CSV with anchor references per row |
+| Re-scan for tampering | `openclaw audit verify` | `#/verify` | Full SMT replay + DE checkpoint consistency check; exit 0 if clean |
 
-If you don't know where to start, run `openclaw audit status` after install — it tells you everything that's wired up and what isn't.
+If you don't know where to start, run `openclaw audit status` after install — or open the SPA at `openclaw audit ui` and land on the same snapshot at `#/status`. It tells you everything that's wired up and what isn't.
+
+Every SPA route is backed by an HTTP endpoint under `/plugins/audit/api/`. The endpoints introduced alongside the SPA views (`/status`, `/anomalies`, `/spend`, `/inventory`, `/report/session/:id`, `/smt/proof`, `/smt/verify-proof`, `/smt/chain`) follow the same loopback policy as `/api/report` — `403` outside loopback unless `allowExportOnNonLoopback: true` is set. The wire JSON is byte-identical to the matching CLI `--json` output, so dashboards can pin against the same schemas.
+
+> **Reaching the UI from outside loopback.** By default the routes register with `auth: "plugin"` (no verification) and lean on the loopback bind for safety. To expose the UI/API on a shared network, set `requireGatewayAuth: true` so the routes register with `auth: "gateway"` and the openclaw gateway authenticates every request:
+>
+> ```bash
+> openclaw config set plugins.entries.openclaw-audit-plugin.config.requireGatewayAuth true
+> ```
+>
+> ```json
+> { "config": { "requireGatewayAuth": true } }
+> ```
+>
+> Because the gateway then authenticates every caller, `requireGatewayAuth` subsumes the loopback gate: status, reports, anomalies, spend, inventory, SMT tools, export, and verify all serve normally off-loopback, no further opt-in needed. This is the recommended single knob for external access. The `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback` flags exist for the narrower case of exposing those routes off-loopback *without* gateway auth (e.g. behind your own reverse proxy) — leave them off when `requireGatewayAuth` is set.
 
 ## Installation
 

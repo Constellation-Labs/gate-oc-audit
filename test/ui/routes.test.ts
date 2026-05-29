@@ -50,6 +50,10 @@ async function createUiRig(opts: {
   isNonLoopback?: () => boolean;
   allowExportOnNonLoopback?: boolean;
   allowVerifyOnNonLoopback?: boolean;
+  requireGatewayAuth?: boolean;
+  openclawDir?: string;
+  withStatusContext?: boolean;
+  statusConfig?: Record<string, unknown>;
 } = {}): Promise<UiRig> {
   const dir = mkdtempSync(join(tmpdir(), "audit-ui-test-"));
   const dbPath = join(dir, "audit.db");
@@ -70,6 +74,15 @@ async function createUiRig(opts: {
     isNonLoopback: opts.isNonLoopback,
     allowExportOnNonLoopback: opts.allowExportOnNonLoopback,
     allowVerifyOnNonLoopback: opts.allowVerifyOnNonLoopback,
+    requireGatewayAuth: opts.requireGatewayAuth,
+    openclawDir: opts.openclawDir,
+    statusContext: opts.withStatusContext
+      ? {
+          pluginName: "@constellation-network/openclaw-audit-plugin",
+          pluginVersion: "0.0.0-test",
+          config: opts.statusConfig ?? {},
+        }
+      : undefined,
   });
 
   // Longest path wins so /plugins/audit/api/ matches before /plugins/audit/.
@@ -923,6 +936,17 @@ describe("ui: export endpoint", () => {
     }
   });
 
+  it("requireGatewayAuth subsumes the loopback gate — export serves off-loopback with no export opt-in", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, requireGatewayAuth: true });
+    try {
+      local.appendTracked(sampleInsert({ description: "behind gateway auth" }));
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/export?format=json`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+
   it("400s on non-ISO from/to (Date.parse-tolerated strings rejected)", async () => {
     // `2020-1-1` (no zero-padding, no time, no TZ) is happily accepted by
     // Date.parse but doesn't match the stored ISO timestamps lexicographically.
@@ -1182,5 +1206,578 @@ describe("ui: /api/report/cron/<job-id> endpoint", () => {
     } finally {
       await local.destroy();
     }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/status — mirror of `audit status --json` for the SPA dashboard
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/status endpoint", () => {
+  it("returns a snapshot when statusContext is configured", async () => {
+    const rig = await createUiRig({
+      withStatusContext: true,
+      statusConfig: {
+        localRetentionDays: 60,
+        localMaxSizeMb: 200,
+        fileWatchPatterns: ["src/**/*.ts", "config/*.json"],
+        fileWatchIgnorePatterns: ["**/*.test.ts"],
+      },
+    });
+    try {
+      rig.appendTracked(sampleInsert());
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.header.pluginName, "@constellation-network/openclaw-audit-plugin");
+      assert.equal(body.header.pluginVersion, "0.0.0-test");
+      assert.equal(typeof body.header.machineId, "string");
+      assert.equal(typeof body.header.generatedAt, "string");
+      assert.equal(typeof body.storage.eventCount, "number");
+      assert.equal(body.storage.retentionDays, 60);
+      assert.equal(body.storage.maxSizeMb, 200);
+      assert.equal(body.fileWatch.patternsWatched, 2);
+      assert.equal(body.fileWatch.patternsIgnored, 1);
+      assert.equal(body.integrity.conversationAccess, "disabled");
+      assert.equal(body.degraded, false);
+      assert.equal(body.schemaVersion, 2);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("returns 503 when statusContext is not configured on this plugin instance", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 503);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /not configured/);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks status when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({
+      isNonLoopback: () => true,
+      allowExportOnNonLoopback: false,
+      withStatusContext: true,
+    });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 403);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /allowExportOnNonLoopback/);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows status on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({
+      isNonLoopback: () => true,
+      allowExportOnNonLoopback: true,
+      withStatusContext: true,
+    });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("reports conversationAccess=\"enabled\" when allowConversationAccess and a recent prompt.input exist", async () => {
+    const rig = await createUiRig({
+      withStatusContext: true,
+      statusConfig: { allowConversationAccess: true },
+    });
+    try {
+      rig.appendTracked(sampleInsert({
+        eventType: "prompt.input" as any,
+        category: "prompt" as any,
+        description: "user prompt",
+      }));
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { integrity: { conversationAccess: string } };
+      assert.equal(body.integrity.conversationAccess, "enabled");
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/report/session/:id — mirror of `audit report session --json` for the
+// SPA per-conversation drilldown.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/report/session/:id endpoint", () => {
+  it("returns a projection for an existing session", async () => {
+    const rig = await createUiRig();
+    try {
+      const sessionId = "sess-rollup-1";
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "session.start" as any,
+        category: "agent" as any,
+        description: "session start",
+      }));
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "tool.invoked" as any,
+        category: "tool" as any,
+        description: "tool fired",
+        metadata: { toolName: "Bash" },
+      }));
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.sessionId, sessionId);
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.timeline.length >= 1, true);
+      assert.equal(body.integrity.eventCount >= 2, true);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("strips metadata from timeline entries by default", async () => {
+    const rig = await createUiRig();
+    try {
+      const sessionId = "sess-meta-strip";
+      rig.appendTracked(sampleInsert({
+        sessionId,
+        eventType: "tool.invoked" as any,
+        category: "tool" as any,
+        description: "tool fired",
+        metadata: { toolName: "Bash", command: "secret-command" },
+      }));
+      const stripped = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}`);
+      const strippedBody = (await stripped.json()) as { timeline: Array<Record<string, unknown>> };
+      assert.equal("metadata" in (strippedBody.timeline[0] ?? {}), false);
+
+      const full = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/${encodeURIComponent(sessionId)}?includeMetadata=true`);
+      const fullBody = (await full.json()) as { timeline: Array<{ metadata?: Record<string, unknown> }> };
+      assert.equal(fullBody.timeline[0]?.metadata?.command, "secret-command");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("returns an empty timeline for an unknown session id", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/no-such-session`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { timeline: unknown[]; integrity: { eventCount: number } };
+      assert.equal(body.timeline.length, 0);
+      assert.equal(body.integrity.eventCount, 0);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects a non-positive limit with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x?limit=0`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks the rollup when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows the rollup on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/report/session/sess-x`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/anomalies — mirror of `audit anomalies --json` for the SPA view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/anomalies endpoint", () => {
+  it("returns an empty anomaly view on a fresh store", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.anomalies.duplicateOutbound.length, 0);
+      assert.equal(body.anomalies.firstSeenTools.length, 0);
+      assert.equal(body.counts.totalEventsInWindow, 0);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("echoes detector knobs in detectorConfig", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?dupWindowSec=120&lookbackDays=7&denialWindowSec=600&denialThreshold=3`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { detectorConfig: Record<string, number> };
+      assert.equal(body.detectorConfig.dupWindowSec, 120);
+      assert.equal(body.detectorConfig.lookbackDays, 7);
+      assert.equal(body.detectorConfig.denialWindowSec, 600);
+      assert.equal(body.detectorConfig.denialThreshold, 3);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an out-of-range detector knob with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?dupWindowSec=-1`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an invalid since duration with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies?since=not-a-duration`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks anomalies when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows anomalies on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/anomalies`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/spend — mirror of `audit spend --json` for the SPA spend view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/spend endpoint", () => {
+  it("returns an empty rollup grouped by model on a fresh store", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(body.schemaVersion, 1);
+      assert.equal(body.groupBy, "model");
+      assert.equal(body.rows.length, 0);
+      assert.equal(body.totals.callCount, 0);
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("honours the by= group parameter", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?by=session`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { groupBy: string };
+      assert.equal(body.groupBy, "session");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an unknown by= value with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?by=bogus`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects a non-positive limit with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend?limit=0`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks spend when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows spend on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/spend`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/inventory — mirror of `audit inventory --json` for the SPA browser.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/inventory endpoint", () => {
+  it("returns a summary report by default", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, any>;
+      assert.equal(typeof body.summary, "object");
+      assert.equal(typeof body.summary.plugins, "number");
+      assert.equal(typeof body.summary.skills, "number");
+      assert.equal(typeof body.summary.tools, "number");
+      assert.equal(typeof body.summary.crons, "number");
+      assert.equal(body.degraded, false);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("rejects an unknown kind with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory?kind=bogus`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("accepts each known kind", async () => {
+    const rig = await createUiRig();
+    try {
+      for (const kind of ["plugins", "skills", "tools", "soul", "crons"]) {
+        const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory?kind=${kind}`);
+        assert.equal(res.status, 200, `kind=${kind}`);
+        const body = (await res.json()) as Record<string, any>;
+        assert.equal(Array.isArray(body[kind]), true, `${kind} should be an array`);
+      }
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks inventory when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("allows inventory on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory`);
+      assert.equal(res.status, 200);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// /api/smt/* — mirrors of `audit smt proof|verify-proof|chain`
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("ui: /api/smt power tools", () => {
+  it("smt/proof rejects missing hash with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof`);
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/proof returns 404 when tree key is unknown", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=abcdef&tree=nope`);
+      assert.equal(res.status, 404);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/proof returns a proof for a leaf in the default tree", async () => {
+    const rig = await createUiRig();
+    try {
+      const ev = rig.appendTracked(sampleInsert());
+      // SMT leaf hash is computed by the service from the audit event.
+      const rawHash = rig.smt.computeRawHash(ev);
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=${rawHash}`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { proof: Record<string, unknown> };
+      assert.equal(typeof body.proof.root, "string");
+      assert.equal(body.proof.membership, true);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/verify-proof returns 'valid' for a freshly generated proof", async () => {
+    const rig = await createUiRig();
+    try {
+      const ev = rig.appendTracked(sampleInsert());
+      const rawHash = rig.smt.computeRawHash(ev);
+      const proofRes = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=${rawHash}`);
+      const { proof } = (await proofRes.json()) as { proof: Record<string, unknown> };
+      const verifyRes = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ proof }),
+      });
+      assert.equal(verifyRes.status, 200);
+      const body = (await verifyRes.json()) as { status: string };
+      assert.equal(body.status, "valid");
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/verify-proof rejects a malformed body with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/chain rejects missing conversationId/tree with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const r1 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain`);
+      assert.equal(r1.status, 400);
+      const r2 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=default`);
+      assert.equal(r2.status, 400);
+      const r3 = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?conversationId=sess-x`);
+      assert.equal(r3.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/chain returns an empty chain for an unknown conversation", async () => {
+    const rig = await createUiRig();
+    try {
+      const tree = rig.smt.listTrees()[0]?.key ?? "default";
+      const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=${tree}&conversationId=no-such-conv`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { chain: unknown[] };
+      assert.equal(body.chain.length, 0);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("blocks each smt endpoint when gateway is non-loopback and opt-in is off", async () => {
+    const rig = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: false });
+    try {
+      const p = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/proof?hash=abc`);
+      assert.equal(p.status, 403);
+      const v = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ proof: {} }),
+      });
+      assert.equal(v.status, 403);
+      const c = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/chain?tree=default&conversationId=sess-x`);
+      assert.equal(c.status, 403);
+    } finally {
+      await rig.destroy();
+    }
+  });
+});
+
+describe("ui: gateway-auth registration mode", () => {
+  function registeredAuth(opts: { requireGatewayAuth?: boolean }): string[] {
+    const dir = mkdtempSync(join(tmpdir(), "audit-ui-auth-"));
+    const dbPath = join(dir, "audit.db");
+    const store = new AuditStore(dbPath);
+    const smt = new SmtService({ dbPath, smt: { checkpointDir: join(dir, "smt"), checkpointIntervalMs: 0 } });
+    const verifier = new Verifier(store, smt);
+    const routes: RouteEntry[] = [];
+    const api = { registerHttpRoute: (r: RouteEntry) => { routes.push(r); } };
+    try {
+      registerAuditUiRoutes(api as never, store, smt, verifier, opts);
+      return routes.map((r) => r.auth);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("defaults to auth: \"plugin\" for every route", () => {
+    const auths = registeredAuth({});
+    assert.ok(auths.length >= 2);
+    assert.ok(auths.every((a) => a === "plugin"), `expected all "plugin", got ${auths.join(",")}`);
+  });
+
+  it("registers auth: \"gateway\" for every route when requireGatewayAuth is set", () => {
+    const auths = registeredAuth({ requireGatewayAuth: true });
+    assert.ok(auths.length >= 2);
+    assert.ok(auths.every((a) => a === "gateway"), `expected all "gateway", got ${auths.join(",")}`);
   });
 });

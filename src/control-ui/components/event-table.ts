@@ -55,6 +55,11 @@ export class EventTable extends LitElement {
       font-size: 13px;
       color: var(--fg-dim);
     }
+    .download { display: flex; gap: 6px; flex-wrap: wrap; }
+    .download .dl {
+      font-size: 12px;
+      padding: 4px 10px;
+    }
     .err {
       color: var(--err);
       padding: 12px;
@@ -279,6 +284,27 @@ export class EventTable extends LitElement {
     void this.load();
   }
 
+  private download(format: "json" | "csv", includeContent: boolean): void {
+    // Compose `/api/export` URL with the current event-table filters; the
+    // browser handles the streaming response via the `download` attribute on
+    // a one-shot anchor element. No XHR — large exports never load into the
+    // page's memory.
+    const exportUrl = new URL("./api/export", document.baseURI);
+    exportUrl.searchParams.set("format", format);
+    if (this.filters.type) exportUrl.searchParams.set("type", this.filters.type);
+    if (this.filters.category) exportUrl.searchParams.set("category", this.filters.category);
+    if (this.filters.session) exportUrl.searchParams.set("session", this.filters.session);
+    if (includeContent) exportUrl.searchParams.set("includeContent", "true");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z");
+    const ext = format === "csv" ? "csv" : "ndjson";
+    const anchor = document.createElement("a");
+    anchor.href = exportUrl.toString();
+    anchor.download = `audit-export-${ts}.${ext}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  }
+
   private clearFocus = (): void => {
     if (!this.focus) return;
     this.focus = undefined;
@@ -356,6 +382,14 @@ export class EventTable extends LitElement {
         <span class="status">
           ${this.loading ? "Loading…" : `${start}–${end} of ${this.total}`}
         </span>
+        <div class="download">
+          <button class="dl" title="Download the audit log filtered by the current filters as NDJSON"
+                  @click=${() => this.download("json", false)}>↓ JSON</button>
+          <button class="dl" title="Download as CSV"
+                  @click=${() => this.download("csv", false)}>↓ CSV</button>
+          <button class="dl" title="Download as NDJSON with full event content (large, may include prompt text)"
+                  @click=${() => this.download("json", true)}>↓ JSON + content</button>
+        </div>
       </div>
 
       ${this.degraded

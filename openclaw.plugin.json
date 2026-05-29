@@ -109,7 +109,15 @@
       },
       "allowExportOnNonLoopback": {
         "type": "boolean",
-        "description": "Opt-in to keep GET /plugins/audit/api/export available when the gateway binds beyond loopback. Default false. The export streams raw audit events (with content when ?includeContent=true) and is unauthenticated; on a non-loopback bind it would be reachable by anything that can reach the gateway port."
+        "description": "Opt-in to keep the loopback-gated read routes available when the gateway binds beyond loopback. Default false. Despite the name this flag gates not just GET /plugins/audit/api/export but also the status, report, anomalies, spend, inventory, and SMT endpoints — all of which return 403 off-loopback unless this is set. The export streams raw audit events (with content when ?includeContent=true) and is unauthenticated; on a non-loopback bind it would be reachable by anything that can reach the gateway port. Not needed when requireGatewayAuth is enabled, since gateway auth then fronts every route."
+      },
+      "allowVerifyOnNonLoopback": {
+        "type": "boolean",
+        "description": "Opt-in to keep POST /plugins/audit/api/verify available when the gateway binds beyond loopback. Default false. A verification walks every event with content (gunzip + rehash) and re-scans on mismatch, so it is CPU-bound and unauthenticated; on a non-loopback bind it would be reachable by anything that can reach the gateway port. Not needed when requireGatewayAuth is enabled, since gateway auth then fronts every route."
+      },
+      "requireGatewayAuth": {
+        "type": "boolean",
+        "description": "Register the audit UI/API routes with the gateway's auth layer (auth: \"gateway\") instead of the pass-through auth: \"plugin\". Default false. Enable to let the openclaw gateway authenticate requests so the UI can be reached from outside loopback. Because the gateway then authenticates every caller, it subsumes the loopback gate: the status/report/anomalies/spend/inventory/SMT/export/verify routes serve normally off-loopback without needing allowExportOnNonLoopback or allowVerifyOnNonLoopback."
       }
     },
     "additionalProperties": false
