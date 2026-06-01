@@ -46,9 +46,24 @@ Requires `openclaw >= 2026.4.24` as a peer dependency and Node.js ≥ 22.13 (use
 
 That's it. The plugin automatically starts recording audit events when your agent runs.
 
-### Required openclaw config (openclaw ≥ 2026.4.24)
+### Configure with the setup wizard (recommended)
 
-Two operator-policy opt-ins are required for full functionality. Both are decisions openclaw forces on the operator — the plugin cannot self-grant either.
+```bash
+openclaw audit setup
+```
+
+Interactive wizard that walks through everything the plugin needs:
+
+- Adds `openclaw-audit-plugin` to `plugins.allow` (trusts the plugin).
+- Enables `hooks.allowConversationAccess` so `prompt.input` / `prompt.response` / `agent.end` events are captured.
+- Optionally collects your Digital Evidence API key + org/tenant UUIDs and tunes the anchoring thresholds (event count, timer interval, minimum events per tick).
+- Runs `openclaw audit status` at the end so you can confirm the trail is live.
+
+Pass `--yes` to accept defaults for the anchoring tuning (DE identity prompts still ask). Once the wizard finishes, skip to [Quick check after install](#quick-check-after-install).
+
+### Manual config reference (openclaw ≥ 2026.4.24)
+
+Two operator-policy opt-ins are required for full functionality. Both are decisions openclaw forces on the operator — the plugin cannot self-grant either. The setup wizard above writes both for you; the sections below document the equivalent `openclaw config set` calls and JSON snippets for operators who provision config by hand or via configuration management.
 
 #### Trust the plugin
 
@@ -404,6 +419,8 @@ Or directly in the config JSON:
 ### Digital Evidence anchoring
 
 Anchor SMT roots to the [Constellation Digital Evidence](https://evidence.constellationnetwork.io) network for independent, tamper-proof verification. Follow the [Digital Evidence setup guide](https://digitalevidence.constellationnetwork.io/get-started) to provision an account, generate API credentials, and fund a wallet for x402 micropayments. Two authentication methods are supported:
+
+> Prefer not to run these by hand? `openclaw audit setup` walks through the API-key path interactively: it writes the `plugins.allow` and `hooks.allowConversationAccess` opt-ins, collects your API key + org/tenant UUIDs, configures the anchoring tuning, and runs `openclaw audit status` to verify.
 
 **Option 1 — API key**
 
