@@ -21,7 +21,7 @@ const DE_ENV_URLS = {
     integration: "https://lb-integrationnet.ded-ingestion.constellationnetwork.net/v1",
     mainnet: "https://lb-mainnet.ded-ingestion.constellationnetwork.net/v1",
 } as const;
-const DE_EXPLORER_URLS = {
+export const DE_EXPLORER_URLS = {
     integration: "https://staging.digitalevidence.constellationnetwork.net",
     mainnet: "https://digitalevidence.constellationnetwork.io",
 } as const;
@@ -30,7 +30,7 @@ const DEFAULT_DE_ENV: DeEnv = "mainnet";
 const DE_TEST_URL_ENV_VAR = "DE_TEST_URL";
 const FETCH_TIMEOUT_MS = 15_000;
 
-function isDeEnv(v: string): v is DeEnv {
+export function isDeEnv(v: string): v is DeEnv {
     return v === "test" || v === "integration" || v === "mainnet";
 }
 

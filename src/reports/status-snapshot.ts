@@ -12,7 +12,7 @@ import type { AnchorHealth } from "../services/de-anchor.js";
 import type { RetentionHealth } from "../services/retention.js";
 import type { InventorySummary } from "../services/inventory.js";
 
-export const STATUS_SCHEMA_VERSION = 2 as const;
+export const STATUS_SCHEMA_VERSION = 3 as const;
 
 export interface StatusHeader {
   pluginName: string;
@@ -55,6 +55,13 @@ export interface IntegritySection {
 }
 
 export interface AnchorSection {
+  /**
+   * False when the DE anchor service has never published a health row — i.e.
+   * the plugin loaded without any DE credentials. Distinct from `isActive`,
+   * which can be false even on a configured-but-currently-down service. Used
+   * by `formatStatusText` to surface a "run audit setup" banner.
+   */
+  configured: boolean;
   isActive: boolean;
   circuitOpen: boolean;
   consecutiveFailures: number;
@@ -219,6 +226,7 @@ export function buildStatusSnapshot(inputs: StatusInputs): StatusSnapshot {
       conversationAccess,
     },
     anchor: {
+      configured: anchorHealth !== undefined,
       isActive: anchorHealth?.isActive ?? false,
       circuitOpen: anchorHealth ? anchorHealth.circuitOpenUntil > now.getTime() : false,
       consecutiveFailures: anchorHealth?.consecutiveFailures ?? 0,
