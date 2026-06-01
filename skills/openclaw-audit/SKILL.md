@@ -7,7 +7,9 @@ metadata:
 
 # OpenClaw audit trail
 
-A tamper-evident SQLite log of every agent session, tool call, prompt, and message. Optional Digital Evidence anchoring publishes Merkle roots so an event's existence can be proven without trusting the local machine. The CLI is the primary interface — the agent does **not** auto-narrate audit state, so users have to ask, and that's what this skill is for.
+A tamper-evident SQLite log of every agent session, tool call, prompt, and message. Optional Digital Evidence anchoring publishes Merkle roots so an event's existence can be proven without trusting the local machine. The CLI is the primary interface — the agent does **not** auto-narrate audit state, so users have to ask, and that's what this skill is for. Every CLI surface (status, reports, anomalies, spend, list, verify, SMT tools, export, inventory) also has a SPA equivalent under the gateway UI (`#/status`, `#/reports/daily`, etc.) for users who prefer a browser.
+
+**Setting things up for the first time?** Point the user at `openclaw audit setup` — an interactive wizard that writes both opt-ins (`plugins.allow`, `hooks.allowConversationAccess`), collects Digital Evidence credentials, tunes anchoring thresholds, and runs `audit status` to verify. It's the recommended path; manual `openclaw config set` calls (see Setup tasks below) are the by-hand equivalent.
 
 ## Pick the right command
 
@@ -21,6 +23,9 @@ A tamper-evident SQLite log of every agent session, tool call, prompt, and messa
 | "Prove this specific event exists" | `openclaw audit smt proof <hash>` |
 | "Export the trail for legal/compliance" | `openclaw audit export` (JSON / CSV) |
 | "What's installed on this box?" | `openclaw audit inventory` |
+| "Anything weird going on?" / "Show me anomalies for the last N hours" | `openclaw audit report anomalies` |
+| "Where's the web UI?" | `openclaw audit ui` (prints the SPA URL) |
+| "Help me set the plugin up" | `openclaw audit setup` (interactive wizard) |
 | "Is Digital Evidence anchoring set up?" | `audit_de_setup` tool (or `openclaw audit status` → "Digital Evidence anchor" section) |
 | "How do I get alerted on file changes?" | Configure `fileWatchPatterns` — see Setup below |
 
@@ -135,5 +140,5 @@ openclaw config set plugins.entries.openclaw-audit-plugin.config.notificationWeb
 - **Plugin id vs npm name.** Config lives under `openclaw-audit-plugin` (the manifest id), **not** `@constellation-network/openclaw-audit-plugin`. OpenClaw logs a warning about the mismatch on load — expected, safe to ignore.
 - **`plugins.allow` empty** silently auto-loads everything with a startup warning. Tell the user to pin: `openclaw config set plugins.allow '["openclaw-audit-plugin"]'`. If they already have other allowed plugins, *append* — don't replace.
 - **Ephemeral signing keys.** When `deSigningKey` is unset, a new key pair is generated each startup and fingerprints from different sessions can't be tied to a single identity. Pin it for cross-session provenance.
-- **HTTP `/api/export` and `/api/report`** are unauthenticated and only safe on loopback. If the gateway binds beyond loopback they return `403` unless `allowExportOnNonLoopback: true` is set. The CLI reads the DB directly and is unaffected.
+- **HTTP routes and loopback.** By default the audit routes register with `auth: "plugin"` (no verification) and rely on the gateway binding to loopback. For external access, the recommended single knob is `requireGatewayAuth: true` — it flips every route (status, reports, anomalies, spend, inventory, SMT tools, export, verify) to `auth: "gateway"` so the gateway authenticates each caller and the loopback gate is lifted. The narrower `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback` flags exist for fronting *those two* routes off-loopback without gateway auth (e.g. behind a reverse proxy); leave them off when `requireGatewayAuth` is set. The CLI reads the DB directly and is unaffected by any of this.
 - **Fail-open by design.** If the DB is unavailable the plugin silently drops events and the agent continues; a degraded-mode warning appears in `audit list` output. Run `audit status` to confirm health rather than assuming silence = success.
