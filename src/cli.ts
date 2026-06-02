@@ -22,6 +22,7 @@ import { formatStatusText } from "./reports/format-status.js";
 import { ANCHOR_HEALTH_NAME, type AnchorHealth } from "./services/de-anchor.js";
 import { RETENTION_HEALTH_NAME, DEFAULT_RETENTION_DAYS, DEFAULT_MAX_SIZE_MB, type RetentionHealth } from "./services/retention.js";
 import { buildSpendRollup, formatSpendRollupText, SPEND_GROUP_BY_VALUES, DEFAULT_SPEND_LIMIT, MAX_SPEND_LIMIT, type SpendGroupBy } from "./reports/spend-rollup.js";
+import { runSetupWizard } from "./ui/setup-wizard.js";
 
 const CONTENT_PREVIEW_LENGTH = 500;
 
@@ -617,6 +618,14 @@ export function cliSpendHandler(store: AuditStore, opts: AuditSpendOptions = {})
     return;
   }
   process.stdout.write(formatSpendRollupText(rollup));
+}
+
+export interface AuditSetupOptions {
+ yes?: boolean;
+}
+
+export async function cliSetupHandler(opts: AuditSetupOptions = {}): Promise<void> {
+ await runSetupWizard({ yes: opts.yes === true });
 }
 
 function parseGroupBy(raw: string | undefined): SpendGroupBy {

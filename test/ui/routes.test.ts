@@ -1240,7 +1240,7 @@ describe("ui: /api/status endpoint", () => {
       assert.equal(body.fileWatch.patternsIgnored, 1);
       assert.equal(body.integrity.conversationAccess, "disabled");
       assert.equal(body.degraded, false);
-      assert.equal(body.schemaVersion, 2);
+      assert.equal(body.schemaVersion, 3);
     } finally {
       await rig.destroy();
     }

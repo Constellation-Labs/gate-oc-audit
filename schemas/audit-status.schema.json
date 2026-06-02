@@ -16,7 +16,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "header": {
       "type": "object",
       "required": ["pluginName", "pluginVersion", "machineId", "generatedAt"],
@@ -95,6 +95,7 @@
     "anchor": {
       "type": "object",
       "required": [
+        "configured",
         "isActive",
         "circuitOpen",
         "consecutiveFailures",
@@ -105,6 +106,7 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "configured": { "type": "boolean" },
         "isActive": { "type": "boolean" },
         "circuitOpen": { "type": "boolean" },
         "consecutiveFailures": { "type": "integer", "minimum": 0 },

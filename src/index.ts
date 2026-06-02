@@ -2,7 +2,7 @@ import {definePluginEntry} from "openclaw/plugin-sdk/plugin-entry";
 import {routeLogsToStderr} from "openclaw/plugin-sdk/runtime";
 import {AuditStore} from "./store/audit-store.js";
 import {registerHooks} from "./hooks.js";
-import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSmtHandler, cliStatusHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSpendOptions, type AuditStatusOptions} from "./cli.js";
+import {cliAnomaliesHandler, cliAuditHandler, cliAuditUiHandler, cliExportHandler, cliReportHandler, cliReportSessionHandler, cliReportCronHandler, cliInventoryHandler, cliSetupHandler, cliSmtHandler, cliStatusHandler, cliSpendHandler, cliVerifyHandler, type AuditAnomaliesOptions, type AuditExportOptions, type AuditReportOptions, type AuditReportCronOptions, type AuditReportSessionOptions, type AuditSetupOptions, type AuditSpendOptions, type AuditStatusOptions} from "./cli.js";
 import {INVENTORY_KINDS} from "./services/inventory.js";
 import {resolveOpenclawDir} from "./util/openclaw-paths.js";
 import {RetentionService} from "./services/retention.js";
@@ -39,6 +39,11 @@ interface PluginHandlerTool {
     handler: (params: Record<string, unknown>) => unknown;
 }
 
+function isDeConfigured(config: Record<string, unknown>): boolean {
+    const has = (k: string): boolean => typeof config[k] === "string" && (config[k] as string).length > 0;
+    return has("deWalletKeyFile") || (has("deApiKey") && has("deOrgId") && has("deTenantId"));
+}
+
 export default (() => {
     // These references are valid only while their underlying handles are open.
     // retention.stop() closes the store and must reset them so the next
@@ -49,6 +54,12 @@ export default (() => {
     let _limiter: RateLimiter | undefined;
     let _gatewayStopCapture: GatewayStopCapture | undefined;
 
+    // Process-wide one-shot for the "DE config missing → run audit setup" nudge.
+    // Module-scoped (not per-register call) for the same reason as
+    // conversationAccessWarned in hooks.ts: openclaw's legitimate re-registration
+    // on a fresh api instance must not re-trigger an already-shown warning.
+    let setupNudgeShown = false;
+
     return definePluginEntry({
         id: "openclaw-audit-plugin",
         name: "@constellation-network/openclaw-audit-plugin",
@@ -56,6 +67,21 @@ export default (() => {
 
         register(api) {
             const config = api.pluginConfig ?? {};
+
+            // First-load nudge: if DE anchoring isn't configured at all (no API-key
+            // triplet and no wallet key file), tell the operator how to fix it. Gated
+            // to `full` mode so it only fires when openclaw is actually running, not
+            // during CLI dispatch or capability discovery.
+            if (
+                api.registrationMode === "full" &&
+                !setupNudgeShown &&
+                !isDeConfigured(config)
+            ) {
+                setupNudgeShown = true;
+                log.warn(
+                    "Digital Evidence anchoring is not configured. Run `openclaw audit setup` for an interactive wizard, or follow the README's manual `openclaw config set` steps. Audit events will still be recorded locally; only anchoring is disabled.",
+                );
+            }
 
             // --- CLI (registered first so cli-metadata mode can discover commands) ---
 
@@ -278,6 +304,12 @@ export default (() => {
                     .action((conversationId: string, opts) =>
                         cliSmtHandler(getSmtService(), "chain", {...opts, conversationId}),
                     );
+
+                audit
+                    .command("setup")
+                    .description("Interactive wizard: opt the plugin in to openclaw and configure Digital Evidence anchoring")
+                    .option("--yes", "Accept defaults for anchoring tuning (still prompts for DE identity)")
+                    .action((opts: AuditSetupOptions) => cliSetupHandler(opts));
             }, {
                 descriptors: [
                     {name: "audit", description: "View and manage audit trail", hasSubcommands: true},
@@ -452,6 +484,8 @@ export default (() => {
                             "  3. orgId and tenantId are derived automatically from the wallet address",
                             "",
                             "Anchoring cost: ~2 credits per fingerprint (negligible).",
+                            "",
+                            "Tip: run `openclaw audit setup` for an interactive wizard that walks through opt-ins, DE credentials, and tuning.",
                         ].join("\n"),
                     };
                 },

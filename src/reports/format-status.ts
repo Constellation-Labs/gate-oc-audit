@@ -20,6 +20,14 @@ export function formatStatusText(s: StatusSnapshot): string {
   lines.push(`${s.header.pluginName} ${versionTag}  •  Machine ${s.header.machineId}  •  ${formatInstant(s.header.generatedAt)}`);
   lines.push("");
 
+  // Setup-incomplete banner — shown when DE anchoring has never published health
+  // (i.e. no credentials configured). Local audit logging still works; only
+  // anchoring is gated on the missing setup.
+  if (!s.anchor.configured) {
+    lines.push("⚠  Digital Evidence anchoring not configured. Run `openclaw audit setup` to enable tamper-evident anchoring.");
+    lines.push("");
+  }
+
   // Storage
   lines.push("Storage");
   const dbBar = renderBar(s.storage.dbSizeMb, s.storage.maxSizeMb);
