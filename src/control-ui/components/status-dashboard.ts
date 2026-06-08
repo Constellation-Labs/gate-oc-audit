@@ -26,10 +26,15 @@ function fmtRelative(iso: string | null | undefined, now: Date): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return iso;
   const diffSec = Math.round((now.getTime() - t) / 1000);
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
-  if (diffSec < 86_400) return `${Math.round(diffSec / 3600)}h ago`;
-  return `${Math.round(diffSec / 86_400)}d ago`;
+  // Negative diff means the instant is in the future (e.g. next prune) —
+  // render as "in …" rather than a nonsensical negative "… ago".
+  const abs = Math.abs(diffSec);
+  const phrase =
+    abs < 60 ? `${abs}s` :
+    abs < 3600 ? `${Math.round(abs / 60)}m` :
+    abs < 86_400 ? `${Math.round(abs / 3600)}h` :
+    `${Math.round(abs / 86_400)}d`;
+  return diffSec < 0 ? `in ${phrase}` : `${phrase} ago`;
 }
 
 @customElement("status-dashboard")
