@@ -209,6 +209,7 @@ export interface IntegritySection {
 }
 
 export interface AnchorSection {
+  configured: boolean;
   isActive: boolean;
   circuitOpen: boolean;
   consecutiveFailures: number;
