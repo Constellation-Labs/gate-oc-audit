@@ -310,6 +310,19 @@ describe("ui: per-event verify endpoint", () => {
     assert.ok(json.anchoredAt);
     assert.equal(json.anchoredAt.deTxHash, "0xfeedface");
     assert.equal(json.anchoredAt.checkpointId, "cp-anchor");
+    // Freshly anchored checkpoint is submitted but not yet DE-confirmed.
+    assert.equal(json.anchoredAt.verifiedAt, null);
+  });
+
+  it("reports verifiedAt once the covering checkpoint is DE-confirmed", async () => {
+    const ev = rig.appendTracked(sampleInsert({ content: "confirmed" }));
+    const root = rig.smt.getRoot()?.root ?? "";
+    rig.store.insertCheckpoint("cp-verified", ev.sequence, ev.sequence, root, 1, "0xc0ffee");
+    rig.store.markCheckpointVerified("cp-verified");
+    const json = await (await fetch(`${rig.baseUrl}/plugins/audit/api/events/${ev.id}/verify`)).json();
+    assert.ok(json.anchoredAt);
+    assert.equal(json.anchoredAt.checkpointId, "cp-verified");
+    assert.match(json.anchoredAt.verifiedAt, /^\d{4}-\d{2}-\d{2}T/);
   });
 });
 

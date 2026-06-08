@@ -56,7 +56,7 @@ export class SpendView extends LitElement {
       background: var(--bg-elev); border: 1px solid var(--border);
       border-radius: 8px; overflow: hidden; font-size: 13px;
     }
-    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
     th {
       background: var(--bg-elev2); font-weight: 600; font-size: 11px;
       color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.04em;

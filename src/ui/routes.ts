@@ -351,6 +351,7 @@ interface VerifyPayload {
     sequenceStart: number;
     sequenceEnd: number;
     createdAt: string;
+    verifiedAt: string | null;
   } | null;
   deBaseUrl: string | null;
 }
@@ -396,6 +397,7 @@ function buildVerifyPayload(ctx: AuditUiContext, event: AuditEvent): VerifyPaylo
         sequenceStart: cp.sequenceStart,
         sequenceEnd: cp.sequenceEnd,
         createdAt: cp.createdAt,
+        verifiedAt: cp.verifiedAt,
       };
       break;
     }

@@ -44,6 +44,7 @@ export interface EventVerifyPayload {
     sequenceStart: number;
     sequenceEnd: number;
     createdAt: string;
+    verifiedAt: string | null;
   } | null;
   deBaseUrl: string | null;
 }
