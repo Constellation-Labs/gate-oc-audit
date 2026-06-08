@@ -314,7 +314,19 @@ export interface TamperedEventRef extends EventRef {
 }
 
 export interface IntegrityViolationFinding {
-  unverifiedAnchored: UnverifiedAnchoredCheckpoint[];
+  /**
+   * Anchored checkpoints whose DE transaction was confirmed missing
+   * (verification returned 404). This is a genuine integrity violation: the
+   * SMT root was submitted but never durably recorded on DE.
+   */
+  notFoundOnDe: UnverifiedAnchoredCheckpoint[];
+  /**
+   * Anchored checkpoints still awaiting DE confirmation. This is normal and
+   * expected — a freshly anchored transaction is not immediately queryable,
+   * and verification runs on a cadence — so it is informational, NOT a
+   * violation. Surfaced separately so it can't be mistaken for an anomaly.
+   */
+  pendingVerification: UnverifiedAnchoredCheckpoint[];
   tamperedEvents: TamperedEventRef[];
   /**
    * Set when the tamper scan was skipped (e.g. SMT has no checkpointed

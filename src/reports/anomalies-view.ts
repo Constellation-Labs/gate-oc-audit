@@ -1,5 +1,6 @@
 import type { AuditStore } from "../store/audit-store.js";
 import type { SmtService } from "../services/smt-service.js";
+import { ANCHOR_NOT_FOUND_HEALTH_NAME } from "../services/health-keys.js";
 import type { AuditEvent } from "../types/events.js";
 import { subtractCalendarDays, type TimeWindow } from "./time-window.js";
 import {
@@ -154,17 +155,24 @@ function collectIntegrityViolations(
 ): IntegrityViolationFinding {
   const { fromIso, toIso } = window;
   const smtLastSeq = smtService.getLastInsertedSequence();
-  const unverifiedAnchored: UnverifiedAnchoredCheckpoint[] = store
-    .getUnverifiedCheckpoints()
-    .filter((cp) => cp.createdAt >= fromIso && cp.createdAt < toIso)
-    .map((cp) => ({
+  // An unverified checkpoint is only a violation once DE has confirmed its
+  // transaction is missing (a 404, recorded in the persisted not-found set).
+  // Everything else is simply pending confirmation — normal, not an anomaly.
+  const notFoundIds = readNotFoundCheckpointIds(store);
+  const notFoundOnDe: UnverifiedAnchoredCheckpoint[] = [];
+  const pendingVerification: UnverifiedAnchoredCheckpoint[] = [];
+  for (const cp of store.getUnverifiedCheckpoints()) {
+    if (!(cp.createdAt >= fromIso && cp.createdAt < toIso)) continue;
+    const ref: UnverifiedAnchoredCheckpoint = {
       checkpointId: cp.id,
       sequenceStart: cp.sequenceStart,
       sequenceEnd: cp.sequenceEnd,
       smtRoot: cp.smtRoot,
       deTxHash: cp.deTxHash,
       createdAt: cp.createdAt,
-    }));
+    };
+    (notFoundIds.has(cp.id) ? notFoundOnDe : pendingVerification).push(ref);
+  }
   const tamperedEvents: TamperedEventRef[] = [];
   // smtLastSeq === 0 means the SMT hasn't checkpointed anything yet — every
   // event is "untracked" by classifyEvent's rules, so we can't say whether
@@ -200,10 +208,24 @@ function collectIntegrityViolations(
       : "SMT has no checkpointed leaves yet — tamper scan skipped.";
   }
   return {
-    unverifiedAnchored,
+    notFoundOnDe,
+    pendingVerification,
     tamperedEvents,
     note,
   };
+}
+
+/**
+ * Read the persisted set of checkpoint IDs whose DE transaction was confirmed
+ * missing (404). Mirrors ActiveAnchorService's not-found dedup set, which is
+ * the authoritative signal for "anchored but truly absent from DE".
+ */
+function readNotFoundCheckpointIds(store: AuditStore): Set<string> {
+  const row = store.getServiceHealth(ANCHOR_NOT_FOUND_HEALTH_NAME);
+  if (!row || !Array.isArray(row.payload)) return new Set();
+  return new Set(
+    (row.payload as unknown[]).filter((id): id is string => typeof id === "string"),
+  );
 }
 
 function toDetectorEvent(e: AuditEvent): DetectorEvent {

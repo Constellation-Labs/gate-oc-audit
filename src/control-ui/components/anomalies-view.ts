@@ -178,13 +178,17 @@ export class AnomaliesView extends LitElement {
 
   private renderIntegrity(i: IntegrityViolationFinding): TemplateResult {
     const tampered = i.tamperedEvents;
-    const unverified = i.unverifiedAnchored;
-    const severe = tampered.length > 0;
+    const notFound = i.notFoundOnDe;
+    const pending = i.pendingVerification;
+    // Pending verification is a normal, expected state — only tampered events
+    // and checkpoints DE confirmed missing count toward a clean/violation
+    // verdict.
+    const clean = tampered.length === 0 && notFound.length === 0;
     return html`
       <div class="card full">
         <h3>Integrity</h3>
         ${i.note ? html`<div class="meta">${i.note}</div>` : ""}
-        ${tampered.length === 0 && unverified.length === 0
+        ${clean
           ? html`<div class="empty"><span class="badge ok">clean</span> no integrity violations in window</div>`
           : ""}
         ${tampered.length > 0 ? html`
@@ -201,13 +205,30 @@ export class AnomaliesView extends LitElement {
               </tbody>
             </table>
           </div>` : ""}
-        ${unverified.length > 0 ? html`
+        ${notFound.length > 0 ? html`
           <div class="anomaly severe">
-            <h4>Unverified anchored checkpoints (${unverified.length})</h4>
+            <h4>Checkpoints not found on DE (${notFound.length})</h4>
+            <p class="meta">Anchored but the DE transaction could not be found on verification — the SMT root was never durably recorded.</p>
             <table>
               <thead><tr><th>Checkpoint</th><th>Sequence range</th><th>DE tx</th><th>SMT root</th></tr></thead>
               <tbody>
-                ${unverified.map((c) => html`<tr>
+                ${notFound.map((c) => html`<tr>
+                  <td>${c.checkpointId}</td>
+                  <td>${c.sequenceStart}–${c.sequenceEnd}</td>
+                  <td style="font-family: var(--mono); font-size: 11px">${c.deTxHash ?? "—"}</td>
+                  <td style="font-family: var(--mono); font-size: 11px">${c.smtRoot}</td>
+                </tr>`)}
+              </tbody>
+            </table>
+          </div>` : ""}
+        ${pending.length > 0 ? html`
+          <div class="anomaly">
+            <h4><span class="badge ok">normal</span> Pending DE verification (${pending.length})</h4>
+            <p class="meta">Anchored and awaiting DE confirmation. This is expected — not an anomaly. Verification re-runs on a cadence and clears these automatically.</p>
+            <table>
+              <thead><tr><th>Checkpoint</th><th>Sequence range</th><th>DE tx</th><th>SMT root</th></tr></thead>
+              <tbody>
+                ${pending.map((c) => html`<tr>
                   <td>${c.checkpointId}</td>
                   <td>${c.sequenceStart}–${c.sequenceEnd}</td>
                   <td style="font-family: var(--mono); font-size: 11px">${c.deTxHash ?? "—"}</td>

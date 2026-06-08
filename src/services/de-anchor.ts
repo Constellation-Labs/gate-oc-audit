@@ -6,6 +6,7 @@ import type {AuditStore} from "../store/audit-store.js";
 import type {NotificationService} from "./notifications.js";
 import type {SmtService} from "./smt-service.js";
 import {deAnchorLog} from "../util/logger.js";
+import {ANCHOR_NOT_FOUND_HEALTH_NAME} from "./health-keys.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
@@ -133,7 +134,7 @@ function startOfUtcDayIso(now: Date = new Date()): string {
 }
 
 export const ANCHOR_HEALTH_NAME = "anchor";
-export const ANCHOR_NOT_FOUND_HEALTH_NAME = "anchor-not-found";
+export { ANCHOR_NOT_FOUND_HEALTH_NAME };
 
 // ---------------------------------------------------------------------------
 // No-op implementation — logs a warning, every method is a stub
@@ -255,7 +256,16 @@ class ActiveAnchorService implements AnchorService {
         await this.anchorIfNeeded(this.timerMinEvents);
         this.persistHealth();
         this.timer = setInterval(() => {
-            this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
+            // Re-verify before anchoring so checkpoints anchored during a long
+            // running session don't stay "pending" until the next restart —
+            // DE confirmation lags submission, so the startup pass alone can't
+            // clear them. verifyCheckpoints swallows its own errors and no-ops
+            // when nothing is unverified.
+            this.verifyCheckpoints()
+                .catch(() => {})
+                .finally(() => {
+                    this.anchorIfNeeded(this.timerMinEvents).catch(() => {});
+                });
         }, this.intervalMs);
         this.timer.unref();
         deAnchorLog.info("Started successfully");
@@ -370,6 +380,13 @@ class ActiveAnchorService implements AnchorService {
                     try {
                         await verifyFn(deTxHash);
                         store.markCheckpointVerified(cp.id);
+                        // If DE was previously 404ing this checkpoint and has
+                        // since caught up, drop it from the not-found set so the
+                        // persisted signal doesn't keep a recovered checkpoint
+                        // flagged as a violation.
+                        if (this.notedNotFoundCheckpointIds.delete(cp.id)) {
+                            this.persistNotFoundCheckpointIds();
+                        }
                     } catch (err) {
                         if (err instanceof DedApiError && (err as {status: number}).status === 404) {
                             deAnchorLog.error(`Verification failed for checkpoint ${cp.id}: ${deTxHash} not found on DE`);

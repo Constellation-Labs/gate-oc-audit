@@ -8,7 +8,9 @@ import { AuditStore } from "../../src/store/audit-store.js";
 import { SmtService } from "../../src/services/smt-service.js";
 import { buildAnomalyView } from "../../src/reports/anomalies-view.js";
 import { formatAnomalyViewHtml } from "../../src/reports/format-anomalies-html.js";
+import { formatAnomalyViewText } from "../../src/reports/format-anomalies-text.js";
 import { parseSince } from "../../src/reports/time-window.js";
+import { ANCHOR_NOT_FOUND_HEALTH_NAME } from "../../src/services/health-keys.js";
 
 function makeTempDb(): string {
   return join(mkdtempSync(join(tmpdir(), "audit-anom-")), "test.db");
@@ -84,6 +86,65 @@ describe("buildAnomalyView orchestrator", () => {
     assert.equal(view.anomalies.integrityViolations.note !== null, true);
     assert.match(view.anomalies.integrityViolations.note!, /SMT/i);
     assert.equal(view.anomalies.integrityViolations.tamperedEvents.length, 0);
+  });
+
+  it("splits unverified checkpoints into not-found-on-DE (violation) vs pending (normal)", () => {
+    // Two anchored-but-unverified checkpoints. Only the one recorded in the
+    // persisted not-found set (a confirmed 404) is a violation; the other is
+    // merely awaiting DE confirmation and must NOT read as an anomaly.
+    const inWindow = "2026-05-18T12:00:00.000Z";
+    store.insertCheckpoint("cp-notfound", 1, 10, "a".repeat(64), 10, "detx-missing");
+    store.insertCheckpoint("cp-pending", 11, 20, "b".repeat(64), 10, "detx-pending");
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.prepare("UPDATE integrity_checkpoints SET created_at = ? WHERE id IN ('cp-notfound', 'cp-pending')").run(inWindow);
+    db.close();
+    store.upsertServiceHealth(ANCHOR_NOT_FOUND_HEALTH_NAME, ["cp-notfound"]);
+
+    const window = parseSince(
+      "2026-05-18T00:00:00.000Z",
+      "2026-05-19T00:00:00.000Z",
+      "utc",
+      new Date("2026-05-19T00:00:00.000Z"),
+    );
+    const iv = buildAnomalyView(store, smt, window).anomalies.integrityViolations;
+    assert.deepEqual(iv.notFoundOnDe.map((c) => c.checkpointId), ["cp-notfound"]);
+    assert.deepEqual(iv.pendingVerification.map((c) => c.checkpointId), ["cp-pending"]);
+  });
+
+  it("does not report a pending-only window as an anomaly (text formatter)", () => {
+    // A checkpoint anchored and awaiting DE confirmation is normal. With no
+    // tampering, no 404s, and no scan note, the report must read clean — this
+    // is the whole point of the pending/not-found split. Built directly so the
+    // SMT-empty note can't confound the assertion.
+    const pendingCp = {
+      checkpointId: "cp-pending",
+      sequenceStart: 1,
+      sequenceEnd: 10,
+      smtRoot: "b".repeat(64),
+      deTxHash: "detx-pending",
+      createdAt: "2026-05-18T12:00:00.000Z",
+    };
+    const view = {
+      schemaVersion: 1 as const,
+      generatedAt: "2026-05-19T00:00:00.000Z",
+      period: parseSince("2026-05-18T00:00:00.000Z", "2026-05-19T00:00:00.000Z", "utc", new Date("2026-05-19T00:00:00.000Z")),
+      detectorConfig: { dupWindowSec: 60, lookbackDays: 30, denialWindowSec: 300, denialThreshold: 5 },
+      counts: { totalEventsInWindow: 0, capped: false },
+      anomalies: {
+        duplicateOutbound: [],
+        firstSeenTools: [],
+        denialSpikes: [],
+        installEvents: [],
+        integrityViolations: {
+          notFoundOnDe: [],
+          pendingVerification: [pendingCp],
+          tamperedEvents: [],
+          note: null,
+        },
+      },
+    };
+    assert.match(formatAnomalyViewText(view), /No anomalies detected\./);
   });
 
   it("excludes invocations whose metadata.toolName is missing from first-seen", () => {
