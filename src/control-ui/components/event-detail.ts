@@ -282,6 +282,11 @@ export class EventDetail extends LitElement {
             </div>
             <div class="row"><span class="k">anchored at</span>
               <span class="v">${v.anchoredAt.createdAt}</span>
+            </div>
+            <div class="row"><span class="k">DE confirmation</span>
+              ${v.anchoredAt.verifiedAt
+                ? html`<span class="v" style="color: var(--ok)">✓ verified · ${v.anchoredAt.verifiedAt}</span>`
+                : html`<span class="v" style="color: var(--warn)">⏳ pending — submitted to DE, awaiting on-chain confirmation</span>`}
             </div>`
           : html`
             <div class="row"><span class="k">DE anchor</span>

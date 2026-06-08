@@ -56,7 +56,7 @@ export class AnomaliesView extends LitElement {
     }
     .empty { color: var(--fg-dim); font-style: italic; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
     th {
       color: var(--fg-dim); font-size: 11px;
       text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
@@ -70,8 +70,8 @@ export class AnomaliesView extends LitElement {
       border-radius: 0 6px 6px 0;
     }
     .anomaly.severe { border-left-color: var(--err); background: color-mix(in srgb, var(--err) 10%, var(--bg-elev)); }
-    .anomaly h4 { margin: 0 0 4px; font-size: 13px; }
-    .anomaly p { margin: 2px 0; font-size: 12px; }
+    .anomaly h4 { margin: 0 0 4px; font-size: 13px; overflow-wrap: anywhere; }
+    .anomaly p { margin: 2px 0; font-size: 12px; overflow-wrap: anywhere; }
     .anomaly a { color: var(--fg); text-decoration: underline; }
     .badge {
       display: inline-block; padding: 1px 8px; border-radius: 10px;

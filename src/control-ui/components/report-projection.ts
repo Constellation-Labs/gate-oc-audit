@@ -115,7 +115,7 @@ export class ReportProjection extends LitElement {
       margin-bottom: 6px;
     }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
     th { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
     tr:last-child td { border-bottom: 0; }
     td.right, th.right { text-align: right; font-variant-numeric: tabular-nums; }
@@ -126,8 +126,8 @@ export class ReportProjection extends LitElement {
       background: color-mix(in srgb, var(--warn) 8%, var(--bg-elev));
       border-radius: 0 6px 6px 0;
     }
-    .anomaly h4 { margin: 0 0 4px; font-size: 13px; }
-    .anomaly p { margin: 2px 0; font-size: 12px; }
+    .anomaly h4 { margin: 0 0 4px; font-size: 13px; overflow-wrap: anywhere; }
+    .anomaly p { margin: 2px 0; font-size: 12px; overflow-wrap: anywhere; }
     .anomaly a { color: var(--fg); text-decoration: underline; }
     .empty { color: var(--fg-dim); font-style: italic; }
     .truncated { color: var(--warn); font-size: 12px; }

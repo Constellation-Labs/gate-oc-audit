@@ -86,7 +86,7 @@ export class SessionView extends LitElement {
     }
     .total { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
     th {
       color: var(--fg-dim); font-size: 11px; text-transform: uppercase;
       letter-spacing: 0.04em; font-weight: 600;
