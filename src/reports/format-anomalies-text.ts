@@ -22,7 +22,7 @@ export function formatAnomalyViewText(v: AnomalyView): string {
     a.firstSeenTools.length > 0 ||
     a.denialSpikes.length > 0 ||
     a.installEvents.length > 0 ||
-    a.integrityViolations.unverifiedAnchored.length > 0 ||
+    a.integrityViolations.notFoundOnDe.length > 0 ||
     a.integrityViolations.tamperedEvents.length > 0 ||
     a.integrityViolations.note !== null ||
     v.counts.capped;
@@ -93,14 +93,14 @@ export function formatAnomalyViewText(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
+  if (iv.notFoundOnDe.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
     lines.push("=== Integrity violations ===");
     if (iv.note !== null) {
       lines.push(`  NOTE: ${iv.note}`);
     }
-    if (iv.unverifiedAnchored.length > 0) {
-      lines.push(`  Unverified anchored checkpoints (${iv.unverifiedAnchored.length}):`);
-      for (const c of iv.unverifiedAnchored) {
+    if (iv.notFoundOnDe.length > 0) {
+      lines.push(`  Checkpoints not found on DE (${iv.notFoundOnDe.length}):`);
+      for (const c of iv.notFoundOnDe) {
         lines.push(
           `    ${c.checkpointId}  seq=${c.sequenceStart}..${c.sequenceEnd}  smtRoot=${c.smtRoot.slice(0, 16)}…  deTx=${c.deTxHash ?? "(none)"}`,
         );
@@ -110,6 +110,16 @@ export function formatAnomalyViewText(v: AnomalyView): string {
       lines.push(`  Tampered events (${iv.tamperedEvents.length}):`);
       for (const e of iv.tamperedEvents) {
         lines.push(`    #${e.sequence} ${e.createdAt} ${e.eventType} id=${e.id}`);
+      }
+    }
+    // Pending verification is normal — list it only as context within an
+    // already-flagged section, never as a violation in its own right.
+    if (iv.pendingVerification.length > 0) {
+      lines.push(`  Pending DE verification (${iv.pendingVerification.length}, normal — awaiting confirmation):`);
+      for (const c of iv.pendingVerification) {
+        lines.push(
+          `    ${c.checkpointId}  seq=${c.sequenceStart}..${c.sequenceEnd}  smtRoot=${c.smtRoot.slice(0, 16)}…  deTx=${c.deTxHash ?? "(none)"}`,
+        );
       }
     }
     lines.push("");

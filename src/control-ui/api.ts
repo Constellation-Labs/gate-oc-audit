@@ -597,7 +597,10 @@ export interface TamperedEventRef extends EventRef {
 }
 
 export interface IntegrityViolationFinding {
-  unverifiedAnchored: UnverifiedAnchoredCheckpoint[];
+  /** Anchored checkpoints confirmed missing on DE (404) — a genuine violation. */
+  notFoundOnDe: UnverifiedAnchoredCheckpoint[];
+  /** Anchored checkpoints awaiting DE confirmation — normal, not a violation. */
+  pendingVerification: UnverifiedAnchoredCheckpoint[];
   tamperedEvents: TamperedEventRef[];
   note: string | null;
 }

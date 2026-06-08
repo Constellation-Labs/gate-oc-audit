@@ -11,6 +11,7 @@ import {
     ApiKeyAnchorService,
     WalletAnchorService,
 } from "../../src/services/de-anchor.js";
+import {ANCHOR_NOT_FOUND_HEALTH_NAME} from "../../src/services/health-keys.js";
 import type {AuditEventInsert} from "../../src/types/events.js";
 import {deAnchorLog} from "../../src/util/logger.js";
 import {captureLogger} from "../test-utils/capture-logger.js";
@@ -462,6 +463,112 @@ describe("DeAnchorService", () => {
                 assert.equal(payload.lastTxHash, "de-tx-h");
             } finally {
                 await new Promise<void>((r) => server.close(() => r()));
+            }
+        });
+    });
+
+    describe("verifyCheckpoints (re-verify)", () => {
+        // A controllable mock DE server. Submit (POST) always accepts; verify
+        // (GET /v1/fingerprints/{hash}) returns whatever `verifyStatus` is set
+        // to, so a test can flip a checkpoint from 404 (not found on DE) to 200
+        // (confirmed) and observe the service react.
+        function makeDeServer() {
+            let verifyStatus = 404;
+            const server = createServer((req, res) => {
+                if (req.method === "POST") {
+                    res.writeHead(200, {"Content-Type": "application/json"});
+                    res.end(JSON.stringify([{accepted: true, hash: "detx-mid", eventId: "evt-1", errors: []}]));
+                    return;
+                }
+                // GET — verification lookup by hash.
+                res.writeHead(verifyStatus, {"Content-Type": "application/json"});
+                res.end(verifyStatus === 200 ? JSON.stringify({status: "FINALIZED"}) : JSON.stringify({error: "not found"}));
+            });
+            return {
+                server,
+                listen: () =>
+                    new Promise<number>((r) => server.listen(0, () => r((server.address() as {port: number}).port))),
+                setVerifyStatus: (s: number) => {
+                    verifyStatus = s;
+                },
+            };
+        }
+
+        function makeService(port: number, overrides: Record<string, unknown> = {}) {
+            process.env.DE_TEST_URL = `http://localhost:${port}/v1`;
+            const service = new ApiKeyAnchorService(store, {
+                deApiKey: "test-key",
+                deEnv: "test",
+                deOrgId: "11111111-1111-1111-1111-111111111111",
+                deTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                deEventThreshold: 1000,
+                ...overrides,
+            });
+            service.setSmtService({getCurrentSmtRoot: () => "a".repeat(64)} as any);
+            return service;
+        }
+
+        function notFoundSet(): Set<string> {
+            const row = store.getServiceHealth(ANCHOR_NOT_FOUND_HEALTH_NAME);
+            return new Set(Array.isArray(row?.payload) ? (row!.payload as string[]) : []);
+        }
+
+        async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                if (predicate()) return;
+                await new Promise((r) => setTimeout(r, 10));
+            }
+            assert.fail(`condition not met within ${timeoutMs}ms`);
+        }
+
+        it("startup verify confirms a pending checkpoint and clears a recovered not-found entry", async () => {
+            const de = makeDeServer();
+            const port = await de.listen();
+            try {
+                // A checkpoint that was previously 404'd (recorded in the
+                // not-found set) but is now confirmable on DE.
+                store.insertCheckpoint("cp-recovered", 1, 10, "a".repeat(64), 10, "detx-recovered");
+                store.upsertServiceHealth(ANCHOR_NOT_FOUND_HEALTH_NAME, ["cp-recovered"]);
+                de.setVerifyStatus(200);
+
+                const service = makeService(port);
+                try {
+                    await service.start();
+                    // start() awaits the startup verifyCheckpoints() pass.
+                    assert.equal(store.getUnverifiedCheckpoints().length, 0, "checkpoint should be verified");
+                    assert.equal(notFoundSet().has("cp-recovered"), false, "recovered checkpoint dropped from not-found set");
+                } finally {
+                    await service.stop();
+                }
+            } finally {
+                await new Promise<void>((r) => de.server.close(() => r()));
+            }
+        });
+
+        it("periodic timer re-verifies a checkpoint that DE confirms after startup", async () => {
+            const de = makeDeServer();
+            const port = await de.listen();
+            try {
+                // Anchored mid-session, DE hasn't confirmed it yet.
+                store.insertCheckpoint("cp-mid", 1, 10, "a".repeat(64), 10, "detx-mid");
+
+                const service = makeService(port, {deIntervalMs: 40});
+                try {
+                    // Startup pass: DE 404s — stays unverified, recorded as not-found.
+                    await service.start();
+                    assert.equal(store.getUnverifiedCheckpoints().length, 1, "still pending after startup 404");
+                    assert.equal(notFoundSet().has("cp-mid"), true, "404 recorded in not-found set");
+
+                    // DE catches up; the interval timer must pick it up without a restart.
+                    de.setVerifyStatus(200);
+                    await waitFor(() => store.getUnverifiedCheckpoints().length === 0);
+                    assert.equal(notFoundSet().has("cp-mid"), false, "confirmed checkpoint dropped from not-found set");
+                } finally {
+                    await service.stop();
+                }
+            } finally {
+                await new Promise<void>((r) => de.server.close(() => r()));
             }
         });
     });

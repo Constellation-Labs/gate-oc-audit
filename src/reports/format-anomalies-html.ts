@@ -107,14 +107,14 @@ function renderBody(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.unverifiedAnchored.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
+  if (iv.notFoundOnDe.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
     sections.push(`<h2>Integrity violations</h2>`);
     if (iv.note !== null) {
       sections.push(`<p class="empty">${escape(iv.note)}</p>`);
     }
-    if (iv.unverifiedAnchored.length > 0) {
-      sections.push(`<p><strong>Unverified anchored checkpoints (${iv.unverifiedAnchored.length}):</strong></p>`);
-      for (const c of iv.unverifiedAnchored) {
+    if (iv.notFoundOnDe.length > 0) {
+      sections.push(`<p><strong>Checkpoints not found on DE (${iv.notFoundOnDe.length}):</strong></p>`);
+      for (const c of iv.notFoundOnDe) {
         sections.push(
           `<div class="anomaly bad">
   <div class="anomaly-head">${escape(c.checkpointId)}  seq=${c.sequenceStart}..${c.sequenceEnd}</div>
@@ -129,6 +129,20 @@ function renderBody(v: AnomalyView): string {
       for (const e of iv.tamperedEvents) {
         sections.push(
           `<div class="anomaly bad anomaly-event">#${e.sequence} ${escape(e.createdAt)} ${escape(e.eventType)} id=${escape(e.id)}</div>`,
+        );
+      }
+    }
+    // Pending verification is normal — shown for context within an
+    // already-flagged section, never as a violation in its own right.
+    if (iv.pendingVerification.length > 0) {
+      sections.push(`<p><strong>Pending DE verification (${iv.pendingVerification.length}):</strong> awaiting confirmation — normal, not a violation.</p>`);
+      for (const c of iv.pendingVerification) {
+        sections.push(
+          `<div class="anomaly">
+  <div class="anomaly-head">${escape(c.checkpointId)}  seq=${c.sequenceStart}..${c.sequenceEnd}</div>
+  <div class="hash">smtRoot=${escape(c.smtRoot)}</div>
+  <div class="hash">deTx=${c.deTxHash ? escape(c.deTxHash) : "(none)"}</div>
+</div>`,
         );
       }
     }
