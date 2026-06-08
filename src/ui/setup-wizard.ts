@@ -67,14 +67,8 @@ export async function runSetupWizard(opts: SetupWizardOptions): Promise<void> {
  section("Step 2 / 3 — Digital Evidence credentials");
  out(
  [
- "Digital Evidence anchors audit checkpoints to Constellation for tamper-evident",
- "verification. You'll need one value from your DE dashboard:",
- ` • API key — generated under "API Keys" on ${SIGNUP_URL}`,
- "",
- "Your organization and tenant IDs are resolved automatically from the API key.",
- "",
- `If you don't have an account yet, sign up at ${SIGNUP_URL} and come back.`,
- "",
+ "Digital Evidence anchors checkpoints of your audit log to Constellation Network blockchain for tamper-evident verification. " +
+ `To continue, sign up for a FREE Digital Evidence account and generate an API key at:  ${SIGNUP_URL}. `,
  ].join("\n"),
  );
  await promptContinue(rl, "Press Enter once you have your API key. ");
@@ -279,7 +273,7 @@ function printSummary(id: DeIdentity, optIns: OptIns): void {
  out();
  out("About to write:");
  if (optIns.addToAllowList) {
- out(` plugins.allow ⊇ ["${PLUGIN_ID}"]`);
+ out(` plugins.allow add ["${PLUGIN_ID}"]`);
  }
  if (optIns.enableConversationAccess) {
  out(` plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess = true`);
