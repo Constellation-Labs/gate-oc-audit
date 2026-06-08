@@ -1,7 +1,7 @@
 import * as readline from "node:readline/promises";
 import {stdin as input, stdout as output} from "node:process";
 import {mutateConfigFile} from "openclaw/plugin-sdk/config-mutation";
-import {DE_EXPLORER_URLS, type DeEnv} from "../services/de-anchor.js";
+import {DE_EXPLORER_URLS, resolveBaseUrl, type DeEnv} from "../services/de-anchor.js";
 import {resolveAuditUiUrl} from "../util/gateway-url.js";
 
 export interface SetupWizardOptions {
@@ -16,6 +16,8 @@ const SIGNUP_URL = `${DE_EXPLORER_URLS[DE_ENV]}/get-started/sign-up`;
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_TIMER_MIN_EVENTS = 1;
 const DEFAULT_INTERVAL_MS = 300_000;
+
+const WHOAMI_TIMEOUT_MS = 15_000;
 
 interface DeIdentity {
  deApiKey: string;
@@ -65,24 +67,34 @@ export async function runSetupWizard(opts: SetupWizardOptions): Promise<void> {
  section("Step 2 / 3 — Digital Evidence credentials");
  out(
  [
- "Digital Evidence anchors audit checkpoints to Constellation for tamper-evident",
- "verification. You'll need three values from your DE dashboard:",
- ` 1. API key — generated under "API Keys" on ${SIGNUP_URL}`,
- " 2. Organization ID — UUID, visible on your org settings page",
- " 3. Tenant ID — UUID, visible on your tenant settings page",
- "",
- `If you don't have an account yet, sign up at ${SIGNUP_URL} and come back.`,
- "",
+ "Digital Evidence anchors checkpoints of your audit log to Constellation Network blockchain for tamper-evident verification. " +
+ `To continue, sign up for a FREE Digital Evidence account and generate an API key at:  ${SIGNUP_URL}. `,
  ].join("\n"),
  );
- await promptContinue(rl, "Press Enter once you have your API key, org ID, and tenant ID. ");
+ await promptContinue(rl, "Press Enter once you have your API key. ");
 
- const deApiKey = await promptNonEmpty(
- rl,
- "Paste your DE API key (input will be shown; clear scrollback after if sensitive)",
- );
- const deOrgId = await promptUuid(rl, "DE organization ID (UUID)");
- const deTenantId = await promptUuid(rl, "DE tenant ID (UUID)");
+ const apiKeyPrompt = "Paste your DE API key (input will be shown; clear scrollback after if sensitive)";
+ let deApiKey = await promptNonEmpty(rl, apiKeyPrompt);
+
+ let resolved = await fetchDeIdentity(deApiKey);
+ while (!resolved) {
+ const retry = await promptYesNo(rl, "Retry API key lookup?", true);
+ if (!retry) break;
+ deApiKey = await promptNonEmpty(rl, apiKeyPrompt);
+ resolved = await fetchDeIdentity(deApiKey);
+ }
+
+ let deOrgId: string;
+ let deTenantId: string;
+ if (resolved) {
+ deOrgId = resolved.orgId;
+ deTenantId = resolved.tenantId;
+ out(`Resolved organization ${deOrgId} and tenant ${deTenantId} from your API key.`);
+ } else {
+ out("Continuing with manual org/tenant entry.");
+ deOrgId = await promptUuid(rl, "DE organization ID (UUID)");
+ deTenantId = await promptUuid(rl, "DE tenant ID (UUID)");
+ }
 
  let deEventThreshold = DEFAULT_EVENT_THRESHOLD;
  let deTimerMinEvents = DEFAULT_TIMER_MIN_EVENTS;
@@ -202,6 +214,46 @@ async function promptUuid(rl: readline.Interface, msg: string): Promise<string> 
  }
 }
 
+/**
+ * Look up the org/tenant tied to a DE API key via the DE `whoami` endpoint, so
+ * the user doesn't have to paste the UUIDs by hand. Returns undefined on any
+ * failure (network error, non-2xx, malformed body) so the caller can fall back
+ * to manual entry.
+ */
+async function fetchDeIdentity(
+ apiKey: string,
+): Promise<{orgId: string; tenantId: string} | undefined> {
+ const url = `${resolveBaseUrl(DE_ENV)}/whoami`;
+ try {
+ const res = await fetch(url, {
+ headers: {"x-api-key": apiKey},
+ signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
+ redirect: "manual",
+ });
+ if (!res.ok) {
+ out(`API key lookup failed (HTTP ${res.status}).`);
+ return undefined;
+ }
+ const body = (await res.json()) as {data?: {orgId?: unknown; tenantId?: unknown}};
+ const orgId = body?.data?.orgId;
+ const tenantId = body?.data?.tenantId;
+ if (
+ typeof orgId === "string" &&
+ UUID_RE.test(orgId) &&
+ typeof tenantId === "string" &&
+ UUID_RE.test(tenantId)
+ ) {
+ return {orgId: orgId.toLowerCase(), tenantId: tenantId.toLowerCase()};
+ }
+ out("API key lookup returned an unexpected response.");
+ return undefined;
+ } catch (err) {
+ const message = err instanceof Error ? err.message : "Unknown error";
+ out(`API key lookup error: ${message}`);
+ return undefined;
+ }
+}
+
 async function promptPositiveInt(
  rl: readline.Interface,
  msg: string,
@@ -221,7 +273,7 @@ function printSummary(id: DeIdentity, optIns: OptIns): void {
  out();
  out("About to write:");
  if (optIns.addToAllowList) {
- out(` plugins.allow ⊇ ["${PLUGIN_ID}"]`);
+ out(` plugins.allow add ["${PLUGIN_ID}"]`);
  }
  if (optIns.enableConversationAccess) {
  out(` plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess = true`);
