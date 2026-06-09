@@ -1,7 +1,16 @@
 {
   "name": "@constellation-network/gate-oc-audit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tamper-evident audit trail for AI coding agent activity",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Constellation-Labs/gate-oc-audit.git"
+  },
+  "homepage": "https://constellationgate.ai/openclaw-audit",
+  "bugs": {
+    "url": "https://github.com/Constellation-Labs/gate-oc-audit/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
