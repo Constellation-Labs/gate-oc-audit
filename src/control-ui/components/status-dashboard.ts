@@ -1,6 +1,7 @@
 import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { getStatus, type StatusSnapshot } from "../api.ts";
+import { getStatus, getAnomalies, type StatusSnapshot, type AnomalyView } from "../api.ts";
+import { computeHealthVerdict, type HealthVerdict } from "../health.ts";
 
 const REFRESH_MS = 30_000;
 
@@ -25,10 +26,15 @@ function fmtRelative(iso: string | null | undefined, now: Date): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return iso;
   const diffSec = Math.round((now.getTime() - t) / 1000);
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
-  if (diffSec < 86_400) return `${Math.round(diffSec / 3600)}h ago`;
-  return `${Math.round(diffSec / 86_400)}d ago`;
+  // Negative diff means the instant is in the future (e.g. next prune) —
+  // render as "in …" rather than a nonsensical negative "… ago".
+  const abs = Math.abs(diffSec);
+  const phrase =
+    abs < 60 ? `${abs}s` :
+    abs < 3600 ? `${Math.round(abs / 60)}m` :
+    abs < 86_400 ? `${Math.round(abs / 3600)}h` :
+    `${Math.round(abs / 86_400)}d`;
+  return diffSec < 0 ? `in ${phrase}` : `${phrase} ago`;
 }
 
 @customElement("status-dashboard")
@@ -52,13 +58,64 @@ export class StatusDashboard extends LitElement {
       border-radius: 6px;
       margin-bottom: 12px;
     }
-    .degraded {
-      color: var(--warn);
-      padding: 8px 12px;
-      border: 1px solid var(--warn);
-      border-radius: 6px;
-      margin-bottom: 12px;
-      font-size: 13px;
+    /* Hero health verdict — the featured element. */
+    .hero {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 20px 22px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .hero .icon { font-size: 34px; line-height: 1; }
+    .hero .body { flex: 1; min-width: 0; }
+    .hero h2 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .hero .sub { margin-top: 4px; font-size: 13px; color: var(--fg-dim); }
+    .hero ul { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+    .hero li { display: flex; align-items: baseline; gap: 8px; font-size: 13px; overflow-wrap: anywhere; }
+    .hero li .dot { flex: none; }
+    .hero li a { color: var(--fg); text-decoration: underline; }
+    .hero .notes { margin-top: 10px; font-size: 12px; color: var(--fg-dim); }
+    .hero.ok { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--bg-elev)); }
+    .hero.ok h2 { color: var(--ok); }
+    .hero.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--bg-elev)); }
+    .hero.warn h2 { color: var(--warn); }
+    .hero.err { border-color: var(--err); background: color-mix(in srgb, var(--err) 10%, var(--bg-elev)); }
+    .hero.err h2 { color: var(--err); }
+    .dot.lvl-warn { color: var(--warn); }
+    .dot.lvl-err { color: var(--err); }
+    /* Section headings above Activity / Details. */
+    h2.section {
+      margin: 24px 0 12px;
+      font-size: 17px;
+      font-weight: 600;
+    }
+    /* Recent-activity stat tiles. */
+    .activity {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px 28px;
+      padding: 16px 18px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .activity .stat .v {
+      font-size: 22px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .activity .stat .l {
+      font-size: 11px;
+      color: var(--fg-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
     .grid {
       display: grid;
@@ -72,12 +129,11 @@ export class StatusDashboard extends LitElement {
       padding: 14px 16px;
     }
     .card h3 {
-      margin: 0 0 8px;
-      font-size: 12px;
+      margin: 0 0 10px;
+      font-size: 14px;
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: var(--fg-dim);
+      letter-spacing: 0.01em;
+      color: var(--fg);
     }
     .row {
       display: grid;
@@ -105,6 +161,7 @@ export class StatusDashboard extends LitElement {
   `;
 
   @state() private snapshot?: StatusSnapshot;
+  @state() private anomalies: AnomalyView | null = null;
   @state() private error?: string;
   @state() private loading = false;
   @state() private lastFetchedAt?: Date;
@@ -125,15 +182,21 @@ export class StatusDashboard extends LitElement {
 
   private async refresh(): Promise<void> {
     this.loading = true;
-    try {
-      this.snapshot = await getStatus();
+    // Status drives the page; the anomaly scan is best-effort — a failure there
+    // degrades the verdict to snapshot-only signals rather than blanking the page.
+    const [status, anomalies] = await Promise.allSettled([
+      getStatus(),
+      getAnomalies({ since: "24h" }),
+    ]);
+    if (status.status === "fulfilled") {
+      this.snapshot = status.value;
       this.error = undefined;
       this.lastFetchedAt = new Date();
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-    } finally {
-      this.loading = false;
+    } else {
+      this.error = status.reason instanceof Error ? status.reason.message : String(status.reason);
     }
+    this.anomalies = anomalies.status === "fulfilled" ? anomalies.value : null;
+    this.loading = false;
   }
 
   render(): TemplateResult {
@@ -150,16 +213,20 @@ export class StatusDashboard extends LitElement {
       </div>
 
       ${this.error ? html`<div class="err">${this.error}</div>` : ""}
-      ${this.snapshot?.degraded
-        ? html`<div class="degraded">Store is in degraded mode — some events may be missing.</div>`
-        : ""}
-      ${this.snapshot ? this.renderGrid(this.snapshot) : html`<div class="empty">No snapshot yet.</div>`}
+      ${this.snapshot ? this.renderContent(this.snapshot) : html`<div class="empty">No snapshot yet.</div>`}
     `;
   }
 
-  private renderGrid(s: StatusSnapshot): TemplateResult {
+  private renderContent(s: StatusSnapshot): TemplateResult {
     const now = this.lastFetchedAt ?? new Date();
+    const verdict = computeHealthVerdict(s, this.anomalies);
     return html`
+      ${this.renderHero(verdict)}
+
+      <h2 class="section">Recent activity</h2>
+      ${this.renderActivity(s, now)}
+
+      <h2 class="section">Details</h2>
       <div class="grid">
         ${this.renderPluginCard(s)}
         ${this.renderStorageCard(s, now)}
@@ -168,6 +235,51 @@ export class StatusDashboard extends LitElement {
         ${this.renderFileWatchCard(s)}
         ${this.renderInventoryCard(s)}
         ${this.renderSecurityCard(s, now)}
+      </div>
+    `;
+  }
+
+  private renderHero(v: HealthVerdict): TemplateResult {
+    const icon = v.level === "ok" ? "✓" : v.level === "warn" ? "⚠" : "✕";
+    const headline =
+      v.level === "ok" ? "All systems normal" :
+      v.level === "warn" ? "Minor issues" :
+      "Attention required";
+    const sub =
+      v.level === "ok"
+        ? "No anomalies, integrity violations, or anchor failures in the last 24h."
+        : `${v.issues.length} issue${v.issues.length === 1 ? "" : "s"} need${v.issues.length === 1 ? "s" : ""} attention.`;
+    return html`
+      <div class="hero ${v.level}">
+        <div class="icon">${icon}</div>
+        <div class="body">
+          <h2>${headline}</h2>
+          <div class="sub">${sub}</div>
+          ${v.issues.length > 0
+            ? html`<ul>
+                ${v.issues.map((i) => html`<li>
+                  <span class="dot lvl-${i.level}">●</span>
+                  <span>${i.href ? html`<a href=${i.href}>${i.message}</a>` : i.message}</span>
+                </li>`)}
+              </ul>`
+            : ""}
+          ${v.notes.length > 0
+            ? html`<div class="notes">${v.notes.map((n) => html`<div>${n}</div>`)}</div>`
+            : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderActivity(s: StatusSnapshot, now: Date): TemplateResult {
+    return html`
+      <div class="activity">
+        <div class="stat"><div class="v">${fmtNumber(s.storage.eventCount)}</div><div class="l">Total events</div></div>
+        <div class="stat"><div class="v">#${fmtNumber(s.integrity.sequenceAtHead)}</div><div class="l">Head sequence</div></div>
+        <div class="stat"><div class="v">${fmtNumber(s.fileWatch.recentChanges24h)}</div><div class="l">Changes 24h</div></div>
+        <div class="stat"><div class="v">${fmtNumber(s.anchor.anchoredToday)}</div><div class="l">Anchored today</div></div>
+        <div class="stat"><div class="v">${fmtRelative(s.anchor.lastAnchorAt, now)}</div><div class="l">Last anchor</div></div>
+        <div class="stat"><div class="v">${fmtRelative(s.securityScan.lastScanAt, now)}</div><div class="l">Last scan</div></div>
       </div>
     `;
   }
