@@ -6,6 +6,7 @@ import { resolveAuditUiUrl } from "./util/gateway-url.js";
 import { streamExport, type ExportFormat } from "./ui/export.js";
 import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
 import { resolveOpenclawDir } from "./util/openclaw-paths.js";
+import { readAllowConversationAccess } from "./util/host-config.js";
 import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
 import { parseDate, parseWeek, parseSince, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
 import { buildProjection } from "./reports/projection.js";
@@ -566,7 +567,10 @@ export async function cliStatusHandler(
     watched: Array.isArray(config.fileWatchPatterns) ? (config.fileWatchPatterns as unknown[]).length : 0,
     ignored: Array.isArray(config.fileWatchIgnorePatterns) ? (config.fileWatchIgnorePatterns as unknown[]).length : 0,
   };
-  const allowConversationAccess = config.allowConversationAccess === true;
+  // The opt-in lives at plugins.entries.<id>.hooks.allowConversationAccess in
+  // the host config — a sibling of this plugin's `config` block, so it is not
+  // present on `config`. Read it from the host openclaw.json directly.
+  const allowConversationAccess = readAllowConversationAccess(resolveOpenclawDir(config));
 
   const snapshot = buildStatusSnapshot({
     pluginName,

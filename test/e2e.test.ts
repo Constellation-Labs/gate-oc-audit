@@ -1476,19 +1476,32 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
 
 describe("e2e: audit status — CLI handler over a hook-populated store", () => {
   let rig: Rig;
+  let ocDir: string;
 
   before(async () => {
+    // The conversation-access opt-in lives in the host config under
+    // plugins.entries.<id>.hooks — write a host openclaw.json the status
+    // reader picks up via config.openclawDir.
+    ocDir = mkdtempSync(join(tmpdir(), "audit-e2e-status-oc-"));
+    writeFileSync(
+      join(ocDir, "openclaw.json"),
+      JSON.stringify({
+        plugins: {
+          entries: { "openclaw-audit-plugin": { hooks: { allowConversationAccess: true } } },
+        },
+      }),
+    );
     rig = await createRig({
       localRetentionDays: 30,
       localMaxSizeMb: 250,
       fileWatchPatterns: ["src/**/*.ts"],
       fileWatchIgnorePatterns: ["**/node_modules/**"],
-      allowConversationAccess: true,
+      openclawDir: ocDir,
     });
     seedSession(rig, "sess-status-1");
   });
 
-  after(async () => { await destroyRig(rig); });
+  after(async () => { await destroyRig(rig); rmSync(ocDir, { recursive: true, force: true }); });
 
   it("renders the PRD snapshot over hook-populated state", async () => {
     const { stdout, stderr } = await captureConsoleAsync(() =>

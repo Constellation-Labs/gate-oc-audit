@@ -19,6 +19,7 @@ import type { Verifier } from "../services/verifier.js";
 import type { SmtProof } from "../store/smt-store.js";
 import type { AuditEvent } from "../types/events.js";
 import { serveStaticFile } from "../util/asset-server.js";
+import { readAllowConversationAccess } from "../util/host-config.js";
 import { pipeExportToResponse, type ExportFilters, type ExportFormat } from "./export.js";
 import { log } from "../util/logger.js";
 import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "../reports/time-window.js";
@@ -1050,7 +1051,10 @@ function buildStatusFromContext(ctx: AuditUiContext): ReturnType<typeof buildSta
     retentionHealth,
     filePatterns,
     inventorySummary: inventoryReport.summary,
-    allowConversationAccess: config.allowConversationAccess === true,
+    // Read the opt-in from the host config (plugins.entries.<id>.hooks.*),
+    // not from this plugin's `config` block — they are siblings, so the flag
+    // never appears on `config`. Mirrors cliStatusHandler.
+    allowConversationAccess: readAllowConversationAccess(ctx.openclawDir ?? ""),
   });
 }
 
