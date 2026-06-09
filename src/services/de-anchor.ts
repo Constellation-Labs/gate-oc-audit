@@ -427,7 +427,7 @@ class ActiveAnchorService implements AnchorService {
                 documentRef: smtRoot,
                 timestamp: new Date(),
                 includeMetadata: true,
-                tags: {source: "openclaw-audit-plugin", type: "smt-root"},
+                tags: {source: "gate-oc-audit", type: "smt-root"},
             },
             this.deSigningKey,
         );

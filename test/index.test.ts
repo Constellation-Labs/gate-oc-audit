@@ -41,8 +41,8 @@ function createMockApi(dbPath: string) {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     runtime: {},
     registrationMode: "full" as const,
-    id: "openclaw-audit-plugin",
-    name: "@constellation-network/openclaw-audit-plugin",
+    id: "gate-oc-audit",
+    name: "@constellation-network/gate-oc-audit",
     source: "test",
     resolvePath: (p: string) => p,
   };
@@ -54,8 +54,8 @@ describe("plugin entry point", () => {
   });
 
   it("exports id, name, description, register", () => {
-    assert.equal(plugin.id, "openclaw-audit-plugin");
-    assert.equal(plugin.name, "@constellation-network/openclaw-audit-plugin");
+    assert.equal(plugin.id, "gate-oc-audit");
+    assert.equal(plugin.name, "@constellation-network/gate-oc-audit");
     assert.ok(plugin.description);
     assert.equal(typeof plugin.register, "function");
   });

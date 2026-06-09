@@ -1487,7 +1487,7 @@ describe("e2e: audit status — CLI handler over a hook-populated store", () => 
       join(ocDir, "openclaw.json"),
       JSON.stringify({
         plugins: {
-          entries: { "openclaw-audit-plugin": { hooks: { allowConversationAccess: true } } },
+          entries: { "gate-oc-audit": { hooks: { allowConversationAccess: true } } },
         },
       }),
     );
@@ -1505,11 +1505,11 @@ describe("e2e: audit status — CLI handler over a hook-populated store", () => 
 
   it("renders the PRD snapshot over hook-populated state", async () => {
     const { stdout, stderr } = await captureConsoleAsync(() =>
-      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "openclaw-audit-plugin", "0.0.0-test"),
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "gate-oc-audit", "0.0.0-test"),
     );
     assert.equal(stderr, "", `unexpected stderr: ${stderr}`);
     // Header
-    assert.match(stdout, /openclaw-audit-plugin v0\.0\.0-test/);
+    assert.match(stdout, /gate-oc-audit v0\.0\.0-test/);
     // The PRD-mock sections — keep loose so a section-title tweak doesn't flap.
     for (const section of ["Storage", "Integrity", "Digital Evidence anchor", "File watching", "Inventory", "Last security scan"]) {
       assert.ok(stdout.includes(section), `expected section "${section}" in status output`);
@@ -1524,12 +1524,12 @@ describe("e2e: audit status — CLI handler over a hook-populated store", () => 
 
   it("--json emits a single-line, parseable snapshot", async () => {
     const { stdout } = await captureConsoleAsync(() =>
-      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "openclaw-audit-plugin", "0.0.0-test", { json: true }),
+      cliStatusHandler(rig.store, rig.smt, rig.api.pluginConfig as Record<string, unknown>, "gate-oc-audit", "0.0.0-test", { json: true }),
     );
     const lines = stdout.split("\n").filter((l) => l.trim().length > 0);
     assert.equal(lines.length, 1, "JSON mode must emit exactly one line");
     const snap = JSON.parse(lines[0]!) as Record<string, Record<string, unknown>>;
-    assert.equal(snap.header!.pluginName, "openclaw-audit-plugin");
+    assert.equal(snap.header!.pluginName, "gate-oc-audit");
     assert.equal(snap.header!.pluginVersion, "0.0.0-test");
     assert.equal(snap.integrity!.sequenceAtHead, 5);
     assert.equal((snap.fileWatch as { patternsWatched: number }).patternsWatched, 1);
