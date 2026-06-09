@@ -14,7 +14,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -1302,9 +1302,21 @@ describe("ui: /api/status endpoint", () => {
   });
 
   it("reports conversationAccess=\"enabled\" when allowConversationAccess and a recent prompt.input exist", async () => {
+    // The opt-in lives in the host config under plugins.entries.<id>.hooks,
+    // not in the plugin config — write a host openclaw.json the status reader
+    // can pick up via openclawDir.
+    const ocDir = mkdtempSync(join(tmpdir(), "audit-ui-oc-"));
+    writeFileSync(
+      join(ocDir, "openclaw.json"),
+      JSON.stringify({
+        plugins: {
+          entries: { "openclaw-audit-plugin": { hooks: { allowConversationAccess: true } } },
+        },
+      }),
+    );
     const rig = await createUiRig({
       withStatusContext: true,
-      statusConfig: { allowConversationAccess: true },
+      openclawDir: ocDir,
     });
     try {
       rig.appendTracked(sampleInsert({
@@ -1318,6 +1330,7 @@ describe("ui: /api/status endpoint", () => {
       assert.equal(body.integrity.conversationAccess, "enabled");
     } finally {
       await rig.destroy();
+      rmSync(ocDir, { recursive: true, force: true });
     }
   });
 });
