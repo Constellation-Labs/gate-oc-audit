@@ -43,7 +43,7 @@ function baseInputs(store: AuditStore, smtService: SmtService, overrides: Partia
     maxSizeMb: 500,
   };
   return {
-    pluginName: "@constellation-network/openclaw-audit-plugin",
+    pluginName: "@constellation-network/gate-oc-audit",
     pluginVersion: "0.2.3",
     machineId: "test-machine-01",
     now: new Date("2026-05-20T00:00:00Z"),
@@ -294,7 +294,7 @@ describe("formatStatusText", () => {
   it("renders the PRD-mock sections", () => {
     const s = buildStatusSnapshot(baseInputs(store, smt));
     const text = formatStatusText(s);
-    assert.match(text, /^@constellation-network\/openclaw-audit-plugin v/);
+    assert.match(text, /^@constellation-network\/gate-oc-audit v/);
     assert.match(text, /\nStorage\n/);
     assert.match(text, /\nIntegrity\n/);
     assert.match(text, /\nDigital Evidence anchor\n/);

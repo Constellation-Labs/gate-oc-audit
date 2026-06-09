@@ -120,7 +120,7 @@ jobs:
             -v "${{ steps.cfg.outputs.dir }}:/home/node/.openclaw" \
             "$OPENCLAW_IMAGE" \
             dist/index.js config set \
-              plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess true
+              plugins.entries.gate-oc-audit.hooks.allowConversationAccess true
 
       - name: Start openclaw gateway
         run: |

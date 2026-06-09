@@ -78,7 +78,7 @@ async function createUiRig(opts: {
     openclawDir: opts.openclawDir,
     statusContext: opts.withStatusContext
       ? {
-          pluginName: "@constellation-network/openclaw-audit-plugin",
+          pluginName: "@constellation-network/gate-oc-audit",
           pluginVersion: "0.0.0-test",
           config: opts.statusConfig ?? {},
         }
@@ -1242,7 +1242,7 @@ describe("ui: /api/status endpoint", () => {
       const res = await fetch(`${rig.baseUrl}/plugins/audit/api/status`);
       assert.equal(res.status, 200);
       const body = (await res.json()) as Record<string, any>;
-      assert.equal(body.header.pluginName, "@constellation-network/openclaw-audit-plugin");
+      assert.equal(body.header.pluginName, "@constellation-network/gate-oc-audit");
       assert.equal(body.header.pluginVersion, "0.0.0-test");
       assert.equal(typeof body.header.machineId, "string");
       assert.equal(typeof body.header.generatedAt, "string");
@@ -1310,7 +1310,7 @@ describe("ui: /api/status endpoint", () => {
       join(ocDir, "openclaw.json"),
       JSON.stringify({
         plugins: {
-          entries: { "openclaw-audit-plugin": { hooks: { allowConversationAccess: true } } },
+          entries: { "gate-oc-audit": { hooks: { allowConversationAccess: true } } },
         },
       }),
     );

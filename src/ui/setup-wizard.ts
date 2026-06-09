@@ -8,7 +8,7 @@ export interface SetupWizardOptions {
  yes: boolean;
 }
 
-const PLUGIN_ID = "openclaw-audit-plugin";
+const PLUGIN_ID = "gate-oc-audit";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DE_ENV: DeEnv = "mainnet";
 const SIGNUP_URL = `${DE_EXPLORER_URLS[DE_ENV]}/get-started/sign-up`;
@@ -165,7 +165,7 @@ export async function runSetupWizard(opts: SetupWizardOptions): Promise<void> {
 
 function banner(): void {
  out();
- out("openclaw-audit-plugin setup wizard");
+ out("gate-oc-audit setup wizard");
  out("──────────────────────────────────");
  out("Walks you through openclaw opt-ins and Digital Evidence anchoring config.");
  out();

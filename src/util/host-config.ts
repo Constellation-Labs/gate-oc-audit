@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** openclaw keys per-plugin hook policy by the plugin's manifest id. */
-const AUDIT_PLUGIN_ID = "openclaw-audit-plugin";
+const AUDIT_PLUGIN_ID = "gate-oc-audit";
 
 /** Hard cap on the host config we parse, mirroring the manifest reader in
  *  openclaw-paths.ts. The file is host-owned and normally a few KB. */
@@ -16,7 +16,7 @@ interface HostConfigShape {
 
 /**
  * Read the host opt-in
- * `plugins.entries.openclaw-audit-plugin.hooks.allowConversationAccess` from
+ * `plugins.entries.gate-oc-audit.hooks.allowConversationAccess` from
  * `<openclawDir>/openclaw.json` — the file the setup wizard writes.
  *
  * openclaw stores this flag as a *sibling* of the plugin's own `config` block,

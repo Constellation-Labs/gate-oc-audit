@@ -61,8 +61,8 @@ export default (() => {
     let setupNudgeShown = false;
 
     return definePluginEntry({
-        id: "openclaw-audit-plugin",
-        name: "@constellation-network/openclaw-audit-plugin",
+        id: "gate-oc-audit",
+        name: "@constellation-network/gate-oc-audit",
         description: "Constellation Network Tamper-evident audit trail with SMT proofs and Digital Evidence anchoring",
 
         register(api) {
@@ -474,7 +474,7 @@ export default (() => {
                             "Digital Evidence anchoring is not configured.",
                             "",
                             "Option 1: API key (simplest)",
-                            "  1. Create account at https://evidence.constellationnetwork.io",
+                            "  1. Create account at https://digitalevidence.constellationnetwork.io",
                             "  2. Generate an API key from your dashboard",
                             '  3. Add to config: "deApiKey": "your-key", "deOrgId": "...", "deTenantId": "..."',
                             "",
@@ -603,7 +603,7 @@ export default (() => {
             limiter.setDeAnchor(deAnchor);
 
             api.registerService({
-                id: "openclaw-audit-plugin:smt",
+                id: "gate-oc-audit:smt",
                 async start() {
                     log.info("Service smt start() called");
                     await activeSmt.start();
@@ -634,7 +634,7 @@ export default (() => {
             // in-flight tick and retry timer are cancelled before retention.stop
             // closes the underlying store.
             api.registerService({
-                id: "openclaw-audit-plugin:report-pusher",
+                id: "gate-oc-audit:report-pusher",
                 start() {
                     reportPusher.start();
                 },
@@ -644,7 +644,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "openclaw-audit-plugin:retention",
+                id: "gate-oc-audit:retention",
                 start() {
                     retention.start();
                 },
@@ -664,7 +664,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "openclaw-audit-plugin:config-watcher",
+                id: "gate-oc-audit:config-watcher",
                 async start() {
                     await configWatcher.start();
                 },
@@ -674,7 +674,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "openclaw-audit-plugin:de-anchor",
+                id: "gate-oc-audit:de-anchor",
                 async start() {
                     await deAnchor.start();
                 },
@@ -686,7 +686,7 @@ export default (() => {
             const fileWatcher = new FileWatcher(activeStore, limiter, config);
 
             api.registerService({
-                id: "openclaw-audit-plugin:file-watcher",
+                id: "gate-oc-audit:file-watcher",
                 async start() {
                     await fileWatcher.start();
                 },
@@ -718,7 +718,7 @@ export default (() => {
             });
 
             api.registerService({
-                id: "openclaw-audit-plugin:ui-server",
+                id: "gate-oc-audit:ui-server",
                 start() {
                     const info = resolveGatewayBaseUrl();
                     log.info(`Audit UI: ${resolveAuditUiUrl()}`);

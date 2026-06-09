@@ -1,8 +1,8 @@
 {
-  "id": "openclaw-audit-plugin",
-  "name": "@constellation-network/openclaw-audit-plugin",
+  "id": "gate-oc-audit",
+  "name": "@constellation-network/gate-oc-audit",
   "description": "Tamper-evident audit trail with Digital Evidence anchoring for AI coding agent activity",
-  "version": "0.2.5-beta.3",
+  "version": "0.1.0",
   "activation": {
     "onCommands": ["audit"],
     "onCapabilities": ["hook", "tool"]
