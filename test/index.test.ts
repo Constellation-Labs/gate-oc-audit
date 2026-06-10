@@ -4,7 +4,7 @@ import { rmSync, existsSync } from "node:fs";
 import plugin from "../src/index.js";
 import { AuditStore } from "../src/store/audit-store.js";
 
-const testDbPath = `/tmp/audit-plugin-test-${process.pid}.db`;
+const testDbPath = `/tmp/gate-oc-audit-test-${process.pid}.db`;
 
 function cleanupTestDb(): void {
   for (const suffix of ["", "-wal", "-shm"]) {
