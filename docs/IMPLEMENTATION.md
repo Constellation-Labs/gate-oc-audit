@@ -2,13 +2,15 @@
 
 ## Project Structure
 
-62 TypeScript files under `src/`. The layout follows roughly one
+73 TypeScript files under `src/`. The layout follows roughly one
 subsystem per directory.
 
 ```
 src/
   index.ts                  Plugin entry: register(api), wires hooks +
-                            CLI + agent tools + 8 background services
+                            CLI + agent tools + 7 background services
+                            (smt, de-anchor, retention, report-pusher,
+                            config-watcher, file-watcher, ui-server)
   hooks.ts                  Hook registrations; safeAppend chokepoint
                             with sanitize + applyFieldCaps + safeDesc
   cli.ts                    CLI handlers + warnIfDegraded helper
@@ -50,6 +52,8 @@ src/
                             legacy ~/.openclaw/<id>.cron.*.json (fallback) with
                             fd-based size check (no TOCTOU)
     inventory.ts            Plugin/skill/tool/workspace/cron inventory
+    health-keys.ts          Well-known service_health row names shared
+                            across services (e.g. anchor-not-found)
 
   reports/
     projection.ts             Day/week digest projection
@@ -73,11 +77,18 @@ src/
     export.ts                 NDJSON / CSV streaming exporter with
                               OWASP formula-injection guard
     inventory-formatter.ts    Inventory text/JSON formatting
+    setup-wizard.ts           Interactive `audit setup`: opt-ins + DE
+                              credentials, whoami org/tenant resolution,
+                              writes via host mutateConfigFile
 
   control-ui/                 Lit SPA served from /plugins/audit/
-    main.ts, api.ts, styles.css, index.html
-    components/audit-app.ts, event-filters.ts, event-table.ts,
-                event-detail.ts, trees-overview.ts, verify-panel.ts
+    main.ts, api.ts, health.ts, styles.css, index.html
+    components/audit-app.ts (router/nav), event-filters.ts, event-table.ts,
+                event-detail.ts, trees-overview.ts, verify-panel.ts,
+                smt-tools.ts, status-dashboard.ts, report-projection.ts,
+                report-cron.ts, session-view.ts, anomalies-view.ts,
+                spend-view.ts, inventory-view.ts
+                — one web view per CLI surface
 
   util/
     network-policy.ts         validateHttpTargetUrl + private/loopback/
@@ -99,8 +110,8 @@ src/
     smt.ts                    SeqNos, ChainEntry, EpochEntries, etc.
 ```
 
-Test layout mirrors `src/`. 44 test files; ~815 `it(...)` blocks; 798
-currently passing + 1 pre-existing skip.
+Test layout mirrors `src/`. 44 test files; 812 tests; 811 currently
+passing + 1 pre-existing skip.
 
 ## Dependencies
 
@@ -135,10 +146,11 @@ Dev:
 - `openclaw` ^2026.4.24 (peer SDK), `lit` (SPA), `typescript`, `tsx`,
   `vite` (UI build).
 
-## Schema (v7)
+## Schema (v8)
 
-Managed by `src/store/schema.ts`. `runInTransaction` wraps every
-migration; `schema_version` records every applied version.
+Managed by `src/store/schema.ts` (`CURRENT_SCHEMA_VERSION = 8`).
+`runInTransaction` wraps every migration; `schema_version` records every
+applied version.
 
 **Tables:**
 
@@ -174,6 +186,9 @@ migration; `schema_version` records every applied version.
 5. **v6** — `integrity_checkpoints.verified_at` cache column.
 6. **v7** — partial index on `audit_events` for
    `event_type='cron.executed'` keyed by `metadata.jobId`.
+7. **v8** — deletes the stale `service_health` row keyed `'gateway'` left
+   by the removed swarm-deck gateway publisher (removed in 0.2.5-beta.1).
+   Safe no-op on DBs that never had the row.
 
 **Recovery:** if `initializeSchema` throws during writer open, the
 existing DB is renamed to `<path>.corrupt.<ts>` (along with its WAL/SHM
@@ -264,11 +279,14 @@ longer hashes to a stored leaf.
 `createDeAnchorService(store, config, notifier)` dispatches to one of:
 
 - **`ApiKeyAnchorService`** — `DedClient({baseUrl, apiKey})` from
-  `digital-evidence-sdk/network`. Requires `deOrgId + deTenantId`.
+  `digital-evidence-sdk/network`. Reads `deOrgId + deTenantId` from
+  config; the `audit setup` wizard can pre-resolve both from the API key
+  via DE's `whoami` endpoint and write them into config.
 - **`WalletAnchorService`** — reads a SECP256K1 private key file,
   validates via `dedCore.isValidPrivateKey`, wraps it in
-  `ethers.Wallet` and `createEthersSigner` from the x402 SDK. Logical
-  errors  surface; filesystem-error
+  `ethers.Wallet` and `createEthersSigner` from the x402 SDK, and derives
+  `orgId`/`tenantId` from the resulting DE client (no config keys needed).
+  Logical errors  surface; filesystem-error
   details  are scrubbed.
 - **`NoOpAnchorService`** — falls back when DE isn't configured. Logs
   the reason once at construction.
@@ -383,11 +401,42 @@ calls `register({api})` in full mode.
 mode — `outLine` writes directly to `process.stdout` so command output
 lands where the operator expects.
 
-`warnIfDegraded(store)` centralises the degraded-mode banner across
-all eight handlers.
+`warnIfDegraded(store)` centralises the degraded-mode banner across the
+store-reading handlers.
 
 `parsePositiveInt(label, max)` and `parseSince` (in `reports/time-window`)
 own the input-validation shape for numeric and time-range arguments.
+
+## Setup Wizard + Host Config
+
+`src/ui/setup-wizard.ts:runSetupWizard()` backs the `audit setup` command.
+It prompts for the operator opt-ins (`plugins.allow` membership and
+`plugins.entries.gate-oc-audit.hooks.allowConversationAccess`) and DE
+credentials, resolves `deOrgId`/`deTenantId` from the API key via DE's
+`whoami` endpoint (falling back to manual UUID entry), and persists
+everything to `openclaw.json` through the host's `mutateConfigFile`.
+`--yes` accepts defaults non-interactively. The conversation-access opt-in
+takes effect only after the next openclaw restart.
+
+`src/util/host-config.ts` reads host policy out of `openclaw.json`:
+`readAllowConversationAccess` (used by `audit status` to report the
+conversation-access posture), `readWorkspaceDir`, and
+`readSkillsExtraDirs` (skill load roots for inventory).
+
+## Status Snapshot
+
+`src/reports/status-snapshot.ts` builds the `StatusSnapshot` consumed by
+`audit status` and `/api/status`. It is organised around a health verdict:
+`AnchorSection` carries consecutive failures, the circuit-open deadline,
+anchors-today, and pending-since-last-checkpoint; `IntegritySection`
+reports a three-state `conversationAccess` (`enabled` /
+`enabled-but-silent` / `disabled`) that distinguishes "configured" from
+"actually in use". Event classification (in `src/ui/routes.ts`)
+distinguishes **verified** (≤ anchored seq), **pending** (> anchored seq,
+awaiting DE confirmation), **tampered** (in SMT range but no longer
+reproducible), and **untracked** (beyond the SMT cursor or skipped) — so a
+not-yet-anchored checkpoint is never mistaken for an integrity violation.
+`src/reports/format-status.ts` renders the verdict for the CLI.
 
 ## Time Windows
 

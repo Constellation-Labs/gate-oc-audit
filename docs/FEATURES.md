@@ -3,7 +3,7 @@
 A tamper-evident audit trail for AI coding agent activity. Every meaningful
 lifecycle event is captured locally, hashed into a per-event chain and a
 Sparse Merkle Tree, periodically anchored to Constellation's Digital
-Evidence , and optionally streamed to a remote gateway and digest
+Evidence , and optionally surfaced through incident and digest
 webhooks.
 
 ## Audit Trail Capture
@@ -68,9 +68,13 @@ Periodically  the plugin
 submits the current SMT root to Constellation's Digital Evidence (DE)
 network. Two auth modes:
 
-- **API key** — `deApiKey` + `deOrgId` + `deTenantId`
+- **API key** — `deApiKey` + `deOrgId` + `deTenantId`. The `audit setup`
+  wizard can auto-resolve `deOrgId`/`deTenantId` from the API key via DE's
+  `whoami` endpoint and write them into config; the runtime anchor service
+  still reads all three from config.
 - **x402 wallet** — `deWalletKeyFile` pointing at a SECP256K1 private
-  key file; payments go through the x402 client
+  key file; payments go through the x402 client. Org/tenant are derived
+  from the wallet's DE client — no `deOrgId`/`deTenantId` needed.
 
 A `CIRCUIT_BREAKER_THRESHOLD = 5` opens the breaker after consecutive
 failures with exponential backoff (capped at 5 min). The breaker keeps
@@ -89,7 +93,14 @@ in-process gateway lifecycle).
 
 - **`audit list`** — view recent events; filters `--last/--type/--category/--session/--limit/--offset`.
 - **`audit verify`** — verify SMT roots against DE-anchored checkpoints; reports the exact tampered range on failure.
-- **`audit status [--json]`** — runtime snapshot: storage health, SMT pending, anchor health, configured cron manifests, inventory counts.
+- **`audit status [--json]`** — runtime snapshot built around a health
+  verdict: storage health, SMT pending, anchor health (consecutive
+  failures, circuit-open deadline, anchors-today, pending-since-last-checkpoint),
+  conversation-access posture (`enabled` / `enabled-but-silent` / `disabled`),
+  configured cron manifests, inventory counts. Checkpoints awaiting DE
+  confirmation are reported as **pending verification**, distinct from
+  genuine **integrity violations** (tampered events the SMT can no longer
+  reproduce).
 - **`audit ui`** — print the local audit UI URL.
 - **`audit export [json|csv]`** — stream events with optional filters; rows include the covering DE anchor reference. Capped at 2 concurrent.
 - **`audit inventory [kind]`** — list installed plugins / skills / tools / workspace bootstrap files (SOUL.md, AGENTS.md, …) / configured crons. Skills are gathered across every openclaw load root (`<workspace>/skills`, `<workspace>/.agents/skills`, `~/.agents/skills`, `~/.openclaw/skills`, and `skills.load.extraDirs`), deduped by id with the highest-precedence copy winning.
@@ -100,6 +111,10 @@ in-process gateway lifecycle).
 - **`audit anomalies --since X [--until Y]`** — anomaly detectors over a `[since, until)` window.
 - **`audit spend --by provider|model|day|session [--since X]`** — LLM-spend rollup; default top 25, capped at 1000.
 - **`audit smt root|proof|verify|trees|chain`** — SMT introspection.
+- **`audit setup [--yes]`** — interactive wizard that walks the operator
+  through the plugin allow-list / `allowConversationAccess` opt-ins and DE
+  credentials (resolving org/tenant from the API key where possible), then
+  persists them to `openclaw.json` via the host's `mutateConfigFile`.
 
 Every handler that talks to the store prints a "WARNING: audit store is
 in degraded mode" preamble when applicable.
@@ -114,6 +129,12 @@ A loopback-bound HTTP surface under `/plugins/audit/`:
 - `GET /api/export` — stream JSON/CSV
 - `GET /api/report?period=daily|weekly`
 - `GET /api/report/cron/:job-id`
+- `GET /api/report/session/:id`
+- `GET /api/anomalies`
+- `GET /api/spend`
+- `GET /api/inventory?kind=summary|plugins|skills|tools|crons|workspace`
+- `GET /api/smt/proof`, `GET /api/smt/chain`, `POST /api/smt/verify-proof`
+- `GET /api/status` — health-verdict snapshot
 - `GET /api/health` — store ok/degraded/eventCount
 
 Every JSON response carries `X-Content-Type-Options: nosniff`,
@@ -129,9 +150,11 @@ content or run a CPU-bound replay refuse to serve when the gateway is
 bound beyond loopback unless the operator explicitly opts in via
 `allowExportOnNonLoopback` / `allowVerifyOnNonLoopback`.
 
-A Lit-based SPA lives under `src/control-ui/`: event table with
-verification badges, filters, detail panel, trees overview, verify
-panel.
+A Lit-based SPA lives under `src/control-ui/` and now has a web view for
+every CLI surface, with client-side routing across: status dashboard,
+event table (verification badges, filters, detail panel), trees overview,
+verify panel, SMT tools (root/proof/chain), daily & weekly reports, per-cron
+rollup, per-session timeline, anomalies, spend, and inventory.
 
 ## Agent-Callable Tools
 
@@ -295,13 +318,13 @@ SIGTERM/SIGINT handler in `GatewayStopCapture` documents the invariant.
 
 ## Test Coverage
 
-44 test files, ~815 `it(...)` blocks, 798 currently-passing tests
-covering: append mechanics, hash-chain integrity, persistence across
-restarts, degraded-mode behavior, tamper detection, query / filter /
-pagination, SMT raw + censored hashes, frozen-leaf collisions, replay
-determinism, snapshot/restore, prune-epoch + exported proofs,
-checkpoint archive, DE anchor circuit breaker, x402 wallet path,
-gateway publisher batching + split + drop tracking, report pusher
-daily/weekly fire windows, retention, sanitization (nested, arrays,
-circular refs), file permissions, network policy , webhook
-SSRF rejection, and the full CLI surface.
+44 test files, 811 currently-passing  covering:
+append mechanics, hash-chain integrity, persistence across restarts,
+degraded-mode behavior, tamper detection, query / filter / pagination,
+SMT raw + censored hashes, frozen-leaf collisions, replay determinism,
+snapshot/restore, prune-epoch + exported proofs, checkpoint archive,
+DE anchor circuit breaker, x402 wallet path, report pusher daily/weekly
+fire windows, retention, sanitization (nested, arrays, circular refs),
+file permissions, network policy , webhook SSRF rejection, the
+setup wizard, the health-verdict status snapshot, and the full CLI +
+HTTP surface.
