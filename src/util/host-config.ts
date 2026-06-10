@@ -12,6 +12,28 @@ interface HostConfigShape {
   plugins?: {
     entries?: Record<string, { hooks?: { allowConversationAccess?: unknown } }>;
   };
+  agents?: {
+    defaults?: { workspace?: unknown };
+  };
+  skills?: {
+    load?: { extraDirs?: unknown };
+  };
+}
+
+function expandHome(path: string): string {
+  return path.replace(/^~/, process.env.HOME ?? ".");
+}
+
+function readHostConfig(openclawDir: string): HostConfigShape | undefined {
+  if (!openclawDir) return undefined;
+  try {
+    const path = join(openclawDir, "openclaw.json");
+    const st = statSync(path);
+    if (!st.isFile() || st.size > MAX_CONFIG_BYTES) return undefined;
+    return JSON.parse(readFileSync(path, "utf-8")) as HostConfigShape;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -25,14 +47,35 @@ interface HostConfigShape {
  * from the plugin config. Returns false on any read/parse error.
  */
 export function readAllowConversationAccess(openclawDir: string): boolean {
-  if (!openclawDir) return false;
-  try {
-    const path = join(openclawDir, "openclaw.json");
-    const st = statSync(path);
-    if (!st.isFile() || st.size > MAX_CONFIG_BYTES) return false;
-    const cfg = JSON.parse(readFileSync(path, "utf-8")) as HostConfigShape;
-    return cfg.plugins?.entries?.[AUDIT_PLUGIN_ID]?.hooks?.allowConversationAccess === true;
-  } catch {
-    return false;
-  }
+  const cfg = readHostConfig(openclawDir);
+  return cfg?.plugins?.entries?.[AUDIT_PLUGIN_ID]?.hooks?.allowConversationAccess === true;
+}
+
+/**
+ * Resolve openclaw's agent workspace directory — where the bootstrap files
+ * (SOUL.md, AGENTS.md, …) live. openclaw reads this from
+ * `agents.defaults.workspace` in `<openclawDir>/openclaw.json`, defaulting to
+ * `<openclawDir>/workspace`. A leading `~` is expanded against $HOME.
+ *
+ * Like readAllowConversationAccess, this uses JSON.parse: openclaw documents
+ * the file as JSON5, so a config with comments/unquoted keys fails to parse and
+ * we fall back to the default `<openclawDir>/workspace`.
+ */
+export function readWorkspaceDir(openclawDir: string): string {
+  const fallback = join(openclawDir, "workspace");
+  const configured = readHostConfig(openclawDir)?.agents?.defaults?.workspace;
+  if (typeof configured !== "string" || configured.length === 0) return fallback;
+  return expandHome(configured);
+}
+
+/**
+ * Extra skill directories configured under `skills.load.extraDirs` in
+ * `<openclawDir>/openclaw.json` (lowest skill-load precedence). Leading `~` is
+ * expanded against $HOME. Returns [] when unset or unparseable — same JSON5
+ * caveat as readWorkspaceDir.
+ */
+export function readSkillsExtraDirs(openclawDir: string): string[] {
+  const extra = readHostConfig(openclawDir)?.skills?.load?.extraDirs;
+  if (!Array.isArray(extra)) return [];
+  return extra.filter((d): d is string => typeof d === "string" && d.length > 0).map(expandHome);
 }

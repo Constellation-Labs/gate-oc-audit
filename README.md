@@ -424,7 +424,7 @@ Or directly in the config JSON:
 
 | Option | Default | Description |
 |---|---|---|
-| `openclawDir` | `~/.openclaw` | Path to the OpenClaw config directory to watch for skill/tool/soul/cron changes |
+| `openclawDir` | `~/.openclaw` | Path to the OpenClaw config directory to watch for skill/tool/workspace/cron changes |
 
 ### Digital Evidence anchoring
 

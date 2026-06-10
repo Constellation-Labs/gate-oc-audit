@@ -1417,10 +1417,10 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
     const { stdout } = captureConsole(() =>
       cliInventoryHandler(rig.store, "summary", {}, { openclawDir, projectRoot }),
     );
-    assert.match(stdout, /plugins: 2/);
+    assert.match(stdout, /plugins:\s+2/);
     assert.ok(stdout.includes("skills:"));
     assert.ok(stdout.includes("tools:"));
-    assert.ok(stdout.includes("soul:"));
+    assert.ok(stdout.includes("workspace:"));
     assert.ok(stdout.includes("crons:"));
   });
 
@@ -1435,7 +1435,7 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
     assert.deepEqual(names, ["alpha-plugin", "beta-plugin"]);
   });
 
-  it("skills/tools/soul/crons subcommands each render --json and human modes", () => {
+  it("skills/tools/workspace/crons subcommands each render --json and human modes", () => {
     // Seed one item in each non-plugins lens.
     mkdirSync(join(openclawDir, "skills"), { recursive: true });
     writeFileSync(join(openclawDir, "skills", "alpha.ts"), "x");
@@ -1443,13 +1443,13 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
     mkdirSync(join(openclawDir, "tools"), { recursive: true });
     writeFileSync(join(openclawDir, "tools", "tool-a.ts"), "x");
 
-    mkdirSync(openclawDir, { recursive: true });
-    writeFileSync(join(openclawDir, "soul.md"), "# soul");
+    mkdirSync(join(openclawDir, "workspace"), { recursive: true });
+    writeFileSync(join(openclawDir, "workspace", "SOUL.md"), "# soul");
 
     mkdirSync(join(openclawDir, "crons"), { recursive: true });
     writeFileSync(join(openclawDir, "crons", "nightly.json"), JSON.stringify({ jobId: "nightly" }));
 
-    for (const kind of ["skills", "tools", "soul", "crons"] as const) {
+    for (const kind of ["skills", "tools", "workspace", "crons"] as const) {
       const text = captureConsole(() =>
         cliInventoryHandler(rig.store, kind, {}, { openclawDir, projectRoot }),
       );
@@ -1468,8 +1468,8 @@ describe("e2e: audit inventory — CLI handler over a hook-populated store", () 
       assert.equal(typeof parsed.summary[kind], "number");
       assert.ok(Array.isArray(parsed[kind]), `${kind}: parsed JSON must carry a ${kind} array`);
       // The seeded entry above must appear in at least one of the lenses, but
-      // some walkers (soul) collect from multiple paths, so we just assert
-      // shape — content assertions belong in cli-inventory.test.ts.
+      // some walkers (workspace) collect from a configurable dir, so we just
+      // assert shape — content assertions belong in cli-inventory.test.ts.
     }
   });
 });

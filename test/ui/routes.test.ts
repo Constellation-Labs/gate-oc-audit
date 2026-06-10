@@ -1624,7 +1624,7 @@ describe("ui: /api/inventory endpoint", () => {
   it("accepts each known kind", async () => {
     const rig = await createUiRig();
     try {
-      for (const kind of ["plugins", "skills", "tools", "soul", "crons"]) {
+      for (const kind of ["plugins", "skills", "tools", "workspace", "crons"]) {
         const res = await fetch(`${rig.baseUrl}/plugins/audit/api/inventory?kind=${kind}`);
         assert.equal(res.status, 200, `kind=${kind}`);
         const body = (await res.json()) as Record<string, any>;

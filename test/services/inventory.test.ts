@@ -15,19 +15,29 @@ describe("inventory: collectInventory", () => {
   let store: AuditStore;
   let openclawDir: string;
   let projectRoot: string;
+  let homeDir: string;
+  let origHome: string | undefined;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     openclawDir = mkdtempSync(join(tmpdir(), "audit-inv-oc-"));
     projectRoot = mkdtempSync(join(tmpdir(), "audit-inv-proj-"));
+    // Isolate HOME so the personal-agent skills root (~/.agents/skills) can't
+    // leak the developer's real skills into count assertions.
+    homeDir = mkdtempSync(join(tmpdir(), "audit-inv-home-"));
+    origHome = process.env.HOME;
+    process.env.HOME = homeDir;
   });
 
   afterEach(() => {
     store.close();
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
     rmSync(dirname(dbPath), { recursive: true, force: true });
     rmSync(openclawDir, { recursive: true, force: true });
     rmSync(projectRoot, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("lists extension directories as plugins with version from package.json", () => {
@@ -77,14 +87,39 @@ describe("inventory: collectInventory", () => {
     assert.equal(item.capturedAt, undefined);
   });
 
-  it("lists soul and cron files at openclaw root", () => {
-    writeFileSync(join(openclawDir, "primary.soul.yaml"), "name: primary");
+  it("dedupes skills across precedence roots; highest source wins", () => {
+    const wsSkills = join(openclawDir, "workspace", "skills");
+    const mgSkills = join(openclawDir, "skills");
+    mkdirSync(wsSkills, { recursive: true });
+    mkdirSync(mgSkills, { recursive: true });
+    // Same id in both roots: the workspace (higher-precedence) copy must win.
+    writeFileSync(join(wsSkills, "alpha.ts"), "workspace copy");
+    writeFileSync(join(mgSkills, "alpha.ts"), "managed copy");
+    writeFileSync(join(wsSkills, "wsonly.ts"), "x");
+    writeFileSync(join(mgSkills, "mgonly.ts"), "x");
+
+    const report = collectInventory(store, "skills", { openclawDir, projectRoot });
+    const byId = new Map(report.skills!.map((i) => [i.id, i]));
+    assert.equal(report.summary.skills, 3, "alpha is deduped to a single entry");
+    assert.equal(byId.get("alpha")!.source, "workspace_skills");
+    assert.equal(byId.get("wsonly")!.source, "workspace_skills");
+    assert.equal(byId.get("mgonly")!.source, "skills");
+  });
+
+  it("lists workspace bootstrap files and cron files", () => {
+    const workspaceDir = join(openclawDir, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, "SOUL.md"), "# soul");
+    writeFileSync(join(workspaceDir, "AGENTS.md"), "# agents");
+    // A non-bootstrap file in the workspace must NOT be reported.
+    writeFileSync(join(workspaceDir, "notes.md"), "# notes");
     writeFileSync(join(openclawDir, "nightly.cron.yaml"), "schedule: 0 0 * * *");
 
-    const soulReport = collectInventory(store, "soul", { openclawDir, projectRoot });
-    assert.equal(soulReport.summary.soul, 1);
-    assert.equal(soulReport.soul![0].id, "primary");
-    assert.ok(soulReport.soul![0].contentHash);
+    const wsReport = collectInventory(store, "workspace", { openclawDir, projectRoot });
+    assert.equal(wsReport.summary.workspace, 2);
+    const ids = wsReport.workspace!.map((i) => i.id).sort();
+    assert.deepEqual(ids, ["AGENTS", "SOUL"]);
+    assert.ok(wsReport.workspace!.every((i) => i.contentHash));
 
     const cronReport = collectInventory(store, "crons", { openclawDir, projectRoot });
     assert.equal(cronReport.summary.crons, 1);
@@ -197,7 +232,8 @@ describe("inventory: collectInventory", () => {
     writeFileSync(join(openclawDir, "skills", "s1.ts"), "x");
     mkdirSync(join(openclawDir, "tools"), { recursive: true });
     writeFileSync(join(openclawDir, "tools", "t1.ts"), "x");
-    writeFileSync(join(openclawDir, "x.soul.yaml"), "x");
+    mkdirSync(join(openclawDir, "workspace"), { recursive: true });
+    writeFileSync(join(openclawDir, "workspace", "SOUL.md"), "x");
     writeFileSync(join(openclawDir, "y.cron.yaml"), "x");
 
     // Orphan: manifest row for a missing tool file
@@ -205,7 +241,7 @@ describe("inventory: collectInventory", () => {
     store.upsertManifest(`tools:${missingTool}`, "tools", "h", missingTool);
 
     const report = collectInventory(store, "summary", { openclawDir, projectRoot });
-    assert.deepEqual(report.summary, { plugins: 1, skills: 1, tools: 2, soul: 1, crons: 1 });
+    assert.deepEqual(report.summary, { plugins: 1, skills: 1, tools: 2, workspace: 1, crons: 1 });
     // Summary-only report should not include per-item arrays
     assert.equal(report.plugins, undefined);
     assert.equal(report.skills, undefined);

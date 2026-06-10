@@ -958,7 +958,7 @@ async function handleApi(
   return true;
   }
 
-  // GET /api/inventory?kind=summary|plugins|skills|tools|crons|soul
+  // GET /api/inventory?kind=summary|plugins|skills|tools|crons|workspace
   if (apiPath === "inventory" && req.method === "GET") {
   if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
   sendError(

@@ -5,6 +5,7 @@ import { isUnsafeWebhookUrl, postJsonWebhook } from "../util/webhook.js";
 const ARTIFACT_LABELS: Record<string, string> = {
   tools: "Tool",
   skills: "Skill",
+  workspace: "Workspace file",
   soul: "Soul file",
   cron: "Cron prompt",
 };

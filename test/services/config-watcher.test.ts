@@ -26,6 +26,8 @@ describe("ConfigWatcher", () => {
   let openclawDir: string;
   let scanner: ToolScanner;
   let notifier: NotificationService;
+  let homeDir: string;
+  let origHome: string | undefined;
 
   beforeEach(async () => {
     dbPath = makeTempDb();
@@ -37,12 +39,20 @@ describe("ConfigWatcher", () => {
     openclawDir = mkdtempSync(join(tmpdir(), "openclaw-dir-"));
     mkdirSync(join(openclawDir, "skills"), { recursive: true });
     mkdirSync(join(openclawDir, "tools"), { recursive: true });
+    // Isolate HOME so the watcher doesn't pick up the developer's real
+    // ~/.agents/skills (a personal-agent skills root it now watches).
+    homeDir = mkdtempSync(join(tmpdir(), "openclaw-home-"));
+    origHome = process.env.HOME;
+    process.env.HOME = homeDir;
   });
 
   afterEach(async () => {
     store.close();
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
     rmSync(dirname(dbPath), { recursive: true, force: true });
     rmSync(openclawDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("detects new skill file", async () => {
@@ -85,6 +95,40 @@ describe("ConfigWatcher", () => {
         (e.metadata as Record<string, unknown>).changeType === "modified",
     );
     assert.ok(modifiedEvents.length > 0, "Should have detected modification");
+  });
+
+  it("detects a workspace bootstrap file (SOUL.md) change", async () => {
+    mkdirSync(join(openclawDir, "workspace"), { recursive: true });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+    await watcher.start();
+    await sleep(500);
+
+    writeFileSync(join(openclawDir, "workspace", "SOUL.md"), "# soul v1");
+    await sleep(1500);
+    await watcher.stop();
+
+    const events = store.query({ category: "config" });
+    assert.ok(
+      events.some((e: AuditEvent) => e.eventType === "config.workspace_changed"),
+      "Should have logged a config.workspace_changed event",
+    );
+  });
+
+  it("ignores non-bootstrap files in the workspace dir", async () => {
+    mkdirSync(join(openclawDir, "workspace"), { recursive: true });
+    const watcher = new ConfigWatcher(store, limiter, scanner, notifier, { openclawDir });
+    await watcher.start();
+    await sleep(500);
+
+    writeFileSync(join(openclawDir, "workspace", "notes.md"), "# just notes");
+    await sleep(1500);
+    await watcher.stop();
+
+    const events = store.query({ category: "config" });
+    assert.ok(
+      !events.some((e: AuditEvent) => e.eventType === "config.workspace_changed"),
+      "A non-bootstrap workspace file must not emit config.workspace_changed",
+    );
   });
 
   it("runs scanner on code files and logs findings", async () => {

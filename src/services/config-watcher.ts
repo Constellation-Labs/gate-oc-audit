@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
-import { basename, extname, resolve, sep } from "node:path";
+import { basename, dirname, extname, resolve, sep } from "node:path";
 import type { AuditStore } from "../store/audit-store.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import type { ToolScanner } from "../scanner.js";
@@ -7,6 +7,8 @@ import type { NotificationService } from "./notifications.js";
 import type { EventType, ConfigChangeType, ConfigChangeMetadata, ScanFinding } from "../types/events.js";
 import { fileHash } from "../util/fs.js";
 import { extractPluginMetadata, listExtensionsPluginDirs, resolveOpenclawDir } from "../util/openclaw-paths.js";
+import { readWorkspaceDir } from "../util/host-config.js";
+import { WORKSPACE_BOOTSTRAP_FILES, skillRoots } from "./inventory.js";
 import { jobsJsonPath } from "./cron-manifests.js";
 import {log} from "../util/logger.js";
 
@@ -20,14 +22,17 @@ interface WatchedDir {
   manifestType: ManifestType;
 }
 
-type ManifestType = "skills" | "tools" | "soul" | "cron";
+type ManifestType = "skills" | "tools" | "workspace" | "cron";
 
 const MANIFEST_TO_EVENT: Record<ManifestType, EventType> = {
   skills: "config.skill_changed",
   tools: "config.tool_changed",
-  soul: "config.soul_changed",
+  workspace: "config.workspace_changed",
   cron: "config.cron_changed",
 };
+
+/** Bootstrap files we track live, by basename, for O(1) membership checks. */
+const WORKSPACE_FILE_SET = new Set<string>(WORKSPACE_BOOTSTRAP_FILES);
 
 const CODE_EXTENSIONS = new Set([".js", ".ts", ".mjs", ".cjs", ".mts", ".cts"]);
 
@@ -49,6 +54,7 @@ export class ConfigWatcher {
   private manifest = new Map<string, ManifestEntry>();
   private watchedDirs: WatchedDir[];
   private openclawDir: string;
+  private workspaceDir: string;
   private jobsJsonPath!: string;
 
   constructor(
@@ -64,9 +70,16 @@ export class ConfigWatcher {
     this.notifier = notifier;
 
     this.openclawDir = resolveOpenclawDir(config);
+    this.workspaceDir = resolve(readWorkspaceDir(this.openclawDir));
 
+    // Skills load from several roots by precedence (workspace, project/personal
+    // agent, managed/local, extra dirs) — watch them all so a skill change in
+    // any of them is audited, mirroring the inventory's collectSkills.
     this.watchedDirs = [
-      { path: resolve(this.openclawDir, "skills"), manifestType: "skills" },
+      ...skillRoots(this.openclawDir).map((r) => ({
+        path: resolve(r.dir),
+        manifestType: "skills" as const,
+      })),
       { path: resolve(this.openclawDir, "tools"), manifestType: "tools" },
     ];
     this.jobsJsonPath = resolve(jobsJsonPath(this.openclawDir));
@@ -91,6 +104,12 @@ export class ConfigWatcher {
     if (existsSync(this.openclawDir)) {
       watchPaths.push(this.openclawDir);
     }
+    // Workspace bootstrap files (SOUL.md, AGENTS.md, …) live at the workspace
+    // root, which is normally <openclawDir>/workspace (already covered above)
+    // but can be relocated via agents.defaults.workspace — watch it explicitly.
+    if (existsSync(this.workspaceDir)) {
+      watchPaths.push(this.workspaceDir);
+    }
 
     if (watchPaths.length === 0) {
       log.warn("No config paths found to watch");
@@ -110,12 +129,19 @@ export class ConfigWatcher {
         for (const wd of this.watchedDirs) {
           if (filePath.startsWith(wd.path + sep) || filePath === wd.path) return false;
         }
-        // In the root openclaw dir, allow soul/cron filename markers and the
+        // Allow the workspace bootstrap files (SOUL.md, AGENTS.md, …) but only
+        // when they sit directly in the workspace root — the workspace also
+        // holds skills/, memory/*.md, etc. that we must not treat as bootstrap.
+        const resolved = resolve(filePath);
+        if (WORKSPACE_FILE_SET.has(basename(resolved)) && dirname(resolved) === this.workspaceDir) {
+          return false;
+        }
+        // In the root openclaw dir, allow cron filename markers and the
         // canonical openclaw cron store at `<root>/cron/jobs.json` (chokidar's
         // depth>=1 walk surfaces it from the subdirectory).
-        if (resolve(filePath) === this.jobsJsonPath) return false;
+        if (resolved === this.jobsJsonPath) return false;
         const name = basename(filePath);
-        if (name.includes(".soul.") || name.includes(".cron.")) return false;
+        if (name.includes(".cron.")) return false;
         return true;
       },
     });
@@ -239,7 +265,7 @@ export class ConfigWatcher {
     }
     if (filePath === this.jobsJsonPath) return "cron";
     const name = basename(filePath);
-    if (name.includes(".soul.")) return "soul";
+    if (WORKSPACE_FILE_SET.has(name) && dirname(filePath) === this.workspaceDir) return "workspace";
     if (name.includes(".cron.")) return "cron";
     return undefined;
   }
@@ -250,7 +276,7 @@ export class ConfigWatcher {
 
   private loadManifestFromStore(): void {
     try {
-      const configTypes: ManifestType[] = ["skills", "tools", "soul", "cron"];
+      const configTypes: ManifestType[] = ["skills", "tools", "workspace", "cron"];
       for (const mt of configTypes) {
         for (const row of this.store.getManifestsByType(mt)) {
           if (row.filePath) {
