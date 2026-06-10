@@ -14,6 +14,7 @@ import {
   _resetConversationAccessWarningStateForTests,
 } from "../src/hooks.js";
 import { GatewayStopCapture } from "../src/gateway-stop-capture.js";
+import type { NotificationService } from "../src/services/notifications.js";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 const require2 = createRequire(import.meta.url);
@@ -1276,6 +1277,97 @@ describe("redactToolArgs", () => {
     const h1 = JSON.parse(events[0].metadata).args.hash;
     const h2 = JSON.parse(events[1].metadata).args.hash;
     assert.equal(h1, h2);
+  });
+});
+
+describe("before_tool_call arg scanning", () => {
+  let dbPath: string;
+  let store: AuditStore;
+  let api: ReturnType<typeof createMockApi>;
+  let gatewayStopCapture: GatewayStopCapture;
+
+  // A 60-char base64-looking value trips the args-profile obfuscation_base64
+  // check once JSON-serialized, without putting literal dangerous source in
+  // this test file (which OpenClaw's install scanner also reads).
+  const SUSPICIOUS = "A".repeat(60);
+
+  beforeEach(() => {
+    dbPath = makeTempDb();
+    store = new AuditStore(dbPath);
+    api = createMockApi();
+    gatewayStopCapture = new GatewayStopCapture(store);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dirname(dbPath), { recursive: true, force: true });
+  });
+
+  it("emits security.scan_result when args contain a dangerous pattern", () => {
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
+    fireHook(api, "before_tool_call",
+      { toolName: "run", params: { payload: SUSPICIOUS } },
+      { sessionId: "s1" },
+    );
+    const scan = getEvents(dbPath).find((e) => e.event_type === "security.scan_result");
+    assert.ok(scan, "expected a security.scan_result event");
+    const meta = JSON.parse(scan!.metadata);
+    assert.equal(meta.toolName, "run");
+    assert.ok(meta.findings.some((f: { check: string }) => f.check === "obfuscation_base64"));
+  });
+
+  it("scans even when redactToolArgs hashes the stored args", () => {
+    registerHooks(api, store, undefined, { redactToolArgs: true }, gatewayStopCapture);
+    fireHook(api, "before_tool_call",
+      { toolName: "run", params: { payload: SUSPICIOUS } },
+      { sessionId: "s1" },
+    );
+    const events = getEvents(dbPath);
+    const invoked = events.find((e) => e.event_type === "tool.invoked");
+    const scan = events.find((e) => e.event_type === "security.scan_result");
+    // Stored args are hashed, but the scan still ran against the in-memory args.
+    assert.deepEqual(Object.keys(JSON.parse(invoked!.metadata).args), ["hash"]);
+    assert.ok(scan, "expected a security.scan_result event despite redaction");
+  });
+
+  it("emits no scan_result for clean args", () => {
+    registerHooks(api, store, undefined, {}, gatewayStopCapture);
+    fireHook(api, "before_tool_call",
+      { toolName: "read_file", params: { path: "/tmp/x" } },
+      { sessionId: "s1" },
+    );
+    assert.ok(!getEvents(dbPath).some((e) => e.event_type === "security.scan_result"));
+  });
+
+  it("notifies the operator when findings exist", () => {
+    const calls: Array<{ toolName: string; count: number }> = [];
+    const notifier = {
+      notifyToolArgScan: (toolName: string, findings: unknown[]) => {
+        calls.push({ toolName, count: findings.length });
+        return Promise.resolve();
+      },
+    } as unknown as NotificationService;
+    registerHooks(api, store, undefined, {}, gatewayStopCapture, notifier);
+    fireHook(api, "before_tool_call",
+      { toolName: "run", params: { payload: SUSPICIOUS } },
+      { sessionId: "s1" },
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].toolName, "run");
+    assert.ok(calls[0].count > 0);
+  });
+
+  it("does not notify for clean args", () => {
+    let called = false;
+    const notifier = {
+      notifyToolArgScan: () => { called = true; return Promise.resolve(); },
+    } as unknown as NotificationService;
+    registerHooks(api, store, undefined, {}, gatewayStopCapture, notifier);
+    fireHook(api, "before_tool_call",
+      { toolName: "read_file", params: { path: "/tmp/x" } },
+      { sessionId: "s1" },
+    );
+    assert.equal(called, false);
   });
 });
 

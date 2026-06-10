@@ -335,7 +335,7 @@ export default (() => {
             // through any of them.
             if (_registered) {
                 if (_store && _limiter && _gatewayStopCapture) {
-                    registerHooks(api, _store, _limiter, config, _gatewayStopCapture);
+                    registerHooks(api, _store, _limiter, config, _gatewayStopCapture, getNotifier());
                 }
                 log.warn("Re-registered hooks on new api instance");
                 return;
@@ -363,7 +363,7 @@ export default (() => {
             _gatewayStopCapture = gatewayStopCapture;
             // Hooks are re-registered on every API instance (see guard above);
             // tools below are only registered here, on the first call.
-            registerHooks(api, store, limiter, config, gatewayStopCapture);
+            registerHooks(api, store, limiter, config, gatewayStopCapture, getNotifier());
 
             // LLM cost tracking via diagnostic events (separate subscription path)
             import("openclaw/plugin-sdk").then(({onDiagnosticEvent}) => {
@@ -399,12 +399,10 @@ export default (() => {
                 // onDiagnosticEvent not available in this SDK version
             });
 
-            const webhookUrl = typeof config.notificationWebhook === "string"
-                ? config.notificationWebhook
-                : undefined;
-            notifier = new NotificationService(webhookUrl, {
-                allowPrivateHost: config.webhookAllowPrivateHost === true,
-            });
+            // getNotifier() already constructed and memoized this instance when
+            // it was passed to registerHooks above; reuse it so the hook path and
+            // the service path share one NotificationService.
+            notifier = getNotifier();
             const scanner = new ToolScanner();
 
             // Capture as const for use in closures below — avoids non-null assertions

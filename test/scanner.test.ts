@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ToolScanner } from "../src/scanner.js";
+import { ToolScanner, MAX_SCANNED_ARG_LENGTH } from "../src/scanner.js";
 
 // Build test fixture strings dynamically so OpenClaw's install-time scanner
 // does not flag these test files as containing dangerous code.
@@ -130,6 +130,43 @@ describe("ToolScanner", () => {
       const evalFinding = findings.find((f) => f.check === "shell_eval");
       assert.ok(evalFinding);
       assert.equal(evalFinding!.line, 2);
+    });
+  });
+
+  describe("scanContent (args profile)", () => {
+    it("runs args-profile checks against serialized tool arguments", () => {
+      const args = JSON.stringify({ command: `${EX}("rm -rf /")` });
+      const findings = scanner.scanContent(args, undefined, "args");
+      assert.ok(findings.some((f) => f.check === "shell_exec"));
+    });
+
+    it("detects sensitive env access in args", () => {
+      const args = JSON.stringify({ script: `${PROC_ENV}.SECRET_KEY` });
+      const findings = scanner.scanContent(args, undefined, "args");
+      assert.ok(findings.some((f) => f.check === "escalation_env_access"));
+    });
+
+    it("skips file-only checks under the args profile", () => {
+      // network_fetch is a file-only check (no args:true), so a fetch( in an
+      // arg payload must not be flagged by the args profile.
+      const args = JSON.stringify({ url: `fetch("http://example.com")` });
+      const findings = scanner.scanContent(args, undefined, "args");
+      assert.ok(!findings.some((f) => f.check === "network_fetch"));
+    });
+
+    it("still runs every check under the default file profile", () => {
+      const findings = scanner.scanContent(`fetch("http://example.com")`);
+      assert.ok(findings.some((f) => f.check === "network_fetch"));
+    });
+
+    it("scans only the leading prefix of oversize args", () => {
+      const danger = `${EX}("x")`;
+      // Within the cap: detected.
+      const within = scanner.scanContent(danger, undefined, "args");
+      assert.ok(within.some((f) => f.check === "shell_exec"));
+      // Pushed past the cap by padding: not scanned, so not detected.
+      const beyond = scanner.scanContent("a".repeat(MAX_SCANNED_ARG_LENGTH) + danger, undefined, "args");
+      assert.ok(!beyond.some((f) => f.check === "shell_exec"));
     });
   });
 

@@ -3,11 +3,30 @@ import type { ScanFinding } from "./types/events.js";
 import { MAX_HASHABLE_BYTES } from "./util/fs.js";
 import { log } from "./util/logger.js";
 
+/** Which scan surface a check applies to. "file" = static source files (the
+ *  default, all checks); "args" = serialized tool-invocation arguments, a
+ *  curated subset that excludes JS-source-syntax checks that don't appear in
+ *  arg payloads. */
+export type ScanProfile = "file" | "args";
+
+/** Upper bound (in chars) on how much serialized-argument text the "args"
+ *  profile scans. before_tool_call runs synchronously on the gateway's hot
+ *  path, so an unbounded regex sweep over a multi-MB payload (e.g. a large
+ *  Write) would stall it. The file profile is already bounded upstream by
+ *  ToolScanner.scan()'s MAX_HASHABLE_BYTES skip; this is the args-path
+ *  equivalent. We scan a prefix rather than skipping entirely so padding a
+ *  payload past the cap can't trivially hide a short dangerous token before
+ *  it. 1 MiB is far larger than any real argument set. */
+export const MAX_SCANNED_ARG_LENGTH = 1024 * 1024;
+
 interface ScanCheck {
   name: string;
   severity: "medium" | "high";
   description: string;
   pattern: RegExp;
+  // True when this check is meaningful against serialized tool-invocation args.
+  // Omitted ⇒ file-only.
+  args?: boolean;
 }
 
 // Build patterns dynamically so that the scanner's own source code does not
@@ -55,12 +74,14 @@ const CHECKS: ScanCheck[] = [
     severity: "high",
     description: "Shell execution call detected",
     pattern: pat("\\b(exec" + "Sync|exec" + "File|exec" + "FileSync|spawn|spawn" + "Sync)\\s*\\(|(?<!\\.)\\bexec\\s*\\("),
+    args: true,
   },
   {
     name: "shell_eval",
     severity: "high",
     description: "Dynamic code execution detected",
     pattern: pat("\\bev" + "al\\s*\\(|new\\s+Fun" + "ction\\s*\\("),
+    args: true,
   },
 
   // Obfuscation
@@ -69,6 +90,7 @@ const CHECKS: ScanCheck[] = [
     severity: "high",
     description: "Base64 encoded string longer than 50 chars detected",
     pattern: pat("['\"`][A-Za-z0-9+/=]{50,}['\"`]"),
+    args: true,
   },
   {
     name: "obfuscation_dynamic_import",
@@ -81,6 +103,7 @@ const CHECKS: ScanCheck[] = [
     severity: "high",
     description: "String.fromCharCode obfuscation detected",
     pattern: pat("String\\s*\\.\\s*fromChar" + "Code"),
+    args: true,
   },
 
   // Data exfiltration patterns — fs read combined with send indicators
@@ -103,6 +126,7 @@ const CHECKS: ScanCheck[] = [
     severity: "medium",
     description: "Sensitive environment variable access detected",
     pattern: pat("process\\s*\\.\\s*env\\s*\\.\\s*(SECRET|PASSWORD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL)", "gi"),
+    args: true,
   },
 
   // Known injection patterns
@@ -148,11 +172,24 @@ export class ToolScanner {
     return this.scanContent(content, filePath);
   }
 
-  scanContent(content: string, filePath?: string): ScanFinding[] {
+  scanContent(content: string, filePath?: string, profile: ScanProfile = "file"): ScanFinding[] {
+    // Bound the args hot path: scan only the leading prefix of oversize
+    // serialized arguments. See MAX_SCANNED_ARG_LENGTH.
+    if (profile === "args" && content.length > MAX_SCANNED_ARG_LENGTH) {
+      content = content.slice(0, MAX_SCANNED_ARG_LENGTH);
+    }
+
     const findings: ScanFinding[] = [];
     const hasNetworkSend = /fetch\s*\(|axios|\.post\s*\(|\.send\s*\(|http\.request/i.test(content);
 
     for (const check of CHECKS) {
+      // The "args" profile runs only the curated subset of checks meaningful
+      // against serialized tool-invocation arguments; file-only checks (which
+      // match JS source syntax that doesn't appear in arg payloads) are skipped.
+      if (profile === "args" && !check.args) {
+        continue;
+      }
+
       // For exfiltration, only flag if both fs read AND network send are present
       if (check.name === "exfiltration_fs_read" && !hasNetworkSend) {
         continue;
