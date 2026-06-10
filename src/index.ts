@@ -179,7 +179,7 @@ export default (() => {
                 // Inventory subcommands
                 const inventory = audit
                     .command("inventory")
-                    .description("Inventory installed plugins/skills/tools/soul/crons")
+                    .description("Inventory installed plugins/skills/tools/workspace/crons")
                     .option("--json", "Emit JSON instead of a human-readable table")
                     .action((opts: { json?: boolean }) =>
                         cliInventoryHandler(getStore(), "summary", opts, resolveCollectOpts()),

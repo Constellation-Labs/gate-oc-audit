@@ -92,7 +92,7 @@ in-process gateway lifecycle).
 - **`audit status [--json]`** — runtime snapshot: storage health, SMT pending, anchor health, configured cron manifests, inventory counts.
 - **`audit ui`** — print the local audit UI URL.
 - **`audit export [json|csv]`** — stream events with optional filters; rows include the covering DE anchor reference. Capped at 2 concurrent.
-- **`audit inventory [kind]`** — list installed plugins / skills / tools / soul files / configured crons under `~/.openclaw`.
+- **`audit inventory [kind]`** — list installed plugins / skills / tools / workspace bootstrap files (SOUL.md, AGENTS.md, …) / configured crons. Skills are gathered across every openclaw load root (`<workspace>/skills`, `<workspace>/.agents/skills`, `~/.agents/skills`, `~/.openclaw/skills`, and `skills.load.extraDirs`), deduped by id with the highest-precedence copy winning.
 - **`audit report daily [--date]`** — calendar-day digest: top tools, costs, anomalies, integrity, cron rollups. `--json`, `--html`, and time-zone control.
 - **`audit report weekly [--week]`** — ISO 8601 week variant of the daily digest.
 - **`audit report cron <jobId> [--last]`** — per-cron rollup: success/failure, p95 duration, last error.
@@ -178,7 +178,7 @@ Run by `audit anomalies` and the daily/weekly digests:
 - **`detectDenialSpike`** — clusters of `tool.denied` events exceeding
   `denialThreshold` within `denialWindowSec`.
 - **`detectInstallEvents`** — surfaces artifact install events
-  (tool/skill/soul/cron installs and updates) that landed in the window.
+  (tool/skill/workspace/cron installs and updates) that landed in the window.
 
 ## Spend Rollup
 
@@ -221,8 +221,8 @@ markers, and the SMT skip set all carry over.
 
 ## File / Config Manifest Watching
 
-- **`ConfigWatcher`** — chokidar-backed watcher for skills, tools, soul
-  files, and cron prompts under `~/.openclaw`. Hashes each manifest's
+- **`ConfigWatcher`** — chokidar-backed watcher for skills, tools, workspace
+  bootstrap files (SOUL.md, AGENTS.md, …), and cron prompts. Hashes each manifest's
   contents and writes one `config_manifests` row per artifact. On
   add/modify it invokes the **`ToolScanner`** (regex-based static
   analysis for network calls, exfiltration patterns, jailbreak markers)

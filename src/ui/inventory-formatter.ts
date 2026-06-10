@@ -16,7 +16,7 @@ function captureLabel(item: InventoryItem): string {
 function formatItemLine(item: InventoryItem): string {
   const version = item.version ? ` ${item.version}` : "";
   const path = item.path || "<removed>";
-  return `${item.kind.padEnd(7)} ${item.name}${version}  ${shortHash(item.contentHash)}  ${captureLabel(item)}  ${path}`;
+  return `${item.kind.padEnd(9)} ${item.name}${version}  ${shortHash(item.contentHash)}  ${captureLabel(item)}  ${path}`;
 }
 
 export function formatInventoryHuman(report: InventoryReport, kind: InventoryKind | "summary"): string {
@@ -24,11 +24,11 @@ export function formatInventoryHuman(report: InventoryReport, kind: InventoryKin
     const s = report.summary;
     return [
       "Inventory summary:",
-      `  plugins: ${s.plugins}`,
-      `  skills:  ${s.skills}`,
-      `  tools:   ${s.tools}`,
-      `  soul:    ${s.soul}`,
-      `  crons:   ${s.crons}`,
+      `  plugins:   ${s.plugins}`,
+      `  skills:    ${s.skills}`,
+      `  tools:     ${s.tools}`,
+      `  workspace: ${s.workspace}`,
+      `  crons:     ${s.crons}`,
     ].join("\n");
   }
 

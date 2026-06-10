@@ -40,30 +40,40 @@ describe("CLI: audit inventory", () => {
   let store: AuditStore;
   let openclawDir: string;
   let projectRoot: string;
+  let homeDir: string;
+  let origHome: string | undefined;
 
   beforeEach(() => {
     dbPath = makeTempDb();
     store = new AuditStore(dbPath);
     openclawDir = mkdtempSync(join(tmpdir(), "audit-inv-cli-oc-"));
     projectRoot = mkdtempSync(join(tmpdir(), "audit-inv-cli-proj-"));
+    // Isolate HOME so the personal-agent skills root (~/.agents/skills) can't
+    // leak the developer's real skills into count assertions.
+    homeDir = mkdtempSync(join(tmpdir(), "audit-inv-cli-home-"));
+    origHome = process.env.HOME;
+    process.env.HOME = homeDir;
   });
 
   afterEach(() => {
     store.close();
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
     rmSync(dirname(dbPath), { recursive: true, force: true });
     rmSync(openclawDir, { recursive: true, force: true });
     rmSync(projectRoot, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("summary lists all five lenses with counts of zero", () => {
     const { stdout, stderr } = captureStreams(() =>
       cliInventoryHandler(store, "summary", {}, { openclawDir, projectRoot }),
     );
-    assert.ok(stdout.includes("plugins: 0"));
-    assert.ok(stdout.includes("skills:  0"));
-    assert.ok(stdout.includes("tools:   0"));
-    assert.ok(stdout.includes("soul:    0"));
-    assert.ok(stdout.includes("crons:   0"));
+    assert.ok(stdout.includes("plugins:   0"));
+    assert.ok(stdout.includes("skills:    0"));
+    assert.ok(stdout.includes("tools:     0"));
+    assert.ok(stdout.includes("workspace: 0"));
+    assert.ok(stdout.includes("crons:     0"));
     // Inventory output must never land in stderr — guards against accidental
     // console.log regression masked by the SDK's routeLogsToStderr().
     assert.equal(stderr, "");

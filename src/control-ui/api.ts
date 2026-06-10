@@ -461,8 +461,8 @@ export function smtGetChain(tree: string, conversationId: string): Promise<SmtCh
 
 // ── Inventory ─────────────────────────────────────────────────────────────
 
-export type InventoryKind = "plugins" | "skills" | "tools" | "soul" | "crons";
-export const INVENTORY_KINDS: readonly InventoryKind[] = ["plugins", "skills", "tools", "soul", "crons"];
+export type InventoryKind = "plugins" | "skills" | "tools" | "workspace" | "crons";
+export const INVENTORY_KINDS: readonly InventoryKind[] = ["plugins", "skills", "tools", "workspace", "crons"];
 
 export interface InventoryItem {
   id: string;
@@ -481,7 +481,7 @@ export interface InventorySummary {
   plugins: number;
   skills: number;
   tools: number;
-  soul: number;
+  workspace: number;
   crons: number;
 }
 
@@ -490,7 +490,7 @@ export interface InventoryReport {
   plugins?: InventoryItem[];
   skills?: InventoryItem[];
   tools?: InventoryItem[];
-  soul?: InventoryItem[];
+  workspace?: InventoryItem[];
   crons?: InventoryItem[];
   degraded: boolean;
 }

@@ -52,7 +52,7 @@ function baseInputs(store: AuditStore, smtService: SmtService, overrides: Partia
     anchorHealth: undefined,
     retentionHealth,
     filePatterns: { watched: 0, ignored: 0 },
-    inventorySummary: { plugins: 0, skills: 0, tools: 0, soul: 0, crons: 0 },
+    inventorySummary: { plugins: 0, skills: 0, tools: 0, workspace: 0, crons: 0 },
     allowConversationAccess: false,
     ...overrides,
   };

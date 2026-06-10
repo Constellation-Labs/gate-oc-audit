@@ -8,14 +8,44 @@ import {
   listExtensionsPluginDirs,
   listNodeModulesPluginDirs,
 } from "../util/openclaw-paths.js";
+import { readWorkspaceDir, readSkillsExtraDirs } from "../util/host-config.js";
 import { jobsJsonPath, readJobsJson } from "./cron-manifests.js";
 
-export type InventoryKind = "plugins" | "skills" | "tools" | "soul" | "crons";
-export type ManifestType = "plugins" | "skills" | "tools" | "soul" | "cron";
+export type InventoryKind = "plugins" | "skills" | "tools" | "workspace" | "crons";
+export type ManifestType = "plugins" | "skills" | "tools" | "workspace" | "cron";
 
-export const INVENTORY_KINDS: readonly InventoryKind[] = ["plugins", "skills", "tools", "soul", "crons"];
+export const INVENTORY_KINDS: readonly InventoryKind[] = ["plugins", "skills", "tools", "workspace", "crons"];
 
-export type InventorySource = "extensions" | "node_modules" | "skills" | "tools" | "openclaw_root";
+export type InventorySource =
+  | "extensions"
+  | "node_modules"
+  | "skills"
+  | "tools"
+  | "workspace"
+  | "openclaw_root"
+  // Skill-load precedence tiers (see collectSkills / openclaw docs/tools/skills.md).
+  // "skills" is retained for the shared managed/local dir (<openclawDir>/skills).
+  | "workspace_skills"
+  | "project_agent_skills"
+  | "personal_agent_skills"
+  | "extra_skills";
+
+/**
+ * openclaw's agent workspace "bootstrap files" — fixed-name identity/instruction
+ * documents that live at the workspace root (default <openclawDir>/workspace,
+ * configurable via agents.defaults.workspace). See node_modules/openclaw
+ * README.md / docs/start/openclaw.md.
+ */
+export const WORKSPACE_BOOTSTRAP_FILES: readonly string[] = [
+  "AGENTS.md",
+  "SOUL.md",
+  "TOOLS.md",
+  "IDENTITY.md",
+  "USER.md",
+  "HEARTBEAT.md",
+  "BOOTSTRAP.md",
+  "MEMORY.md",
+];
 
 export interface InventoryItem {
   id: string;
@@ -34,7 +64,7 @@ export interface InventorySummary {
   plugins: number;
   skills: number;
   tools: number;
-  soul: number;
+  workspace: number;
   crons: number;
 }
 
@@ -43,7 +73,7 @@ export interface InventoryReport {
   plugins?: InventoryItem[];
   skills?: InventoryItem[];
   tools?: InventoryItem[];
-  soul?: InventoryItem[];
+  workspace?: InventoryItem[];
   crons?: InventoryItem[];
 }
 
@@ -155,7 +185,7 @@ function orphanSource(kind: InventoryKind): InventorySource {
     case "plugins": return "extensions";
     case "skills": return "skills";
     case "tools": return "tools";
-    case "soul":
+    case "workspace": return "workspace";
     case "crons": return "openclaw_root";
   }
 }
@@ -231,44 +261,77 @@ function relativeId(baseDir: string, file: string): string {
   return noExt.split(/[\\/]/).join("/");
 }
 
-function collectFilesUnderDir(
+interface ScanRoot {
+  dir: string;
+  source: InventorySource;
+}
+
+/**
+ * Walk an ordered list of roots (highest precedence first) and build one item
+ * per file, keyed by its id (path relative to its own root). When the same id
+ * appears in a later (lower-precedence) root it is skipped, mirroring openclaw's
+ * "highest source wins" rule; the winning item records the root it came from via
+ * `source`.
+ */
+function collectFromRoots(
   store: AuditStore,
   kind: "skills" | "tools",
-  baseDir: string,
-  source: InventorySource,
+  roots: readonly ScanRoot[],
 ): InventoryItem[] {
   const manifestByPath = indexByFilePath(store.getManifestsByType(kind));
   const items: InventoryItem[] = [];
-  for (const file of walkFiles(baseDir)) {
-    const manifest = manifestByPath.get(file);
-    const hash = manifest?.contentHash ?? fileHash(file);
-    const id = relativeId(baseDir, file);
-    items.push({
-      id: s(id)!,
-      kind,
-      name: s(basename(file, extname(file)))!,
-      path: file,
-      source,
-      contentHash: hash,
-      capturedAt: manifest?.capturedAt,
-      filesystemMtime: safeStatMtime(file),
-      capturedInManifests: !!manifest,
-    });
+  const seenIds = new Set<string>();
+  for (const { dir, source } of roots) {
+    for (const file of walkFiles(dir)) {
+      const id = relativeId(dir, file);
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      const manifest = manifestByPath.get(file);
+      const hash = manifest?.contentHash ?? fileHash(file);
+      items.push({
+        id: s(id)!,
+        kind,
+        name: s(basename(file, extname(file)))!,
+        path: file,
+        source,
+        contentHash: hash,
+        capturedAt: manifest?.capturedAt,
+        filesystemMtime: safeStatMtime(file),
+        capturedInManifests: !!manifest,
+      });
+    }
   }
   return appendOrphans(items, manifestByPath, kind);
 }
 
+/**
+ * Skill-load roots in openclaw's precedence order (highest first). Bundled
+ * skills (tier 5) ship inside the install and have no stable user path, so they
+ * are not discoverable here. See node_modules/openclaw docs/tools/skills.md.
+ */
+export function skillRoots(openclawDir: string): ScanRoot[] {
+  const workspaceDir = readWorkspaceDir(openclawDir);
+  const home = process.env.HOME ?? ".";
+  return [
+    { dir: join(workspaceDir, "skills"), source: "workspace_skills" },
+    { dir: join(workspaceDir, ".agents", "skills"), source: "project_agent_skills" },
+    { dir: join(home, ".agents", "skills"), source: "personal_agent_skills" },
+    { dir: join(openclawDir, "skills"), source: "skills" },
+    ...readSkillsExtraDirs(openclawDir).map((dir) => ({ dir, source: "extra_skills" as const })),
+  ];
+}
+
 export function collectSkills(store: AuditStore, opts: CollectOptions): InventoryItem[] {
-  return collectFilesUnderDir(store, "skills", join(opts.openclawDir, "skills"), "skills");
+  return collectFromRoots(store, "skills", skillRoots(opts.openclawDir));
 }
 
 export function collectTools(store: AuditStore, opts: CollectOptions): InventoryItem[] {
-  return collectFilesUnderDir(store, "tools", join(opts.openclawDir, "tools"), "tools");
+  return collectFromRoots(store, "tools", [{ dir: join(opts.openclawDir, "tools"), source: "tools" }]);
 }
 
 function collectRootScopedFiles(
   store: AuditStore,
-  kind: "soul" | "crons",
+  kind: "crons",
   marker: string,
   opts: CollectOptions,
 ): InventoryItem[] {
@@ -295,8 +358,32 @@ function collectRootScopedFiles(
   return appendOrphans(items, manifestByPath, kind);
 }
 
-export function collectSoul(store: AuditStore, opts: CollectOptions): InventoryItem[] {
-  return collectRootScopedFiles(store, "soul", ".soul.", opts);
+export function collectWorkspace(store: AuditStore, opts: CollectOptions): InventoryItem[] {
+  const workspaceDir = readWorkspaceDir(opts.openclawDir);
+  const manifestByPath = indexByFilePath(store.getManifestsByType("workspace"));
+  const items: InventoryItem[] = [];
+  for (const name of WORKSPACE_BOOTSTRAP_FILES) {
+    const file = join(workspaceDir, name);
+    if (!existsSync(file) || isSymlink(file)) continue;
+    let isFile = false;
+    try { isFile = statSync(file).isFile(); } catch { isFile = false; }
+    if (!isFile) continue;
+    const manifest = manifestByPath.get(file);
+    const hash = manifest?.contentHash ?? fileHash(file);
+    const stem = basename(file, extname(file));
+    items.push({
+      id: s(stem)!,
+      kind: "workspace",
+      name: s(stem)!,
+      path: file,
+      source: "workspace",
+      contentHash: hash,
+      capturedAt: manifest?.capturedAt,
+      filesystemMtime: safeStatMtime(file),
+      capturedInManifests: !!manifest,
+    });
+  }
+  return appendOrphans(items, manifestByPath, "workspace");
 }
 
 function collectCronsFromJobsJson(store: AuditStore, opts: CollectOptions): InventoryItem[] {
@@ -336,16 +423,27 @@ export function collectCrons(store: AuditStore, opts: CollectOptions): Inventory
 }
 
 function countSummary(store: AuditStore, opts: CollectOptions): InventorySummary {
-  function countWith(kind: "skills" | "tools" | "soul" | "crons", live: number): number {
+  function countWith(kind: "skills" | "tools" | "workspace" | "crons", live: number): number {
     let orphans = 0;
     for (const r of store.getManifestsByType(manifestTypeFor(kind))) {
       if (r.filePath && !existsSync(r.filePath)) orphans++;
     }
     return live + orphans;
   }
-  const liveSkills = walkFiles(join(opts.openclawDir, "skills")).length;
+  // Dedupe live skills across all precedence roots so the count matches
+  // collectSkills (highest source wins; same id in a lower root is not counted).
+  const seenSkillIds = new Set<string>();
+  for (const { dir } of skillRoots(opts.openclawDir)) {
+    for (const file of walkFiles(dir)) seenSkillIds.add(relativeId(dir, file));
+  }
+  const liveSkills = seenSkillIds.size;
   const liveTools = walkFiles(join(opts.openclawDir, "tools")).length;
-  const liveSoul = listRootFilesMatching(opts.openclawDir, ".soul.").length;
+  const workspaceDir = readWorkspaceDir(opts.openclawDir);
+  const liveWorkspace = WORKSPACE_BOOTSTRAP_FILES.filter((name) => {
+    const file = join(workspaceDir, name);
+    if (!existsSync(file) || isSymlink(file)) return false;
+    try { return statSync(file).isFile(); } catch { return false; }
+  }).length;
   const legacyCronStems = new Set(
     listRootFilesMatching(opts.openclawDir, ".cron.")
       .map((file) => basename(file).split(".cron.")[0])
@@ -359,7 +457,7 @@ function countSummary(store: AuditStore, opts: CollectOptions): InventorySummary
     plugins: countPlugins(opts),
     skills: countWith("skills", liveSkills),
     tools: countWith("tools", liveTools),
-    soul: countWith("soul", liveSoul),
+    workspace: countWith("workspace", liveWorkspace),
     crons: countWith("crons", liveCrons),
   };
 }
@@ -384,10 +482,10 @@ export function collectInventory(
     kind === "plugins" ? collectPlugins(store, resolved) :
     kind === "skills" ? collectSkills(store, resolved) :
     kind === "tools" ? collectTools(store, resolved) :
-    kind === "soul" ? collectSoul(store, resolved) :
+    kind === "workspace" ? collectWorkspace(store, resolved) :
     collectCrons(store, resolved);
 
-  const summary: InventorySummary = { plugins: 0, skills: 0, tools: 0, soul: 0, crons: 0 };
+  const summary: InventorySummary = { plugins: 0, skills: 0, tools: 0, workspace: 0, crons: 0 };
   summary[kind] = items.length;
 
   return {
@@ -395,7 +493,7 @@ export function collectInventory(
     ...(kind === "plugins" ? { plugins: items } : {}),
     ...(kind === "skills" ? { skills: items } : {}),
     ...(kind === "tools" ? { tools: items } : {}),
-    ...(kind === "soul" ? { soul: items } : {}),
+    ...(kind === "workspace" ? { workspace: items } : {}),
     ...(kind === "crons" ? { crons: items } : {}),
   };
 }

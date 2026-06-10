@@ -44,12 +44,12 @@ src/
                             DE-anchored roots; tamper-range bracket
     retention.ts            RetentionService: hourly age + size prune
     config-watcher.ts       ConfigWatcher: chokidar + ToolScanner +
-                            notify on skill/tool/soul/cron changes
+                            notify on skill/tool/workspace/cron changes
     file-watcher.ts         FileWatcher: operator-configured patterns
     cron-manifests.ts       Reads ~/.openclaw/cron/jobs.json (primary) and
                             legacy ~/.openclaw/<id>.cron.*.json (fallback) with
                             fd-based size check (no TOCTOU)
-    inventory.ts            Plugin/skill/tool/soul/cron inventory
+    inventory.ts            Plugin/skill/tool/workspace/cron inventory
 
   reports/
     projection.ts             Day/week digest projection

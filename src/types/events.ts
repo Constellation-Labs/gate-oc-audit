@@ -43,6 +43,9 @@ export type EventType =
 
   | "config.tool_changed"
   | "config.skill_changed"
+  | "config.workspace_changed"
+  // Legacy: emitted by older versions for `<root>/*.soul.*` files. Retained so
+  // historical events still type-check; superseded by config.workspace_changed.
   | "config.soul_changed"
   | "config.cron_changed"
   | "security.scan_result"
@@ -54,7 +57,7 @@ export type ConfigChangeType = "added" | "modified" | "removed";
 
 export interface ConfigChangeMetadata {
   artifactName: string;
-  artifactType: "skills" | "tools" | "soul" | "cron";
+  artifactType: "skills" | "tools" | "workspace" | "soul" | "cron";
   changeType: ConfigChangeType;
   filePath: string;
   contentHash: string;
