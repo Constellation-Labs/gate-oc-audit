@@ -281,6 +281,8 @@ export function registerHooks(
 ): void {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
+  // On by default; operators can disable arg scanning with scanToolArgs:false.
+  const scanToolArgs = config.scanToolArgs !== false;
 
   // Stateless regex scanner; runs the "args" profile against serialized
   // tool-invocation arguments in before_tool_call.
@@ -425,18 +427,24 @@ export function registerHooks(
       // the in-memory sanitized args (before persistence), so the security
       // signal survives even when redactToolArgs stores only a hash. sanitize()
       // breaks cycles, so the JSON.stringify below cannot throw.
-      const scanFindings = scanner.scanContent(JSON.stringify(sanitized), undefined, "args");
-      if (scanFindings.length > 0) {
-        safeAppend({
-          sessionId: ctx.sessionId,
-          eventType: "security.scan_result",
-          category: "security",
-          description: `Scan: ${scanFindings.length} finding(s) in ${safeDesc(evt.toolName)} args`,
-          metadata: { toolName: evt.toolName, findings: scanFindings },
-        });
-        notifier?.notifyToolArgScan(evt.toolName, scanFindings).catch((err) => {
-          log.error(`Notification error: ${err instanceof Error ? err.message : err}`);
-        });
+      if (scanToolArgs) {
+        const scanFindings = scanner.scanContent(JSON.stringify(sanitized), undefined, "args");
+        if (scanFindings.length > 0) {
+          safeAppend({
+            sessionId: ctx.sessionId,
+            eventType: "security.scan_result",
+            category: "security",
+            description: `Scan: ${scanFindings.length} finding(s) in ${safeDesc(evt.toolName)} args`,
+            metadata: { toolName: evt.toolName, source: "tool_invocation", findings: scanFindings },
+          });
+          // Audit-log every finding, but only notify on high severity to keep
+          // operator alerts signal-heavy (mirrors the file-scan notifier path).
+          if (scanFindings.some((f) => f.severity === "high")) {
+            notifier?.notifyToolArgScan(evt.toolName, scanFindings).catch((err) => {
+              log.error(`Notification error: ${err instanceof Error ? err.message : err}`);
+            });
+          }
+        }
       }
     },
     { priority: AUDIT_PRIORITY },

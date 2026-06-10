@@ -16,8 +16,10 @@ export type ScanProfile = "file" | "args";
  *  ToolScanner.scan()'s MAX_HASHABLE_BYTES skip; this is the args-path
  *  equivalent. We scan a prefix rather than skipping entirely so padding a
  *  payload past the cap can't trivially hide a short dangerous token before
- *  it. 1 MiB is far larger than any real argument set. */
-export const MAX_SCANNED_ARG_LENGTH = 1024 * 1024;
+ *  it. 32 KiB comfortably covers real argument sets while keeping the regex
+ *  cost (the args profile includes injection patterns with a `.*`, whose
+ *  worst-case backtracking is quadratic in the scanned length) bounded. */
+export const MAX_SCANNED_ARG_LENGTH = 32 * 1024;
 
 interface ScanCheck {
   name: string;
@@ -135,12 +137,14 @@ const CHECKS: ScanCheck[] = [
     severity: "high",
     description: "Known prompt injection pattern detected",
     pattern: pat("ignore\\s+(previous|all|above)\\s+(instructions|prompts)|system\\s*:\\s*you\\s+are|<\\|im_start\\|>|<\\|endoftext\\|>", "gi"),
+    args: true,
   },
   {
     name: "injection_jailbreak",
     severity: "high",
     description: "Jailbreak pattern detected in string literal",
     pattern: pat("DAN\\s+mode|do\\s+anything\\s+now|bypass\\s+(safety|content)\\s+(filter|policy)|act\\s+as\\s+.*without\\s+(restrict|limit)", "gi"),
+    args: true,
   },
 ];
 

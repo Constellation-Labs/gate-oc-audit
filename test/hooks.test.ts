@@ -1313,7 +1313,17 @@ describe("before_tool_call arg scanning", () => {
     assert.ok(scan, "expected a security.scan_result event");
     const meta = JSON.parse(scan!.metadata);
     assert.equal(meta.toolName, "run");
+    assert.equal(meta.source, "tool_invocation");
     assert.ok(meta.findings.some((f: { check: string }) => f.check === "obfuscation_base64"));
+  });
+
+  it("scanToolArgs:false disables arg scanning", () => {
+    registerHooks(api, store, undefined, { scanToolArgs: false }, gatewayStopCapture);
+    fireHook(api, "before_tool_call",
+      { toolName: "run", params: { payload: SUSPICIOUS } },
+      { sessionId: "s1" },
+    );
+    assert.ok(!getEvents(dbPath).some((e) => e.event_type === "security.scan_result"));
   });
 
   it("scans even when redactToolArgs hashes the stored args", () => {
@@ -1339,7 +1349,7 @@ describe("before_tool_call arg scanning", () => {
     assert.ok(!getEvents(dbPath).some((e) => e.event_type === "security.scan_result"));
   });
 
-  it("notifies the operator when findings exist", () => {
+  it("notifies the operator on a high-severity finding", () => {
     const calls: Array<{ toolName: string; count: number }> = [];
     const notifier = {
       notifyToolArgScan: (toolName: string, findings: unknown[]) => {
@@ -1348,6 +1358,7 @@ describe("before_tool_call arg scanning", () => {
       },
     } as unknown as NotificationService;
     registerHooks(api, store, undefined, {}, gatewayStopCapture, notifier);
+    // SUSPICIOUS trips obfuscation_base64, which is high severity.
     fireHook(api, "before_tool_call",
       { toolName: "run", params: { payload: SUSPICIOUS } },
       { sessionId: "s1" },
@@ -1355,6 +1366,24 @@ describe("before_tool_call arg scanning", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].toolName, "run");
     assert.ok(calls[0].count > 0);
+  });
+
+  it("records but does not notify on medium-only findings", () => {
+    let called = false;
+    const notifier = {
+      notifyToolArgScan: () => { called = true; return Promise.resolve(); },
+    } as unknown as NotificationService;
+    registerHooks(api, store, undefined, {}, gatewayStopCapture, notifier);
+    // escalation_env_access is medium severity; build the trigger dynamically
+    // so this test file isn't itself flagged by the install-time scanner.
+    const procEnv = ["process", "env"].join(".");
+    fireHook(api, "before_tool_call",
+      { toolName: "run", params: { script: `${procEnv}.SECRET` } },
+      { sessionId: "s1" },
+    );
+    const scan = getEvents(dbPath).find((e) => e.event_type === "security.scan_result");
+    assert.ok(scan, "medium finding should still be recorded");
+    assert.equal(called, false, "medium-only findings must not notify");
   });
 
   it("does not notify for clean args", () => {

@@ -377,6 +377,7 @@ openclaw config set plugins.entries.gate-oc-audit.config.userId "alice@example.c
 |---|---|---|
 | `redactPromptText` | `false` | Replace content of `prompt.*` and `message.*` events with `"sha256:<hex>"` before DB write. Length metadata (`contentLength` / `promptLength`) is preserved. |
 | `redactToolArgs` | `false` | Replace `tool.invoked` `metadata.args` with `{ hash: "sha256:<hex>" }` (hash computed over canonicalized JSON of the already key-sanitized args). |
+| `scanToolArgs` | `true` | Scan each tool invocation's serialized arguments with the `ToolScanner` "args" profile (injection, jailbreak, base64/obfuscation, shell-exec, sensitive-env patterns). Findings are recorded as a `security.scan_result` event tagged `source: "tool_invocation"`; high-severity findings also fire a `notificationWebhook` alert. Advisory only — it never blocks the call. Scans the in-memory args before redaction, so it works alongside `redactToolArgs`. Set `false` to disable. |
 
 Hashes allow independent verification — anyone with the original plaintext can re-hash and confirm it matches the audit record, without the plaintext ever touching the DB.
 

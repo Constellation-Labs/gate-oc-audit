@@ -74,7 +74,10 @@ export interface ScanFinding {
 
 export interface ScanResultMetadata {
   toolName: string;
-  filePath: string;
+  // Present for file scans (config-watcher); omitted for tool-invocation scans.
+  filePath?: string;
+  // Distinguishes a static file scan from a runtime tool-argument scan.
+  source?: "file" | "tool_invocation";
   findings: ScanFinding[];
 }
 
