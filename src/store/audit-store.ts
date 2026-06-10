@@ -582,7 +582,7 @@ export class AuditStore {
       const rawContent = hasContent && !contentOversize ? insert.content : undefined;
       if (contentOversize) {
         log.warn(
-          `[audit-plugin] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event with truncation marker`,
+          `[gate-oc-audit] Content exceeds ${MAX_CONTENT_SIZE} bytes, storing event with truncation marker`,
         );
       }
       const contentTruncationArm: Record<string, unknown> | undefined = contentOversize
@@ -601,7 +601,7 @@ export class AuditStore {
       try {
         metadataCanonical = sdk.canonicalize(effectiveMetadata);
       } catch {
-        log.warn("[audit-plugin] Metadata is not serializable, recording marker");
+        log.warn("[gate-oc-audit] Metadata is not serializable, recording marker");
         effectiveMetadata = {
           $auditTruncation: {
             metadata: { reason: "non-serializable" },
@@ -632,7 +632,7 @@ export class AuditStore {
       // re-opening the size-evasion vector this branch was supposed to close.
       if (metadataCanonical.length > MAX_METADATA_SIZE) {
         throw new Error(
-          `[audit-plugin] BUG: truncation marker itself exceeds ${MAX_METADATA_SIZE} bytes`,
+          `[gate-oc-audit] BUG: truncation marker itself exceeds ${MAX_METADATA_SIZE} bytes`,
         );
       }
 
@@ -696,7 +696,7 @@ export class AuditStore {
       this.degraded = true;
       const message = err instanceof Error ? err.message : "Unknown error";
       log.error(
-        `[audit-plugin][store=${this.instanceId}] Failed to append event (${insert.eventType}): ${message}`,
+        `[gate-oc-audit][store=${this.instanceId}] Failed to append event (${insert.eventType}): ${message}`,
       );
       return undefined;
     }

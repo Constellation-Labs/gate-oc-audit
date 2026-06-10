@@ -981,7 +981,7 @@ describe("registerHooks", () => {
       fireHook(api, "before_install",
         {
           targetType: "plugin",
-          targetName: "evil\n[audit-plugin] FAKE: legitimate-pkg installed",
+          targetName: "evil\n[gate-oc-audit] FAKE: legitimate-pkg installed",
           sourcePath: "/tmp/evil",
           sourcePathKind: "directory",
           request: { kind: "plugin-npm", mode: "install\rinjected" },
@@ -1007,7 +1007,7 @@ describe("registerHooks", () => {
           targetType: "plugin",
           // \x9B is single-byte CSI; 8-bit-CSI-aware terminals would interpret it.
           // \u2028 is JS LINE SEPARATOR.
-          targetName: "evil\x9B2J\u2028[audit-plugin] FAKE",
+          targetName: "evil\x9B2J\u2028[gate-oc-audit] FAKE",
           sourcePath: "/tmp/evil",
           sourcePathKind: "directory",
           request: { kind: "plugin-npm", mode: "install" },

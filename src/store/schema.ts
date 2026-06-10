@@ -313,7 +313,7 @@ function migrateAuditEventsToV4(db: DatabaseSync): void {
       selectExprs.push(`NULL AS ${col.name}`);
     } else {
       throw new Error(
-        `[audit-plugin] cannot migrate audit_events to v4: required column '${col.name}' missing from existing table`,
+        `[gate-oc-audit] cannot migrate audit_events to v4: required column '${col.name}' missing from existing table`,
       );
     }
   }
