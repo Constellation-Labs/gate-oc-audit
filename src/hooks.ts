@@ -4,6 +4,8 @@ import type { AuditStore } from "./store/audit-store.js";
 import type { AuditEventInsert } from "./types/events.js";
 import type { RateLimiter } from "./rate-limiter.js";
 import type { GatewayStopCapture } from "./gateway-stop-capture.js";
+import type { NotificationService } from "./services/notifications.js";
+import { ToolScanner } from "./scanner.js";
 import {log} from "./util/logger.js";
 
 const require2 = createRequire(import.meta.url);
@@ -275,9 +277,16 @@ export function registerHooks(
   limiter: RateLimiter | undefined,
   config: Record<string, unknown>,
   gatewayStopCapture: GatewayStopCapture,
+  notifier?: NotificationService,
 ): void {
   const redactContent = config.redactPromptText === true;
   const redactToolArgs = config.redactToolArgs === true;
+  // On by default; operators can disable arg scanning with scanToolArgs:false.
+  const scanToolArgs = config.scanToolArgs !== false;
+
+  // Stateless regex scanner; runs the "args" profile against serialized
+  // tool-invocation arguments in before_tool_call.
+  const scanner = new ToolScanner();
 
   // Resolution order: explicit config > OPENCLAW_USER_ID env > USER env > unset.
   // Stamped on every insert; leaves NULL when nothing resolves. Each candidate
@@ -413,6 +422,30 @@ export function registerHooks(
         description: `Tool invoked: ${safeDesc(evt.toolName)}`,
         metadata: { toolName: evt.toolName, args },
       });
+
+      // Scan the serialized arguments for dangerous patterns. We always scan
+      // the in-memory sanitized args (before persistence), so the security
+      // signal survives even when redactToolArgs stores only a hash. sanitize()
+      // breaks cycles, so the JSON.stringify below cannot throw.
+      if (scanToolArgs) {
+        const scanFindings = scanner.scanContent(JSON.stringify(sanitized), undefined, "args");
+        if (scanFindings.length > 0) {
+          safeAppend({
+            sessionId: ctx.sessionId,
+            eventType: "security.scan_result",
+            category: "security",
+            description: `Scan: ${scanFindings.length} finding(s) in ${safeDesc(evt.toolName)} args`,
+            metadata: { toolName: evt.toolName, source: "tool_invocation", findings: scanFindings },
+          });
+          // Audit-log every finding, but only notify on high severity to keep
+          // operator alerts signal-heavy (mirrors the file-scan notifier path).
+          if (scanFindings.some((f) => f.severity === "high")) {
+            notifier?.notifyToolArgScan(evt.toolName, scanFindings).catch((err) => {
+              log.error(`Notification error: ${err instanceof Error ? err.message : err}`);
+            });
+          }
+        }
+      }
     },
     { priority: AUDIT_PRIORITY },
   );

@@ -241,6 +241,7 @@ export class ConfigWatcher {
             description: `Scan: ${scanFindings.length} finding(s) in ${artifactName}`,
             metadata: {
               toolName: artifactName,
+              source: "file",
               filePath: resolvedPath,
               findings: scanFindings,
             },

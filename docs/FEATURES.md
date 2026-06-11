@@ -252,6 +252,17 @@ markers, and the SMT skip set all carry over.
   and surfaces findings via `notifyConfigChange`. Scanner reads are
   capped at `MAX_HASHABLE_BYTES = 100 MiB` to keep a planted blob from
   OOMing the plugin.
+- **Tool-argument scanning** — when `scanToolArgs` is enabled (default),
+  the `before_tool_call` hook runs the same `ToolScanner` over each
+  invocation's serialized arguments using a curated **"args" profile**
+  (injection, jailbreak, base64/obfuscation, shell-exec, dynamic-eval,
+  and sensitive-env checks — the source-syntax checks that only match JS
+  files are excluded). Findings are recorded as a `security.scan_result`
+  event tagged `source: "tool_invocation"`; high-severity findings also
+  notify. The scan runs against the in-memory args before redaction (so
+  it works with `redactToolArgs`) and is bounded to a
+  `MAX_SCANNED_ARG_LENGTH = 32 KiB` prefix to cap regex cost on the
+  synchronous hot path. Advisory only — it never blocks the call.
 - **`FileWatcher`** — operator-configured glob patterns for arbitrary
   files (`fileWatchPatterns` / `fileWatchIgnorePatterns`); emits
   `file.added` / `file.modified` / `file.removed` events.

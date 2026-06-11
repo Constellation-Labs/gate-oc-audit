@@ -86,6 +86,39 @@ export class NotificationService {
     });
   }
 
+  async notifyToolArgScan(
+    toolName: string,
+    scanFindings: ScanFinding[],
+    machineName?: string,
+  ): Promise<void> {
+    if (!this.webhookUrl) return;
+    if (!scanFindings || scanFindings.length === 0) return;
+
+    const lines = [
+      `*Tool invocation scan:* \`${toolName}\``,
+      `*Detected:* ${new Date().toISOString()}`,
+      machineName ? `*Machine:* ${machineName}` : undefined,
+    ].filter(Boolean);
+
+    const findingLines = scanFindings.map(
+      (f) => `- ${f.severity.toUpperCase()}: ${f.description}${f.line ? ` (line ${f.line})` : ""}`,
+    );
+
+    await this.send({
+      text: `OpenClaw tool-invocation scan: ${scanFindings.length} finding(s) in ${toolName}`,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Scan result:* ${scanFindings.length} finding(s)\n${findingLines.join("\n")}`,
+          },
+        },
+      ],
+    });
+  }
+
   async notifyIntegrityViolation(
     sequence: number,
     error: string,
