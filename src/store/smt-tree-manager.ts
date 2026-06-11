@@ -57,9 +57,23 @@ export class TreeManager {
    *   cause over-replay (safe — `onEventAppended` short-circuits via
    *   `isFrozen`, and re-inserting an existing leaf is a set-semantics
    *   no-op) rather than under-replay (silent leaf gap).
+   *
+   * When `activeKey` is supplied the cursor is scoped to *that* tree only, so
+   * a stale or different-key checkpoint file (e.g. a changed machineId, or a
+   * leftover tree from another key) cannot drag the replay high-water mark
+   * down for the tree we actually append to:
+   * - active tree has no .db on disk → `{ cursor: 0 }` (empty; replay all);
+   * - active tree carries the key → its own cursor;
+   * - active tree on disk but no key (legacy) → `{ hasCursor: false }`.
    */
-  getRestoredCursor(): { hasCursor: false } | { hasCursor: true; cursor: number } {
+  getRestoredCursor(activeKey?: string): { hasCursor: false } | { hasCursor: true; cursor: number } {
     if (this.trees.size === 0) return { hasCursor: true, cursor: 0 };
+    if (activeKey !== undefined) {
+      if (!this.trees.has(activeKey)) return { hasCursor: true, cursor: 0 };
+      const cursor = this.restoredCursors.get(activeKey);
+      if (cursor === undefined) return { hasCursor: false };
+      return { hasCursor: true, cursor };
+    }
     if (this.restoredCursors.size === 0) return { hasCursor: false };
     let min = Infinity;
     for (const v of this.restoredCursors.values()) {

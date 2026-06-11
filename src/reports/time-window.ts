@@ -155,6 +155,14 @@ function isoWeekYear(d: Date, tz: TimeZoneMode): number {
  * `getDate()`. The day-arg form lets JS resolve month/year rollovers and
  * DST transitions correctly — `lookbackDays * 86_400_000` ms-subtraction
  * would otherwise misalign the prior window across a DST boundary.
+ *
+ * NOTE (DST fragility, corr-r2-M3): in `local` mode the carried-over
+ * H/M/S/ms can land on a repeated (fall-back) or skipped (spring-forward)
+ * wall-clock hour, where the `Date` constructor resolves the ambiguity by an
+ * implementation-defined rule and the result can be off by one hour. Callers
+ * that pass local *midnight* instants avoid this — 00:00 is not the DST
+ * transition hour in any common tz — which is why `floorToTzDay` below is the
+ * intended pre-step for the first-seen lookback.
  */
 export function subtractCalendarDays(iso: string, days: number, tz: TimeZoneMode): string {
   const d = new Date(iso);
@@ -164,6 +172,22 @@ export function subtractCalendarDays(iso: string, days: number, tz: TimeZoneMode
   }
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() - days,
                   d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds()).toISOString();
+}
+
+/**
+ * Floor an ISO 8601 instant to the start of its calendar day in the given
+ * time zone (local or UTC midnight). Used to normalize an arbitrary window
+ * start (e.g. a `--since 90m` instant) to a day boundary before computing a
+ * "prior N days" lookback, so the baseline is a clean N-day span rather than
+ * an oddly-offset one (corr-r2-M4). Daily/weekly windows already start at
+ * midnight, so flooring is a no-op for them.
+ */
+export function floorToTzDay(iso: string, tz: TimeZoneMode): string {
+  const d = new Date(iso);
+  if (tz === "utc") {
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())).toISOString();
+  }
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString();
 }
 
 /** Default to "today" in the requested time zone. `now` is injectable for tests. */

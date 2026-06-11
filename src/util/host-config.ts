@@ -45,6 +45,13 @@ function readHostConfig(openclawDir: string): HostConfigShape | undefined {
  * so it never appears on the `config` object openclaw hands the plugin. Status
  * and UI must therefore read it from the host config file directly rather than
  * from the plugin config. Returns false on any read/parse error.
+ *
+ * LIMITATION: the host config is read with plain `JSON.parse` (see
+ * readHostConfig), NOT a JSON5 parser. If the operator wrote openclaw.json in
+ * JSON5 (comments, trailing commas, unquoted keys), parsing fails and this
+ * returns false — i.e. a genuine `allowConversationAccess: true` opt-in can be
+ * misread as "not opted in." Keep the file strict JSON for the flag to take
+ * effect.
  */
 export function readAllowConversationAccess(openclawDir: string): boolean {
   const cfg = readHostConfig(openclawDir);
@@ -57,9 +64,9 @@ export function readAllowConversationAccess(openclawDir: string): boolean {
  * `agents.defaults.workspace` in `<openclawDir>/openclaw.json`, defaulting to
  * `<openclawDir>/workspace`. A leading `~` is expanded against $HOME.
  *
- * Like readAllowConversationAccess, this uses JSON.parse: openclaw documents
- * the file as JSON5, so a config with comments/unquoted keys fails to parse and
- * we fall back to the default `<openclawDir>/workspace`.
+ * Like readAllowConversationAccess, this uses plain `JSON.parse` (not a JSON5
+ * parser), so a config with comments/trailing commas/unquoted keys fails to
+ * parse and we fall back to the default `<openclawDir>/workspace`.
  */
 export function readWorkspaceDir(openclawDir: string): string {
   const fallback = join(openclawDir, "workspace");
@@ -71,8 +78,8 @@ export function readWorkspaceDir(openclawDir: string): string {
 /**
  * Extra skill directories configured under `skills.load.extraDirs` in
  * `<openclawDir>/openclaw.json` (lowest skill-load precedence). Leading `~` is
- * expanded against $HOME. Returns [] when unset or unparseable — same JSON5
- * caveat as readWorkspaceDir.
+ * expanded against $HOME. Returns [] when unset or unparseable — same
+ * plain-JSON.parse caveat as readWorkspaceDir (a JSON5 file fails to parse).
  */
 export function readSkillsExtraDirs(openclawDir: string): string[] {
   const extra = readHostConfig(openclawDir)?.skills?.load?.extraDirs;

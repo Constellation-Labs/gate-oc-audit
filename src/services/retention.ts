@@ -28,10 +28,18 @@ export class RetentionService {
     config: Record<string, unknown> = {},
   ) {
     this.store = store;
+    // Both knobs must be > 0. A non-positive value (e.g. `localRetentionDays: 0`
+    // meant as "keep forever", or a negative typo) would make the prune cutoff
+    // land at/after `now` and silently empty the audit log on the next tick, so
+    // fall back to the safe default instead of honouring it.
     this.retentionDays =
-      typeof config.localRetentionDays === "number" ? config.localRetentionDays : DEFAULT_RETENTION_DAYS;
+      typeof config.localRetentionDays === "number" && config.localRetentionDays > 0
+        ? config.localRetentionDays
+        : DEFAULT_RETENTION_DAYS;
     this.maxSizeMb =
-      typeof config.localMaxSizeMb === "number" ? config.localMaxSizeMb : DEFAULT_MAX_SIZE_MB;
+      typeof config.localMaxSizeMb === "number" && config.localMaxSizeMb > 0
+        ? config.localMaxSizeMb
+        : DEFAULT_MAX_SIZE_MB;
   }
 
   start(): void {

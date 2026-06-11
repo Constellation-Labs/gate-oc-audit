@@ -35,10 +35,14 @@ export interface NotificationOptions {
 
 export class NotificationService {
   private webhookUrl: string | undefined;
+  /** Mirrors the config-time SSRF opt-in so the send-time DNS re-check in
+   *  `postJsonWebhook` applies the same allow/deny intent. */
+  private readonly allowPrivateHost: boolean;
 
   constructor(webhookUrl?: string, opts: NotificationOptions = {}) {
+    this.allowPrivateHost = opts.allowPrivateHost === true;
     if (webhookUrl) {
-      const reason = isUnsafeWebhookUrl(webhookUrl, { allowPrivateHost: opts.allowPrivateHost === true });
+      const reason = isUnsafeWebhookUrl(webhookUrl, { allowPrivateHost: this.allowPrivateHost });
       if (reason) {
         log.warn(`Webhook URL rejected (${reason}), notifications disabled`);
       } else {
@@ -203,7 +207,12 @@ export class NotificationService {
 
   private async send(payload: NotificationPayload): Promise<void> {
     if (!this.webhookUrl) return;
-    const result = await postJsonWebhook(this.webhookUrl, payload);
+    // postJsonWebhook re-validates the resolved IP on every send (closing the
+    // "validated once at construction" gap), so no separate re-validation is
+    // needed here.
+    const result = await postJsonWebhook(this.webhookUrl, payload, {
+      allowPrivateHost: this.allowPrivateHost,
+    });
     if (!result.ok) {
       if (result.status !== undefined) {
         log.error(`Notification webhook returned ${result.status}: ${result.error}`);

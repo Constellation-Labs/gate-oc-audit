@@ -33,7 +33,7 @@ import type {
   SmtConfig,
 } from "../types/smt.js";
 import { getMachineId } from "../util/machine-id.js";
-import {log, smtLog} from "../util/logger.js";
+import { log, smtLog } from "../util/logger.js";
 
 export type VerifyResult =
   | { status: "valid" }
@@ -167,7 +167,7 @@ export class SmtService {
       // the next checkpoint will populate the key. If trees AND metadata
       // disagree, the trees win — a stale JSON pointing past empty trees
       // is exactly the bug this coupling exists to prevent.
-      const cursor = this.manager.getRestoredCursor();
+      const cursor = this.manager.getRestoredCursor(this.getTreeKey());
       if (cursor.hasCursor) {
         this.lastInsertedSeq = cursor.cursor;
       }
@@ -725,17 +725,22 @@ export class SmtService {
     }
   }
 
+  /** Clear the five in-memory metadata maps to empty state. */
+  private resetState(): void {
+    this.seqNos = new Map();
+    this.conversationChains = new Map();
+    this.epochEntries = new Map();
+    this.exportedProofs = new Map();
+    this.leafValues = new Map();
+  }
+
   private async restoreMetadata(): Promise<void> {
     // Clear unconditionally on entry so pre-start hook fires can't leave
     // poisoned values in the maps. Any event that landed in the
     // [registerHooks, start()] window incremented seqNos against an empty
     // state; the explicit replay in service.start() will re-feed those
     // events against the values we restore below.
-    this.seqNos = new Map();
-    this.conversationChains = new Map();
-    this.epochEntries = new Map();
-    this.exportedProofs = new Map();
-    this.leafValues = new Map();
+    this.resetState();
 
     const filePath = join(this.config.checkpointDir, "_metadata.json");
     let raw: string;
@@ -768,11 +773,7 @@ export class SmtService {
       // populated by an early hook fire). Any field that fails its shape
       // check stays cleared so the in-memory state is consistent with what
       // was actually parsed from disk.
-      this.seqNos = new Map();
-      this.conversationChains = new Map();
-      this.epochEntries = new Map();
-      this.exportedProofs = new Map();
-      this.leafValues = new Map();
+      this.resetState();
 
       if (Array.isArray(data.seqNos)) {
         this.seqNos = new Map(data.seqNos);

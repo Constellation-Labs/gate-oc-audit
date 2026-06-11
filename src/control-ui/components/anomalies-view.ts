@@ -8,15 +8,7 @@ import {
   type InstallEventFinding,
   type IntegrityViolationFinding,
 } from "../api.ts";
-
-function fmtNumber(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return n.toLocaleString();
-}
-
-function fmtTimestamp(iso: string): string {
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
-}
+import { fmtNumber, fmtTimestamp } from "../format.ts";
 
 @customElement("anomalies-view")
 export class AnomaliesView extends LitElement {

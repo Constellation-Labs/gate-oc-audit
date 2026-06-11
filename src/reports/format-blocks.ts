@@ -1,4 +1,5 @@
 import type { AuditProjection } from "./projection.js";
+import { fmtUsd } from "./text-utils.js";
 
 /**
  * Slack/Discord-compatible payload for an AuditProjection digest. Returns a
@@ -102,8 +103,4 @@ function renderIntegrity(p: AuditProjection): string {
     lines.push("Last checkpoint: _(none yet)_");
   }
   return lines.join("\n");
-}
-
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(4)}`;
 }

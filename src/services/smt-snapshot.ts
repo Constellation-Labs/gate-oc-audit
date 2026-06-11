@@ -48,17 +48,28 @@ export function serializeSmtState(
 export function deserializeSmtState(
   data: Buffer,
 ): { root: string; nodes: Map<string, string[]>; frozenKeys?: string[] } {
-  const obj = JSON.parse(data.toString());
+  const obj = JSON.parse(data.toString()) as unknown;
+  // A corrupt/tampered blob (non-object top level, or a missing/non-object
+  // `nodes`) must surface as a meaningful Error rather than a raw TypeError
+  // from Object.entries(undefined). Matches the shape-check pattern in
+  // cron-manifests.ts / openclaw-paths.ts / host-config.ts.
+  if (obj === null || typeof obj !== "object") {
+    throw new Error("Invalid SMT snapshot: expected a JSON object");
+  }
+  const record = obj as Record<string, unknown>;
+  if (record.nodes === null || typeof record.nodes !== "object") {
+    throw new Error("Invalid SMT snapshot: missing or malformed `nodes` object");
+  }
   const nodes = new Map<string, string[]>();
   for (const [key, value] of Object.entries(
-    obj.nodes as Record<string, string[]>,
+    record.nodes as Record<string, string[]>,
   )) {
     nodes.set(key, value);
   }
   return {
-    root: obj.root,
+    root: record.root as string,
     nodes,
-    frozenKeys: Array.isArray(obj.frozenKeys) ? obj.frozenKeys : undefined,
+    frozenKeys: Array.isArray(record.frozenKeys) ? record.frozenKeys : undefined,
   };
 }
 

@@ -1,20 +1,7 @@
 import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { getSpend, type SpendRollup, type SpendGroupBy } from "../api.ts";
-
-function fmtNumber(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return n.toLocaleString();
-}
-
-function fmtUsd(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toFixed(4)}`;
-}
-
-function fmtTimestamp(iso: string): string {
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
-}
+import { fmtNumber, fmtUsd, fmtTimestamp } from "../format.ts";
 
 @customElement("spend-view")
 export class SpendView extends LitElement {

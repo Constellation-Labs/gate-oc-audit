@@ -1,4 +1,5 @@
 import type { AnomalyView } from "./anomalies-view.js";
+import { hasIntegrityFindings } from "./text-utils.js";
 
 /**
  * Plain-text rendering of an AnomalyView. Each detector section is suppressed
@@ -22,9 +23,7 @@ export function formatAnomalyViewText(v: AnomalyView): string {
     a.firstSeenTools.length > 0 ||
     a.denialSpikes.length > 0 ||
     a.installEvents.length > 0 ||
-    a.integrityViolations.notFoundOnDe.length > 0 ||
-    a.integrityViolations.tamperedEvents.length > 0 ||
-    a.integrityViolations.note !== null ||
+    hasIntegrityFindings(a.integrityViolations) ||
     v.counts.capped;
 
   if (!anyFinding) {
@@ -93,7 +92,7 @@ export function formatAnomalyViewText(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.notFoundOnDe.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
+  if (hasIntegrityFindings(iv)) {
     lines.push("=== Integrity violations ===");
     if (iv.note !== null) {
       lines.push(`  NOTE: ${iv.note}`);

@@ -539,14 +539,15 @@ describe("SmtService skippedSeqs", () => {
   });
 
   it("marks insertEntry-rejected events as skipped and persists to the store", () => {
-    // maxTreeSize=1 forces insertEntry to reject the second event with
-    // an "error" result, hitting the rejected-skip branch. Standalone
-    // SmtService skip-mechanism check.
+    // Each event inserts a raw + censored leaf pair, so maxTreeSize=2 leaves
+    // room for exactly one event; the second event's pair would push past the
+    // cap, so insertEntry rejects it with an "error" result, hitting the
+    // rejected-skip branch. Standalone SmtService skip-mechanism check.
     const tiny = new SmtService({
       smt: {
         checkpointIntervalMs: 0,
         pruneAfterEpochs: 0,
-        maxTreeSize: 1,
+        maxTreeSize: 2,
         checkpointDir: `/tmp/smt-tiny-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       },
     });
@@ -569,7 +570,7 @@ describe("SmtService skippedSeqs", () => {
       smt: {
         checkpointIntervalMs: 0,
         pruneAfterEpochs: 0,
-        maxTreeSize: 1,
+        maxTreeSize: 2,
         checkpointDir: `/tmp/smt-tiny2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       },
     });
@@ -577,7 +578,7 @@ describe("SmtService skippedSeqs", () => {
     tiny.setStore(tinyStore);
 
     tiny.onEventAppended(makeEvent({ sequence: 1 }));
-    tiny.onEventAppended(makeEvent({ sequence: 2 })); // skipped (maxTreeSize)
+    tiny.onEventAppended(makeEvent({ sequence: 2 })); // skipped — second raw+censored pair exceeds maxTreeSize
     assert.equal(tiny.wasSkipped(2), true);
 
     // A successful insert at the same sequence clears the skip record.

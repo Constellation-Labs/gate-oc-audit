@@ -2,7 +2,7 @@ import type { AuditStore } from "../store/audit-store.js";
 import type { SmtService } from "../services/smt-service.js";
 import { ANCHOR_NOT_FOUND_HEALTH_NAME } from "../services/health-keys.js";
 import type { AuditEvent } from "../types/events.js";
-import { subtractCalendarDays, type TimeWindow } from "./time-window.js";
+import { floorToTzDay, subtractCalendarDays, type TimeWindow } from "./time-window.js";
 import {
   detectDuplicateOutbound,
   detectFirstSeenTools,
@@ -82,18 +82,17 @@ export function buildAnomalyView(
 
   const { fromIso, toIso } = window;
 
-  // One ranged scan feeds every detector. `createdBefore` in AuditStore.query
-  // is inclusive on the lower edge but we want a half-open window, so
-  // re-tighten with the post-filter.
-  const rawEvents = store
-    .query({
-      createdAfter: fromIso,
-      createdBefore: toIso,
-      includeContent: true,
-      order: "asc",
-      limit: FETCH_CAP,
-    })
-    .filter((e) => e.createdAt >= fromIso && e.createdAt < toIso);
+  // One ranged scan feeds every detector. AuditStore.query already applies a
+  // half-open window (`created_at >= @createdAfter AND created_at < @createdBefore`),
+  // so no post-filter is needed. `capped` is derived from the raw result length
+  // so a busy window that truly hit the cap is always reported as truncated.
+  const rawEvents = store.query({
+    createdAfter: fromIso,
+    createdBefore: toIso,
+    includeContent: true,
+    order: "asc",
+    limit: FETCH_CAP,
+  });
   const capped = rawEvents.length >= FETCH_CAP;
 
   const messages = rawEvents.filter((e) => e.eventType === "message.sent");
@@ -114,7 +113,12 @@ export function buildAnomalyView(
   const todayTools = store
     .aggregateToolInvocationsInWindow(fromIso, toIso)
     .map((r) => r.toolName);
-  const priorFromIso = subtractCalendarDays(fromIso, detectorConfig.lookbackDays, window.tz);
+  // Floor the window start to the tz day boundary before subtracting so a
+  // non-midnight window (e.g. `--since 90m`) still produces a clean N-day
+  // baseline rather than an oddly-offset one (corr-r2-M4). Daily/weekly
+  // windows already start at midnight, so this is a no-op for them.
+  const priorAnchorIso = floorToTzDay(fromIso, window.tz);
+  const priorFromIso = subtractCalendarDays(priorAnchorIso, detectorConfig.lookbackDays, window.tz);
   const priorTools = store.distinctToolNamesInWindow(priorFromIso, fromIso);
   const firstSeenTools = detectFirstSeenTools(todayTools, priorTools);
 

@@ -8,29 +8,7 @@ import {
   type SessionLlmModelUsage,
   type SessionOutboundMessage,
 } from "../api.ts";
-
-function fmtNumber(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return n.toLocaleString();
-}
-
-function fmtUsd(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toFixed(4)}`;
-}
-
-function fmtTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
-}
-
-function fmtDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
-  return `${(ms / 3_600_000).toFixed(1)}h`;
-}
+import { fmtNumber, fmtUsd, fmtTimestamp, fmtDuration, hashQuery } from "../format.ts";
 
 function readSessionIdFromHash(): string | undefined {
   // #/reports/session/<id>?raw=…
@@ -42,9 +20,8 @@ function readSessionIdFromHash(): string | undefined {
 
 function readHashParams(): { raw?: boolean; limit?: string } {
   const hash = window.location.hash;
-  const qIdx = hash.indexOf("?");
-  if (qIdx < 0) return {};
-  const p = new URLSearchParams(hash.slice(qIdx + 1));
+  if (hash.indexOf("?") < 0) return {};
+  const p = hashQuery(hash);
   return { raw: p.get("raw") === "true", limit: p.get("limit") ?? undefined };
 }
 

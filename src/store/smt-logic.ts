@@ -30,6 +30,15 @@ export function getCurrentEpoch(): number {
   return Math.floor(Date.now() / EPOCH_DURATION_MS);
 }
 
+/**
+ * Per-tree monotonic leaf counter. NOTE the seqNo-to-audit-event relationship
+ * is NOT 1:1: a single audit event with a censored variant consumes TWO
+ * consecutive seqNos (one for the raw leaf, one for the censored leaf — see
+ * `insertEntry`). An event with no censored variant consumes one. This is
+ * self-consistent (each SMT leaf has a unique seqNo), but any future
+ * import/migration path that reconstructs `seqNos` from audit-event sequence
+ * numbers must NOT assume one seqNo per audit event.
+ */
 export function getNextSeqNo(seqNos: SeqNos, treeKey: string): number {
   // `??` (not `||`): a future migration that pre-populates `seqNos` with
   // `treeKey -> 0` from an imported snapshot would otherwise double-issue
@@ -107,7 +116,13 @@ export function insertEntry(
     epochEntries,
   } = opts;
 
-  if (store.getEntryCount() >= maxTreeSize) {
+  // An event with a censored variant adds TWO leaves (raw + censored), so the
+  // capacity check must reserve room for both up front. Checking `>= maxTreeSize`
+  // only would admit the raw leaf at maxTreeSize-1 and then push the tree to
+  // maxTreeSize+1 with the censored leaf. Reject before issuing any seqNo so the
+  // counter isn't advanced for leaves that won't be admitted.
+  const leavesToAdd = censoredHash ? 2 : 1;
+  if (store.getEntryCount() + leavesToAdd > maxTreeSize) {
     return { error: `Tree ${treeKey} has reached max size (${maxTreeSize})` };
   }
 

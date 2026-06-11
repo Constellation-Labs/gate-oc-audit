@@ -4,7 +4,11 @@ import { hostname, platform, arch } from "node:os";
 
 let cached: string | undefined;
 
-/** Try /etc/machine-id (Linux/systemd) or /var/lib/dbus/machine-id. */
+/**
+ * Try /etc/machine-id (Linux/systemd) or /var/lib/dbus/machine-id. This is the
+ * only stable-id source on any OS; off-Linux it returns undefined by design and
+ * getMachineId() intentionally falls back to a hostname/platform/arch hash.
+ */
 function linuxMachineId(): string | undefined {
   for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
     try {

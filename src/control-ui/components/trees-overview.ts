@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { listTrees, listCheckpoints, type TreeInfo, type CheckpointRecord } from "../api.ts";
+import { fmtTimestamp, shortHash, explorerFingerprintUrl } from "../format.ts";
 
 @customElement("trees-overview")
 export class TreesOverview extends LitElement {
@@ -102,25 +103,10 @@ export class TreesOverview extends LitElement {
     }
   }
 
-  private explorerUrl(deTxHash: string): string | null {
-    if (!this.deBaseUrl) return null;
-    const base = this.deBaseUrl.replace(/\/+$/, "");
-    return `${base}/explorer/fingerprint/${encodeURIComponent(deTxHash)}`;
-  }
-
-  private fmtTime(iso: string): string {
-    return iso.replace("T", " ").replace(/\.\d+Z$/, "Z");
-  }
-
-  private shortHash(h: string): string {
-    if (h.length <= 18) return h;
-    return `${h.slice(0, 10)}…${h.slice(-6)}`;
-  }
-
   private renderDeTx(deTxHash: string | null) {
     if (!deTxHash) return html`<span class="dim">pending</span>`;
-    const url = this.explorerUrl(deTxHash);
-    const short = this.shortHash(deTxHash);
+    const url = explorerFingerprintUrl(deTxHash, this.deBaseUrl);
+    const short = shortHash(deTxHash);
     return url
       ? html`<a href=${url} target="_blank" rel="noopener noreferrer">${short}</a>`
       : html`${short}`;
@@ -157,7 +143,7 @@ export class TreesOverview extends LitElement {
                   ${this.trees.map((t) => html`
                     <tr>
                       <td class="mono">${t.key}</td>
-                      <td class="hash" title=${t.root}>${this.shortHash(t.root)}</td>
+                      <td class="hash" title=${t.root}>${shortHash(t.root)}</td>
                       <td class="mono">${t.entryCount}</td>
                       <td class="mono">${t.size}</td>
                     </tr>
@@ -189,11 +175,11 @@ export class TreesOverview extends LitElement {
                       <td class="mono">${cp.id}</td>
                       <td class="mono">${cp.sequenceStart}–${cp.sequenceEnd}</td>
                       <td class="mono">${cp.eventCount}</td>
-                      <td class="hash" title=${cp.smtRoot}>${this.shortHash(cp.smtRoot)}</td>
+                      <td class="hash" title=${cp.smtRoot}>${shortHash(cp.smtRoot)}</td>
                       <td class="hash" title=${cp.deTxHash ?? ""}>
                         ${this.renderDeTx(cp.deTxHash)}
                       </td>
-                      <td class="mono">${this.fmtTime(cp.createdAt)}</td>
+                      <td class="mono">${fmtTimestamp(cp.createdAt)}</td>
                     </tr>
                   `)}
                 </tbody>

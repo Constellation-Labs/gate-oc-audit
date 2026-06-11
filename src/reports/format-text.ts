@@ -1,5 +1,5 @@
 import type { AuditProjection } from "./projection.js";
-import { padRight as pad } from "./text-utils.js";
+import { padRight, fmtUsd } from "./text-utils.js";
 import { formatCronSchedule } from "../services/cron-manifests.js";
 
 /**
@@ -20,7 +20,7 @@ export function formatProjectionText(p: AuditProjection): string {
   if (p.activity.byCategory.length > 0) {
     lines.push("By category:");
     for (const r of p.activity.byCategory) {
-      lines.push(`  ${pad(r.category, 12)}  ${r.count}`);
+      lines.push(`  ${padRight(r.category, 12)}  ${r.count}`);
     }
   } else {
     lines.push("  (no events)");
@@ -31,7 +31,7 @@ export function formatProjectionText(p: AuditProjection): string {
   if (p.cron.configured.length > 0) {
     lines.push("Configured:");
     for (const c of p.cron.configured) {
-      lines.push(`  ${pad(c.name, 24)}  ${formatCronSchedule(c.schedule)}`);
+      lines.push(`  ${padRight(c.name, 24)}  ${formatCronSchedule(c.schedule)}`);
     }
   } else {
     lines.push("Configured: (none found)");
@@ -45,7 +45,7 @@ export function formatProjectionText(p: AuditProjection): string {
     lines.push("  (no tool invocations)");
   } else {
     for (const t of p.topTools) {
-      lines.push(`  ${pad(t.toolName, 24)}  ${t.invocations}`);
+      lines.push(`  ${padRight(t.toolName, 24)}  ${t.invocations}`);
     }
   }
   lines.push("");
@@ -57,7 +57,7 @@ export function formatProjectionText(p: AuditProjection): string {
     for (const m of p.llmSpend.byModel) {
       const provider = m.provider ? `${m.provider}/` : "";
       lines.push(
-        `  ${pad(provider + m.model, 32)}  calls=${m.callCount}  ` +
+        `  ${padRight(provider + m.model, 32)}  calls=${m.callCount}  ` +
           `in=${m.inputTokens}  out=${m.outputTokens}  cache=${m.cacheTokens}  ${fmtUsd(m.costUsd)}`,
       );
     }
@@ -69,7 +69,7 @@ export function formatProjectionText(p: AuditProjection): string {
   if (p.outboundMessaging.byChannel.length > 0) {
     lines.push("By channel:");
     for (const r of p.outboundMessaging.byChannel) {
-      lines.push(`  ${pad(r.channel, 24)}  ${r.count}`);
+      lines.push(`  ${padRight(r.channel, 24)}  ${r.count}`);
     }
   }
   lines.push("");
@@ -118,8 +118,4 @@ export function formatProjectionText(p: AuditProjection): string {
   }
 
   return lines.join("\n") + "\n";
-}
-
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(4)}`;
 }

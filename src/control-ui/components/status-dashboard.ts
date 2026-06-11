@@ -2,23 +2,13 @@ import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { getStatus, getAnomalies, type StatusSnapshot, type AnomalyView } from "../api.ts";
 import { computeHealthVerdict, type HealthVerdict } from "../health.ts";
+import { fmtNumber, fmtTimestamp } from "../format.ts";
 
 const REFRESH_MS = 30_000;
-
-function fmtNumber(n: number | null | undefined): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return n.toLocaleString();
-}
 
 function fmtBytesMb(mb: number): string {
   if (!Number.isFinite(mb)) return "—";
   return `${mb.toFixed(1)} MB`;
-}
-
-function fmtTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  // Trim ".sssZ" → "Z" so the dashboard doesn't show subsecond noise.
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
 }
 
 function fmtRelative(iso: string | null | undefined, now: Date): string {

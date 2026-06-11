@@ -1,5 +1,5 @@
 /**
- * URL host policy shared by the webhook senders . Centralised so a single source of truth gates
+ * URL host policy shared by the webhook senders. Centralised so a single source of truth gates
  * any outbound HTTP target an operator configures.
  *
  * Trust model: callers pass URLs sourced from the plugin config file. The
@@ -111,6 +111,107 @@ export function validateHttpTargetUrl(
   }
   if (!loopback && !opts.allowPrivateHost && isPrivateOrLinkLocalIp(host)) {
     return { ok: false, reason: `private/link-local host ${host}` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Classify a single IP address that a hostname resolved to, applying the same
+ * loopback / private / link-local intent as {@link validateHttpTargetUrl} —
+ * but against the *resolved address*, not the hostname string. This closes the
+ * DNS-based SSRF gap where a public-looking hostname resolves to an internal
+ * address (e.g. `evil.example.com` -> `127.0.0.1` / `10.x` / `169.254.169.254`).
+ *
+ * The allow/deny intent mirrors `validateHttpTargetUrl` exactly:
+ * - When the configured (validated) host is itself a loopback host, a
+ *   loopback-resolved IP is EXPECTED and allowed — this preserves the
+ *   intentional `http://localhost` dev-webhook allowance. A loopback host that
+ *   somehow resolves to a non-loopback private/link-local IP is still rejected.
+ * - When the configured host is NOT loopback (the normal https public target),
+ *   any resolved IP that is loopback, private, or link-local is REJECTED,
+ *   unless the operator opted in via `allowPrivateHost` (which only ever
+ *   permits the private/link-local range, never loopback).
+ *
+ * `ip` is a literal address string from `dns.lookup` (dotted-quad IPv4 or an
+ * IPv6 form); it is classified with the same `isLoopbackHost` /
+ * `isPrivateOrLinkLocalIp` predicates used for hostnames.
+ */
+export function classifyResolvedAddress(
+  ip: string,
+  opts: { hostIsLoopback: boolean; allowPrivateHost?: boolean },
+): ValidationResult {
+  const resolvedLoopback = isLoopbackHost(ip);
+  if (opts.hostIsLoopback) {
+    // Loopback dev target: loopback IPs are the expected, allowed case.
+    if (resolvedLoopback) return { ok: true };
+    // A loopback-named host that resolves off-loopback into a private/
+    // link-local range is suspicious — reject it (e.g. a tampered hosts file
+    // pointing "localhost" at 169.254.169.254).
+    if (isPrivateOrLinkLocalIp(ip)) {
+      return { ok: false, reason: `loopback host resolved to private/link-local IP ${ip}` };
+    }
+    return { ok: true };
+  }
+  // Public (https) target: loopback or private/link-local resolved IPs are the
+  // SSRF case we block. `allowPrivateHost` only relaxes the private range, not
+  // loopback (matching validateHttpTargetUrl, which never permits a non-loopback
+  // host that classifies as loopback).
+  if (resolvedLoopback) {
+    return { ok: false, reason: `host resolved to loopback IP ${ip}` };
+  }
+  if (!opts.allowPrivateHost && isPrivateOrLinkLocalIp(ip)) {
+    return { ok: false, reason: `host resolved to private/link-local IP ${ip}` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Resolve a URL's hostname and assert every resolved address is permitted by
+ * the policy (see {@link classifyResolvedAddress}). This is the send-time
+ * complement to {@link validateHttpTargetUrl}, which only classifies the URL
+ * string. Call it immediately before connecting.
+ *
+ * Fail-safe: a malformed URL or a DNS-resolution failure resolves to
+ * `{ ok: false }` (do NOT send) rather than throwing, so a sender never
+ * crashes on a transient lookup error — it simply skips that POST.
+ *
+ * KNOWN LIMITATION (residual TOCTOU): there is a small window between this
+ * lookup and the actual TCP connect inside `fetch`, during which a hostile DNS
+ * server could re-point the name (DNS rebinding). Fully closing it requires
+ * pinning the validated IP at connect time via a custom undici dispatcher /
+ * `lookup` hook. This pre-check blocks the steady-state misconfiguration and
+ * rebinding-at-rest cases; the connect-time pinning is deliberately left out to
+ * avoid coupling to undici internals.
+ */
+export async function assertResolvedAddressAllowed(
+  raw: string,
+  lookup: (host: string) => Promise<Array<{ address: string }>>,
+  opts: { allowPrivateHost?: boolean } = {},
+): Promise<ValidationResult> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, reason: "malformed URL" };
+  }
+  const host = url.hostname;
+  const hostIsLoopback = isLoopbackHost(host);
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await lookup(host);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "lookup failed";
+    return { ok: false, reason: `DNS resolution failed for ${host}: ${msg}` };
+  }
+  if (addresses.length === 0) {
+    return { ok: false, reason: `DNS resolution returned no addresses for ${host}` };
+  }
+  for (const { address } of addresses) {
+    const result = classifyResolvedAddress(address, {
+      hostIsLoopback,
+      allowPrivateHost: opts.allowPrivateHost,
+    });
+    if (!result.ok) return result;
   }
   return { ok: true };
 }

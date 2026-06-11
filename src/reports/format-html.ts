@@ -1,5 +1,6 @@
 import type { AuditProjection } from "./projection.js";
 import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
+import { fmtUsd } from "./text-utils.js";
 import { formatCronSchedule } from "../services/cron-manifests.js";
 
 /**
@@ -173,6 +174,3 @@ function integritySection(p: AuditProjection): string {
 </div>`;
 }
 
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(4)}`;
-}

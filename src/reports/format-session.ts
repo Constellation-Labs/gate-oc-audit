@@ -1,4 +1,5 @@
 import type { SessionProjection, SessionTimelineEntry } from "./session-projection.js";
+import { padRight, fmtUsd } from "./text-utils.js";
 
 /**
  * Serialize a SessionProjection for `--json` output. The `metadata` blob on
@@ -56,7 +57,7 @@ export function formatSessionProjectionText(p: SessionProjection): string {
   } else {
     for (const t of p.toolsUsed) {
       const dur = (t.totalDurationMs / 1000).toFixed(2);
-      lines.push(`  ${pad(t.toolName, 24)}  calls=${t.calls}  errors=${t.errors}  ${dur}s`);
+      lines.push(`  ${padRight(t.toolName, 24)}  calls=${t.calls}  errors=${t.errors}  ${dur}s`);
     }
   }
   lines.push("");
@@ -73,7 +74,7 @@ export function formatSessionProjectionText(p: SessionProjection): string {
     for (const m of c.byModel) {
       const provider = m.provider ? `${m.provider}/` : "";
       lines.push(
-        `    ${pad(provider + m.model, 32)}  calls=${m.calls}  in=${m.inputTokens}  out=${m.outputTokens}  ${fmtUsd(m.costUsd)}`,
+        `    ${padRight(provider + m.model, 32)}  calls=${m.calls}  in=${m.inputTokens}  out=${m.outputTokens}  ${fmtUsd(m.costUsd)}`,
       );
     }
   }
@@ -128,14 +129,6 @@ function formatTimelineEntry(entry: SessionTimelineEntry): string {
   return `  #${entry.sequence}  ${entry.createdAt}  ${entry.eventType} — ${entry.description}${collapsed}${preview}`;
 }
 
-function pad(s: string, width: number): string {
-  if (s.length >= width) return s;
-  return s + " ".repeat(width - s.length);
-}
-
-function fmtUsd(n: number): string {
-  return `$${n.toFixed(4)}`;
-}
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
