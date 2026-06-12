@@ -4,6 +4,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 
 import { isUnsafeWebhookUrl, postJsonWebhook } from "../../src/util/webhook.js";
+import {
+  assertResolvedAddressAllowed,
+  classifyResolvedAddress,
+} from "../../src/util/network-policy.js";
 
 describe("isUnsafeWebhookUrl", () => {
   it("accepts https URLs", () => {
@@ -22,6 +26,90 @@ describe("isUnsafeWebhookUrl", () => {
     assert.match(isUnsafeWebhookUrl("file:///etc/passwd")!, /disallowed protocol file:/);
     assert.match(isUnsafeWebhookUrl("ftp://example.com/")!, /disallowed protocol ftp:/);
     assert.match(isUnsafeWebhookUrl("javascript:alert(1)")!, /disallowed protocol/);
+  });
+});
+
+describe("classifyResolvedAddress (send-time SSRF)", () => {
+  it("allows a loopback IP when the configured host is loopback (dev http://localhost)", () => {
+    assert.equal(classifyResolvedAddress("127.0.0.1", { hostIsLoopback: true }).ok, true);
+    assert.equal(classifyResolvedAddress("::1", { hostIsLoopback: true }).ok, true);
+  });
+
+  it("rejects a loopback IP when the configured host is public (DNS->loopback)", () => {
+    const r = classifyResolvedAddress("127.0.0.1", { hostIsLoopback: false });
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /loopback/);
+  });
+
+  it("rejects private/link-local resolved IPs for a public host", () => {
+    for (const ip of ["10.0.0.5", "192.168.1.10", "169.254.169.254", "172.16.0.1"]) {
+      const r = classifyResolvedAddress(ip, { hostIsLoopback: false });
+      assert.equal(r.ok, false, `${ip} should be rejected`);
+    }
+  });
+
+  it("rejects a loopback host that resolves into a private/link-local range", () => {
+    const r = classifyResolvedAddress("169.254.169.254", { hostIsLoopback: true });
+    assert.equal(r.ok, false);
+  });
+
+  it("allows a public IP for a public host", () => {
+    assert.equal(classifyResolvedAddress("93.184.216.34", { hostIsLoopback: false }).ok, true);
+  });
+
+  it("honors allowPrivateHost only for the private range, never loopback", () => {
+    assert.equal(
+      classifyResolvedAddress("10.0.0.5", { hostIsLoopback: false, allowPrivateHost: true }).ok,
+      true,
+    );
+    assert.equal(
+      classifyResolvedAddress("127.0.0.1", { hostIsLoopback: false, allowPrivateHost: true }).ok,
+      false,
+    );
+  });
+});
+
+describe("assertResolvedAddressAllowed (injected lookup)", () => {
+  it("blocks a public hostname that resolves to a private IP", async () => {
+    const r = await assertResolvedAddressAllowed(
+      "https://evil.example.com/hook",
+      async () => [{ address: "10.1.2.3" }],
+    );
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /private\/link-local/);
+  });
+
+  it("blocks if ANY resolved address violates the policy", async () => {
+    const r = await assertResolvedAddressAllowed(
+      "https://multi.example.com/hook",
+      async () => [{ address: "93.184.216.34" }, { address: "169.254.169.254" }],
+    );
+    assert.equal(r.ok, false);
+  });
+
+  it("allows http://localhost resolving to loopback (dev path preserved)", async () => {
+    const r = await assertResolvedAddressAllowed(
+      "http://localhost:1234/",
+      async () => [{ address: "127.0.0.1" }],
+    );
+    assert.equal(r.ok, true);
+  });
+
+  it("fails safe on a DNS lookup error (do not send)", async () => {
+    const r = await assertResolvedAddressAllowed(
+      "https://broken.example.com/hook",
+      async () => { throw new Error("ENOTFOUND"); },
+    );
+    assert.equal(r.ok, false);
+    assert.match((r as { reason: string }).reason, /DNS resolution failed/);
+  });
+
+  it("fails safe when resolution yields no addresses", async () => {
+    const r = await assertResolvedAddressAllowed(
+      "https://empty.example.com/hook",
+      async () => [],
+    );
+    assert.equal(r.ok, false);
   });
 });
 

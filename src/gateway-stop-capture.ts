@@ -19,7 +19,7 @@ import {log} from "./util/logger.js";
  *     preempted (observed in CI: container can exit ~250ms after SIGTERM
  *     with no further log lines past "received SIGTERM; shutting down").
  *     Bypasses the rate limiter (so its async side-effects — the DE-anchor
- *    notification — don't try to run inside a synchronous signal callback), but
+ *     notification — don't try to run inside a synchronous signal callback), but
  *     still feeds the result into `SmtService.onEventAppended` so the leaf is
  *     present in the in-memory SMT before `SmtService.stop` checkpoints it
  *     to disk. The later async services (de-anchor) pick

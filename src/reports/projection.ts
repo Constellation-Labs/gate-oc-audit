@@ -1,5 +1,5 @@
 import type { AuditStore } from "../store/audit-store.js";
-import { subtractCalendarDays, type DailyWindow, type WeeklyWindow } from "./time-window.js";
+import { floorToTzDay, subtractCalendarDays, type DailyWindow, type WeeklyWindow } from "./time-window.js";
 import { detectDuplicateOutbound, detectFirstSeenTools, type DuplicateOutboundFinding, type MessageSentRow } from "./detectors.js";
 import { listConfiguredCrons, type ConfiguredCron } from "../services/cron-manifests.js";
 
@@ -166,19 +166,20 @@ export function buildProjection(
   // above only need the count, but the dedup detector needs the raw body to
   // hash. Cap at 100k to keep memory bounded on pathological days; if a
   // future operator has more outbound traffic than that, raise the cap rather
-  // than silently dropping events. Filter to strict < toIso so the boundary
-  // event (if any) attributes to the next day's report and not both.
+  // than silently dropping events. AuditStore.query already applies a half-open
+  // window (`created_at >= @createdAfter AND created_at < @createdBefore`), so the
+  // boundary event attributes to the next day's report and not both — no
+  // post-filter needed. `truncated` is derived from the raw result length so a
+  // window that truly hit the cap is always reported as truncated.
   const DUP_FETCH_CAP = 100_000;
-  const messages = store
-    .query({
-      eventType: "message.sent",
-      createdAfter: fromIso,
-      createdBefore: toIso,
-      includeContent: true,
-      order: "asc",
-      limit: DUP_FETCH_CAP,
-    })
-    .filter((e) => e.createdAt >= fromIso && e.createdAt < toIso);
+  const messages = store.query({
+    eventType: "message.sent",
+    createdAfter: fromIso,
+    createdBefore: toIso,
+    includeContent: true,
+    order: "asc",
+    limit: DUP_FETCH_CAP,
+  });
   const duplicateOutboundTruncated = messages.length >= DUP_FETCH_CAP;
   const messageRows: MessageSentRow[] = messages.map((e) => ({
     id: e.id,
@@ -198,8 +199,12 @@ export function buildProjection(
     .aggregateToolInvocationsInWindow(fromIso, toIso)
     .map((r) => r.toolName);
   // Calendar-day arithmetic in the window's tz so a 30-day lookback across
-  // a DST transition still aligns on local midnight on both sides.
-  const priorFromIso = subtractCalendarDays(fromIso, lookbackDays, window.tz);
+  // a DST transition still aligns on local midnight on both sides. Floor the
+  // window start to the tz day boundary first (corr-r2-M4): daily/weekly
+  // windows already start at midnight so this is a no-op here, but it keeps the
+  // lookback baseline a clean N-day span regardless of the window start.
+  const priorAnchorIso = floorToTzDay(fromIso, window.tz);
+  const priorFromIso = subtractCalendarDays(priorAnchorIso, lookbackDays, window.tz);
   const priorTools = store.distinctToolNamesInWindow(priorFromIso, fromIso);
   const firstSeenTools = detectFirstSeenTools(todayTools, priorTools);
 

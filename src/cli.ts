@@ -7,6 +7,7 @@ import { streamExport, type ExportFormat } from "./ui/export.js";
 import { collectInventory, type CollectOptions, type InventoryKind } from "./services/inventory.js";
 import { resolveOpenclawDir } from "./util/openclaw-paths.js";
 import { readAllowConversationAccess } from "./util/host-config.js";
+import { readHealth } from "./util/service-health.js";
 import { formatInventoryHuman, formatInventoryJson } from "./ui/inventory-formatter.js";
 import { parseDate, parseWeek, parseSince, todayInTz, thisWeekInTz, type TimeZoneMode } from "./reports/time-window.js";
 import { buildProjection } from "./reports/projection.js";
@@ -593,12 +594,6 @@ export async function cliStatusHandler(
   process.stdout.write(formatStatusText(snapshot) + "\n");
 }
 
-function readHealth<T>(store: AuditStore, name: string): T | undefined {
-  const row = store.getServiceHealth(name);
-  if (!row) return undefined;
-  return row.payload as T;
-}
-
 export interface AuditSpendOptions {
   by?: string;
   since?: string;
@@ -625,11 +620,11 @@ export function cliSpendHandler(store: AuditStore, opts: AuditSpendOptions = {})
 }
 
 export interface AuditSetupOptions {
- yes?: boolean;
+  yes?: boolean;
 }
 
 export async function cliSetupHandler(opts: AuditSetupOptions = {}): Promise<void> {
- await runSetupWizard({ yes: opts.yes === true });
+  await runSetupWizard({ yes: opts.yes === true });
 }
 
 function parseGroupBy(raw: string | undefined): SpendGroupBy {

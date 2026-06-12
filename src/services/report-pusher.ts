@@ -95,6 +95,9 @@ export class ReportPusherService {
   private readonly retryDelayMs: number;
   private readonly now: () => Date;
   private readonly openclawDir: string | undefined;
+  /** Mirrors the config-time SSRF opt-in so the send-time DNS re-check in
+   *  `postJsonWebhook` applies the same allow/deny intent. */
+  private readonly allowPrivateHost: boolean;
 
   constructor(
     private store: AuditStore,
@@ -106,6 +109,7 @@ export class ReportPusherService {
     this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.now = opts.now ?? (() => new Date());
     this.openclawDir = opts.openclawDir;
+    this.allowPrivateHost = opts.allowPrivateHost === true;
 
     if (!this.webhookUrl) {
       this.disabled = true;
@@ -246,7 +250,13 @@ export class ReportPusherService {
     if (!this.webhookUrl) return { ok: false };
     for (let attempt = 0; attempt < 2; attempt++) {
       if (this.abortController.signal.aborted) return { ok: false };
-      const result = await postJsonWebhook(this.webhookUrl, payload, { timeoutMs: POST_TIMEOUT_MS });
+      // postJsonWebhook re-validates the resolved IP on every send (closing
+      // the "validated once at construction" gap), so no separate
+      // re-validation is needed here.
+      const result = await postJsonWebhook(this.webhookUrl, payload, {
+        timeoutMs: POST_TIMEOUT_MS,
+        allowPrivateHost: this.allowPrivateHost,
+      });
       if (result.ok) {
         this.state.lastPushAt = this.now().toISOString();
         return { ok: true };
@@ -294,6 +304,13 @@ export class ReportPusherService {
    * YYYY-MM-DD. At 2026-05-18T08:00 local this is "2026-05-17".
    */
   private dayMostRecentlyCompleted(): string {
+    // corr-M2 (DST fragility, unconfirmed): this round-trips a UTC instant
+    // (`subtractCalendarDays` -> ISO) back through `todayInTz` to read its
+    // local calendar date. On a DST spring-forward boundary the subtracted
+    // instant can land at 23:00 the prior local day, which still maps to the
+    // correct calendar date — so this is believed correct but is fragile and
+    // leans on `subtractCalendarDays` doing day-arg (not 24h) arithmetic.
+    // Behavior intentionally left unchanged; flagged for a targeted DST test.
     const todayWindow = parseDate(todayInTz(this.tz, this.now()), this.tz);
     const yesterdayIso = subtractCalendarDays(todayWindow.fromIso, 1, this.tz);
     return todayInTz(this.tz, new Date(yesterdayIso));
@@ -312,6 +329,14 @@ export class ReportPusherService {
     return thisWeekInTz(this.tz, new Date(lastWeekIso));
   }
 
+  // corr-M1: both helpers return the *period-end (next-boundary) instant* of
+  // the current period — `toIso` is the exclusive upper bound, i.e. the next
+  // local midnight (daily) / next Monday 00:00 (weekly). They are surfaced as
+  // `nextDailyAt`/`nextWeeklyAt` in health, which reads as "next fire". The
+  // real push fires on the tick *after* the boundary (poll cadence), so on a
+  // freshly-completed day the next actual push can be ~one tick away, not at
+  // the reported midnight. These are period-end markers, not literal
+  // next-fire timestamps. Behavior intentionally left unchanged.
   private computeNextDailyAt(): string {
     return parseDate(todayInTz(this.tz, this.now()), this.tz).toIso;
   }

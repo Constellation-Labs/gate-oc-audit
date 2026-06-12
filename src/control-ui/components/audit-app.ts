@@ -1,4 +1,4 @@
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "./event-table.ts";
 import "./trees-overview.ts";
@@ -46,6 +46,23 @@ function parseRoute(): Route {
   }
   return "status";
 }
+
+// Route → view, flat to mirror parseRoute's structure (replaces a deep nested
+// ternary). Every Route has an entry, so the lookup is total.
+const ROUTE_VIEWS: Record<Route, () => TemplateResult> = {
+  "status": () => html`<status-dashboard></status-dashboard>`,
+  "events": () => html`<event-table></event-table>`,
+  "reports/daily": () => html`<report-projection kind="daily"></report-projection>`,
+  "reports/weekly": () => html`<report-projection kind="weekly"></report-projection>`,
+  "reports/cron": () => html`<report-cron></report-cron>`,
+  "reports/session": () => html`<session-view></session-view>`,
+  "anomalies": () => html`<anomalies-view></anomalies-view>`,
+  "spend": () => html`<spend-view></spend-view>`,
+  "inventory": () => html`<inventory-view></inventory-view>`,
+  "trees": () => html`<trees-overview></trees-overview>`,
+  "smt-tools": () => html`<smt-tools></smt-tools>`,
+  "verify": () => html`<verify-panel></verify-panel>`,
+};
 
 @customElement("audit-app")
 export class AuditApp extends LitElement {
@@ -198,29 +215,7 @@ export class AuditApp extends LitElement {
         </nav>
       </header>
       <main>
-        ${this.route === "status"
-          ? html`<status-dashboard></status-dashboard>`
-          : this.route === "events"
-            ? html`<event-table></event-table>`
-            : this.route === "reports/daily"
-              ? html`<report-projection kind="daily"></report-projection>`
-              : this.route === "reports/weekly"
-                ? html`<report-projection kind="weekly"></report-projection>`
-                : this.route === "reports/cron"
-                  ? html`<report-cron></report-cron>`
-                  : this.route === "reports/session"
-                    ? html`<session-view></session-view>`
-                    : this.route === "anomalies"
-                      ? html`<anomalies-view></anomalies-view>`
-                      : this.route === "spend"
-                        ? html`<spend-view></spend-view>`
-                        : this.route === "inventory"
-                          ? html`<inventory-view></inventory-view>`
-                          : this.route === "trees"
-                            ? html`<trees-overview></trees-overview>`
-                            : this.route === "smt-tools"
-                              ? html`<smt-tools></smt-tools>`
-                              : html`<verify-panel></verify-panel>`}
+        ${ROUTE_VIEWS[this.route]()}
       </main>
     `;
   }

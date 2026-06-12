@@ -6,7 +6,7 @@ import type { RateLimiter } from "./rate-limiter.js";
 import type { GatewayStopCapture } from "./gateway-stop-capture.js";
 import type { NotificationService } from "./services/notifications.js";
 import { ToolScanner } from "./scanner.js";
-import {log} from "./util/logger.js";
+import { log } from "./util/logger.js";
 
 const require2 = createRequire(import.meta.url);
 const sdk = require2("@constellation-network/digital-evidence-sdk") as {
@@ -21,14 +21,27 @@ const AUDIT_PRIORITY = 200;
 
 // Defense-in-depth caps to keep individual rows bounded — SQLite would
 // happily accept multi-MB blobs, but downstream readers (reports, exports,
-// UI) struggle with pathological sizes. USER_ID_MAX_LEN is retained as an
-// alias for resolveConfiguredUserId, where truncation already happens at
-// config-read time.
+// UI) struggle with pathological sizes.
 const MAX_FIELD_LENGTH = 1000;
 const MAX_DESCRIPTION_LENGTH = 4_000;
 const MAX_CONTENT_LENGTH = 64_000;
-const USER_ID_MAX_LEN = MAX_FIELD_LENGTH;
 const TRUNCATE_SUFFIX = "…[truncated]";
+
+/**
+ * Clamp a string to at most `max` UTF-16 code units, reserving room for
+ * `suffix`, and append `suffix` when truncation occurs. If the cut lands
+ * between a surrogate pair, drop the orphan high surrogate so SQLite (UTF-8)
+ * doesn't round-trip it as U+FFFD on read-back, which would diverge the
+ * in-memory and persisted hashes. Callers guarantee `str.length > max` before
+ * calling. The `end < 1` fallback covers a suffix longer than `max`.
+ */
+function clampToCodePoints(str: string, max: number, suffix: string): string {
+  let end = max - suffix.length;
+  if (end < 1) end = max;
+  const code = str.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return str.slice(0, end) + suffix;
+}
 
 /**
  * Coerce an SDK-supplied value that's expected to be a count/duration/cost.
@@ -45,11 +58,7 @@ function truncateString(s: string, max: number, label: string): string {
   log.warn(
     `truncating ${label}: ${s.length} → ${max} chars`,
   );
-  let end = max - TRUNCATE_SUFFIX.length;
-  if (end < 1) end = max;
-  const code = s.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
-  return s.slice(0, end) + TRUNCATE_SUFFIX;
+  return clampToCodePoints(s, max, TRUNCATE_SUFFIX);
 }
 
 // Walk metadata; clamp every string value to MAX_FIELD_LENGTH. Bounded
@@ -83,11 +92,13 @@ function resolveConfiguredUserId(config: Record<string, unknown>): string | unde
     if (typeof raw !== "string") continue;
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
-    if (trimmed.length > USER_ID_MAX_LEN) {
+    // Cap userId at MAX_FIELD_LENGTH (truncation happens here at config-read
+    // time so a pathological value can't bloat every row downstream).
+    if (trimmed.length > MAX_FIELD_LENGTH) {
       log.warn(
-        `${source} value exceeds ${USER_ID_MAX_LEN} chars; truncating to stay within the local DB's defense-in-depth caps.`,
+        `${source} value exceeds ${MAX_FIELD_LENGTH} chars; truncating to stay within the local DB's defense-in-depth caps.`,
       );
-      return trimmed.slice(0, USER_ID_MAX_LEN);
+      return trimmed.slice(0, MAX_FIELD_LENGTH);
     }
     return trimmed;
   }
@@ -225,15 +236,7 @@ function safeDesc(value: unknown): string {
   if (value === undefined || value === null) return "";
   const str = String(value).replace(CONTROL_CHARS, " ");
   if (str.length <= DESCRIPTION_MAX) return str;
-  // slice() operates on UTF-16 code units. If the cut lands between a
-  // surrogate pair, drop the orphan high surrogate so SQLite (UTF-8) doesn't
-  // round-trip it as U+FFFD on read-back, which would diverge the in-memory
-  // and persisted hashes — the same SMT-vs-DB invariant AuditStore.append
-  // protects on the metadata column.
-  let end = DESCRIPTION_MAX - 1;
-  const code = str.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
-  return str.slice(0, end) + "…";
+  return clampToCodePoints(str, DESCRIPTION_MAX, "…");
 }
 
 // Clamp a fully composed description string. `safeDesc` clamps each
@@ -242,10 +245,7 @@ function safeDesc(value: unknown): string {
 // exceed the column's intended budget.
 function safeComposite(value: string): string {
   if (value.length <= DESCRIPTION_MAX) return value;
-  let end = DESCRIPTION_MAX - 1;
-  const code = value.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
-  return value.slice(0, end) + "…";
+  return clampToCodePoints(value, DESCRIPTION_MAX, "…");
 }
 
 function applyFieldCaps(insert: AuditEventInsert): AuditEventInsert {
@@ -290,7 +290,7 @@ export function registerHooks(
 
   // Resolution order: explicit config > OPENCLAW_USER_ID env > USER env > unset.
   // Stamped on every insert; leaves NULL when nothing resolves. Each candidate
-  // is trimmed, skipped when empty, and truncated to USER_ID_MAX_LEN so a
+  // is trimmed, skipped when empty, and truncated to MAX_FIELD_LENGTH so a
   // pathological value can't bloat every row.
   const configuredUserId = resolveConfiguredUserId(config);
 

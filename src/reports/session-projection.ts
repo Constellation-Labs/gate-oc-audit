@@ -301,6 +301,10 @@ function findSessionJobId(
     const candidate = stringOrNull(e.metadata.jobId);
     if (candidate) return candidate;
   }
+  // Fallback assumes one jobId per sessionId (the normal case). If a session
+  // were to span multiple cron runs sharing the sessionId, this returns the
+  // jobId of the *earliest* cron.executed (order: "asc", limit: 1), which may
+  // differ from the run the caller windowed into.
   const cronRow = store.query({
     sessionId,
     eventType: "cron.executed",
@@ -338,7 +342,11 @@ function computeIntegrity(
   for (const e of events) {
     let leafHash: string;
     try {
-      leafHash = smtService.computeCensoredHash(e);
+      // Verify against the RAW hash (includes content/metadata), matching
+      // verifier.ts and ui/routes.ts. The censored hash excludes content, so
+      // looking up by it would count an event whose body was tampered with as
+      // "verified" — defeating the integrity check.
+      leafHash = smtService.computeRawHash(e);
     } catch {
       unavailable += 1;
       continue;

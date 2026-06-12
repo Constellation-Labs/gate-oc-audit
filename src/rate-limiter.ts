@@ -53,6 +53,13 @@ export class RateLimiter {
   append(insert: AuditEventInsert): AuditEvent | undefined {
     const now = Date.now();
 
+    // Fixed-window limiter (not a sliding window / token bucket): the count
+    // resets wholesale every 1s rather than tracking a rolling 1s span. A
+    // burst straddling a window boundary can therefore admit up to ~2x
+    // maxPerSec across the two adjacent windows. This is acceptable
+    // back-pressure behavior — the limiter exists to shed sustained load into
+    // the buffer, not to enforce a hard per-second cap — so it is intentional,
+    // not a bug.
     // Reset window if a second has passed
     if (now - this.windowStart >= 1000) {
       this.windowStart = now;
@@ -80,15 +87,17 @@ export class RateLimiter {
       // Buffer full — coalesce and drain
       this.coalesceBuffer();
       if (this.buffer.length < this.bufferCapacity) {
+        // Coalescing freed a slot — the event is buffered, not dropped.
         this.buffer.push(insert);
+      } else {
+        // Still full after coalescing — only reachable if every buffered event
+        // is already in its own coalesce group. Convert the
+        // "shouldn't happen in practice" assumption into a signal so an operator
+        // sees the drop in logs instead of silent data loss.
+        rateLimiterLog.warn(
+          `rate-limiter buffer full after coalescing; dropping ${insert.eventType}/${insert.category} event`,
+        );
       }
-      // Still full after coalescing — only reachable if every buffered event
-      // is already in its own coalesce group . Convert the
-      // "shouldn't happen in practice" assumption into a signal so an operator
-      // sees the drop in logs instead of silent data loss.
-      rateLimiterLog.warn(
-        `rate-limiter buffer full after coalescing; dropping ${insert.eventType}/${insert.category} event`,
-      );
     }
 
     // Start drain timer if not running

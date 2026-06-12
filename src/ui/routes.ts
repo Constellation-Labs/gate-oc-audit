@@ -20,6 +20,7 @@ import type { SmtProof } from "../store/smt-store.js";
 import type { AuditEvent } from "../types/events.js";
 import { serveStaticFile } from "../util/asset-server.js";
 import { readAllowConversationAccess } from "../util/host-config.js";
+import { readHealth } from "../util/service-health.js";
 import { pipeExportToResponse, type ExportFilters, type ExportFormat } from "./export.js";
 import { log } from "../util/logger.js";
 import { parseDate, parseWeek, todayInTz, thisWeekInTz, type TimeZoneMode } from "../reports/time-window.js";
@@ -164,16 +165,18 @@ function sendError(res: ServerResponse, status: number, message: string): void {
 }
 
 /**
- * Same-origin gate for the /api/* surface. Requests with no Origin pass
- * through (curl, server-to-server — not browser-driven CSRF); requests
- * with an Origin must match the request's Host header. Stops a hostile
- * page the operator visits from dispatching state-changing requests or
- * scraping raw conversation content even when CORS would block the read,
- * because the request *dispatch* still hits the server.
+ * Same-origin gate for the /api/* surface. This is defense-in-depth, NOT
+ * authentication — a non-browser client controls its own headers and can
+ * omit or forge Origin, so the real access control is the loopback/auth
+ * gating (see `gateBlocked`). Absent/empty Origin passes through (curl,
+ * server-to-server — not browser-driven CSRF). An opaque `Origin: null`
+ * (sandboxed iframe, `data:`/`file:` document) is rejected: a legitimate
+ * same-origin browser request always carries the real origin. Any other
+ * Origin must match the request's Host header.
  */
 function isAllowedOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
-  if (origin === undefined || origin === "" || origin === "null") return true;
+  if (origin === undefined || origin === "") return true;
   let parsed: URL;
   try { parsed = new URL(origin); } catch { return false; }
   const host = req.headers.host ?? "";
@@ -207,6 +210,34 @@ function gateBlocked(ctx: AuditUiContext, allowOptIn: boolean): boolean {
   return ctx.isNonLoopback() && !ctx.requireGatewayAuth && !allowOptIn;
 }
 
+/**
+ * Apply the loopback gate to a sensitive/expensive route: when blocked, send the
+ * standard 403 and return `true` so the caller can `return true` immediately;
+ * otherwise return `false` and let the route proceed. `label` names the action in
+ * the message ("export", "report", "events", …). `opt` carries the opt-in flag
+ * and the config key surfaced in the message — defaulting to the export opt-in,
+ * which all routes use except /api/verify. Centralising this keeps the security
+ * policy (and its wording) in one place rather than copy-pasted per route.
+ */
+function denyIfGated(
+  ctx: AuditUiContext,
+  res: ServerResponse,
+  label: string,
+  opt: { allowed: boolean; configKey: string } = {
+    allowed: ctx.allowExportOnNonLoopback,
+    configKey: "allowExportOnNonLoopback",
+  },
+): boolean {
+  if (!gateBlocked(ctx, opt.allowed)) return false;
+  sendError(
+    res,
+    403,
+    `audit ${label} is disabled when the gateway binds beyond loopback. ` +
+      `Set audit config '${opt.configKey}: true' to opt in.`,
+  );
+  return true;
+}
+
 const MAX_JSON_BODY_BYTES = 64 * 1024;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -221,7 +252,47 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   }
   if (total === 0) return {};
   const text = Buffer.concat(chunks, total).toString("utf-8");
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Rethrow a uniform Error (matching the size-limit case above) so the
+    // boundary is self-contained and never lets a bare SyntaxError escape.
+    throw new Error("invalid json");
+  }
+}
+
+// Upper bound on `siblings` length for an inbound proof. An SMT path can have
+// at most one sibling per tree level; 256 comfortably exceeds any real tree
+// depth (sha256 keyspace) while rejecting pathologically large arrays that
+// would make the zk-kit verifier do unbounded work. DoS hardening only.
+const MAX_PROOF_SIBLINGS = 256;
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((e) => typeof e === "string");
+}
+
+/**
+ * Validate the shape of an attacker-supplied SMT proof before it reaches the
+ * zk-kit verifier (DoS hardening; the verifier's own root-membership check is
+ * what actually prevents forgery). Returns the typed proof on success, or an
+ * error message string on invalid shape.
+ */
+function validateProofShape(proof: object): SmtProof | string {
+  const p = proof as Record<string, unknown>;
+  if (typeof p.root !== "string") return "proof.root must be a string";
+  if (typeof p.membership !== "boolean") return "proof.membership must be a boolean";
+  if (!isStringArray(p.siblings)) return "proof.siblings must be an array of strings";
+  if (p.siblings.length > MAX_PROOF_SIBLINGS) {
+    return `proof.siblings exceeds ${MAX_PROOF_SIBLINGS} entries`;
+  }
+  if (!isStringArray(p.entry)) return "proof.entry must be an array of strings";
+  if (p.matchingEntry !== undefined && !isStringArray(p.matchingEntry)) {
+    return "proof.matchingEntry must be an array of strings when present";
+  }
+  if (p.frozen !== undefined && typeof p.frozen !== "boolean") {
+    return "proof.frozen must be a boolean when present";
+  }
+  return proof as SmtProof;
 }
 
 const CONTENT_PREVIEW_CHARS = 200;
@@ -421,6 +492,10 @@ async function handleApi(
 
   // GET /api/events
   if (apiPath === "events" && req.method === "GET") {
+    // Raw event reads expose the highest-sensitivity data the plugin holds
+    // (prompt text, tool outputs, message bodies / previews), so they carry
+    // the same loopback gate as /api/export.
+    if (denyIfGated(ctx, res, "events")) return true;
     const result = getQueryEvents(ctx, url);
     if ("tooLong" in result) {
       sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
@@ -432,6 +507,7 @@ async function handleApi(
 
   // GET /api/events/:id/verify
   if (apiPath.startsWith("events/") && apiPath.endsWith("/verify") && req.method === "GET") {
+    if (denyIfGated(ctx, res, "events")) return true;
     const id = decodeURIComponent(apiPath.slice("events/".length, -"/verify".length));
     if (!id) {
       sendError(res, 400, "missing event id");
@@ -448,6 +524,7 @@ async function handleApi(
 
   // GET /api/events/:id
   if (apiPath.startsWith("events/") && req.method === "GET") {
+    if (denyIfGated(ctx, res, "events")) return true;
     const id = decodeURIComponent(apiPath.slice("events/".length));
     if (!id) {
       sendError(res, 400, "missing event id");
@@ -479,15 +556,7 @@ async function handleApi(
 
   // POST /api/verify
   if (apiPath === "verify" && req.method === "POST") {
-    if (gateBlocked(ctx, ctx.allowVerifyOnNonLoopback)) {
-      sendError(
-        res,
-        403,
-        "audit verify is disabled when the gateway binds beyond loopback. " +
-          "Set audit config 'allowVerifyOnNonLoopback: true' to opt in.",
-      );
-      return true;
-    }
+    if (denyIfGated(ctx, res, "verify", { allowed: ctx.allowVerifyOnNonLoopback, configKey: "allowVerifyOnNonLoopback" })) return true;
     if (ctx.concurrency.verifies >= MAX_CONCURRENT_VERIFIES) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_VERIFIES} concurrent verifies allowed`);
@@ -523,15 +592,7 @@ async function handleApi(
 
   // GET /api/export?format=json|csv&from=&to=&type=&category=&session=&securityOnly=&includeContent=&limit=
   if (apiPath === "export" && req.method === "GET") {
-    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-      sendError(
-        res,
-        403,
-        "audit export is disabled when the gateway binds beyond loopback. " +
-          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-      );
-      return true;
-    }
+    if (denyIfGated(ctx, res, "export")) return true;
     if (ctx.concurrency.exports >= MAX_CONCURRENT_EXPORTS) {
       res.setHeader("retry-after", "10");
       sendError(res, 503, `at most ${MAX_CONCURRENT_EXPORTS} concurrent exports allowed`);
@@ -603,15 +664,7 @@ async function handleApi(
     // also leak similar metadata without this gate, but those predate the
     // explicit non-loopback policy switch — new routes opt in to the gate
     // so the policy can be tightened by default in a later pass.
-    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-      sendError(
-        res,
-        403,
-        "audit report is disabled when the gateway binds beyond loopback. " +
-          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-      );
-      return true;
-    }
+    if (denyIfGated(ctx, res, "report")) return true;
     const period = url.searchParams.get("period");
     if (period !== "daily" && period !== "weekly") {
       sendError(res, 400, "period must be 'daily' or 'weekly'");
@@ -674,15 +727,7 @@ async function handleApi(
     // Same loopback gate as /api/report. The rollup surfaces aggregated
     // run-level metadata (jobId, runId, sessionId, error strings) — narrow
     // by intent but the same blast radius as a digest slice.
-    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-      sendError(
-        res,
-        403,
-        "audit report is disabled when the gateway binds beyond loopback. " +
-          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-      );
-      return true;
-    }
+    if (denyIfGated(ctx, res, "report")) return true;
     const jobId = decodeURIComponent(apiPath.slice("report/cron/".length));
     if (!jobId) {
       sendError(res, 400, "missing job-id");
@@ -717,272 +762,221 @@ async function handleApi(
 
   // GET /api/report/session/:id?raw=&limit=&includeMetadata=
   if (apiPath.startsWith("report/session/") && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit report is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const sessionId = decodeURIComponent(apiPath.slice("report/session/".length));
-  if (!sessionId) {
-  sendError(res, 400, "missing session id");
-  return true;
-  }
-  if (sessionId.length > MAX_QUERY_PARAM_LEN) {
-  sendError(res, 400, `session id exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
-  return true;
-  }
-  const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), 50_000);
-  if (limitParam === "invalid") {
-  sendError(res, 400, "limit must be a positive integer in 1..50000");
-  return true;
-  }
-  const raw = url.searchParams.get("raw") === "true";
-  const includeMetadata = url.searchParams.get("includeMetadata") === "true";
-  // SmtService is best-effort: when the cursor isn't loaded yet we still
-  // return a projection (no proof verification) rather than failing the
-  // whole request, matching cliReportSessionHandler.
-  let smtForProjection;
-  let knownRoots: Set<string> | undefined;
-  try {
-  await ctx.smtService.ensureReady();
-  knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
-  smtForProjection = ctx.smtService;
-  } catch {
-  smtForProjection = undefined;
-  }
-  const projection = buildSessionProjection(ctx.store, sessionId, {
-  raw,
-  limit: limitParam,
-  smtService: smtForProjection,
-  knownRoots,
-  });
-  // Match the CLI's --include-metadata gate: tool args live in
-  // event.metadata which the human formatter never prints; drop them by
-  // default so a fetch from a non-interactive caller doesn't leak more
-  // than the text view would.
-  const body = includeMetadata
-  ? projection
-  : { ...projection, timeline: projection.timeline.map(({ metadata: _omit, ...rest }) => rest) };
-  sendJson(res, 200, { ...body, degraded: ctx.store.isDegraded() });
-  return true;
+    if (denyIfGated(ctx, res, "report")) return true;
+    const sessionId = decodeURIComponent(apiPath.slice("report/session/".length));
+    if (!sessionId) {
+      sendError(res, 400, "missing session id");
+      return true;
+    }
+    if (sessionId.length > MAX_QUERY_PARAM_LEN) {
+      sendError(res, 400, `session id exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+      return true;
+    }
+    const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), 50_000);
+    if (limitParam === "invalid") {
+      sendError(res, 400, "limit must be a positive integer in 1..50000");
+      return true;
+    }
+    const raw = url.searchParams.get("raw") === "true";
+    const includeMetadata = url.searchParams.get("includeMetadata") === "true";
+    // SmtService is best-effort: when the cursor isn't loaded yet we still
+    // return a projection (no proof verification) rather than failing the
+    // whole request, matching cliReportSessionHandler.
+    let smtForProjection;
+    let knownRoots: Set<string> | undefined;
+    try {
+      await ctx.smtService.ensureReady();
+      knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
+      smtForProjection = ctx.smtService;
+    } catch {
+      smtForProjection = undefined;
+    }
+    const projection = buildSessionProjection(ctx.store, sessionId, {
+      raw,
+      limit: limitParam,
+      smtService: smtForProjection,
+      knownRoots,
+    });
+    // Match the CLI's --include-metadata gate: tool args live in
+    // event.metadata which the human formatter never prints; drop them by
+    // default so a fetch from a non-interactive caller doesn't leak more
+    // than the text view would.
+    const body = includeMetadata
+      ? projection
+      : { ...projection, timeline: projection.timeline.map(({ metadata: _omit, ...rest }) => rest) };
+    sendJson(res, 200, { ...body, degraded: ctx.store.isDegraded() });
+    return true;
   }
 
   // GET /api/anomalies?since=&until=&tz=&dupWindowSec=&lookbackDays=&denialWindowSec=&denialThreshold=
   if (apiPath === "anomalies" && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit anomalies is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const tzParam = url.searchParams.get("tz");
-  if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
-  sendError(res, 400, "tz must be 'local' or 'utc'");
-  return true;
-  }
-  const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
-  let window;
-  try {
-  window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
-  } catch (err) {
-  sendError(res, 400, err instanceof Error ? err.message : "invalid window");
-  return true;
-  }
-  const dupWindow = parseOptPositiveInt(url.searchParams.get("dupWindowSec"), 86_400);
-  const lookback = parseOptPositiveInt(url.searchParams.get("lookbackDays"), 365);
-  const denialWindow = parseOptPositiveInt(url.searchParams.get("denialWindowSec"), 86_400);
-  const denialThreshold = parseOptPositiveInt(url.searchParams.get("denialThreshold"), 1_000_000);
-  if (
-  dupWindow === "invalid"
-  || lookback === "invalid"
-  || denialWindow === "invalid"
-  || denialThreshold === "invalid"
-  ) {
-  sendError(res, 400, "detector knobs must be positive integers within their range");
-  return true;
-  }
-  // SMT cursor matters for the integrity-violation detector — load it
-  // best-effort, same as cliAnomaliesHandler.
-  try {
-  await ctx.smtService.ensureReady();
-  } catch {
-  // continue with whatever SMT state is in memory
-  }
-  const view = buildAnomalyView(ctx.store, ctx.smtService, window, {
-  dupWindowSec: dupWindow,
-  lookbackDays: lookback,
-  denialWindowSec: denialWindow,
-  denialThreshold: denialThreshold,
-  });
-  sendJson(res, 200, { ...view, degraded: ctx.store.isDegraded() });
-  return true;
+    if (denyIfGated(ctx, res, "anomalies")) return true;
+    const tzParam = url.searchParams.get("tz");
+    if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
+      sendError(res, 400, "tz must be 'local' or 'utc'");
+      return true;
+    }
+    const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
+    let window;
+    try {
+      window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
+    } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid window");
+      return true;
+    }
+    const dupWindow = parseOptPositiveInt(url.searchParams.get("dupWindowSec"), 86_400);
+    const lookback = parseOptPositiveInt(url.searchParams.get("lookbackDays"), 365);
+    const denialWindow = parseOptPositiveInt(url.searchParams.get("denialWindowSec"), 86_400);
+    const denialThreshold = parseOptPositiveInt(url.searchParams.get("denialThreshold"), 1_000_000);
+    if (
+      dupWindow === "invalid"
+      || lookback === "invalid"
+      || denialWindow === "invalid"
+      || denialThreshold === "invalid"
+    ) {
+      sendError(res, 400, "detector knobs must be positive integers within their range");
+      return true;
+    }
+    // SMT cursor matters for the integrity-violation detector — load it
+    // best-effort, same as cliAnomaliesHandler.
+    try {
+      await ctx.smtService.ensureReady();
+    } catch {
+      // continue with whatever SMT state is in memory
+    }
+    const view = buildAnomalyView(ctx.store, ctx.smtService, window, {
+      dupWindowSec: dupWindow,
+      lookbackDays: lookback,
+      denialWindowSec: denialWindow,
+      denialThreshold: denialThreshold,
+    });
+    sendJson(res, 200, { ...view, degraded: ctx.store.isDegraded() });
+    return true;
   }
 
   // GET /api/smt/proof?hash=&tree=
   if (apiPath === "smt/proof" && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit smt is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const hash = url.searchParams.get("hash") ?? "";
-  if (!hash) {
-  sendError(res, 400, "hash is required");
-  return true;
-  }
-  if (tooLongParam([hash, url.searchParams.get("tree")])) {
-  sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
-  return true;
-  }
-  await ctx.smtService.ensureReady();
-  const tree = url.searchParams.get("tree") ?? undefined;
-  const proof = ctx.smtService.createProof(hash, tree);
-  if (!proof) {
-  sendError(res, 404, "tree not found");
-  return true;
-  }
-  sendJson(res, 200, { proof });
-  return true;
+    if (denyIfGated(ctx, res, "smt")) return true;
+    const hash = url.searchParams.get("hash") ?? "";
+    if (!hash) {
+      sendError(res, 400, "hash is required");
+      return true;
+    }
+    if (tooLongParam([hash, url.searchParams.get("tree")])) {
+      sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+      return true;
+    }
+    await ctx.smtService.ensureReady();
+    const tree = url.searchParams.get("tree") ?? undefined;
+    const proof = ctx.smtService.createProof(hash, tree);
+    if (!proof) {
+      sendError(res, 404, "tree not found");
+      return true;
+    }
+    sendJson(res, 200, { proof });
+    return true;
   }
 
   // POST /api/smt/verify-proof  { proof }
   if (apiPath === "smt/verify-proof" && req.method === "POST") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit smt is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  let body: unknown;
-  try {
-  body = await readJsonBody(req);
-  } catch (err) {
-  sendError(res, 400, err instanceof Error ? err.message : "invalid json");
-  return true;
-  }
-  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  if (!b.proof || typeof b.proof !== "object") {
-  sendError(res, 400, "proof is required (object)");
-  return true;
-  }
-  await ctx.smtService.ensureReady();
-  const knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
-  const result = ctx.smtService.verifyProofWithRoots(b.proof as SmtProof, knownRoots);
-  sendJson(res, 200, result);
-  return true;
+    if (denyIfGated(ctx, res, "smt")) return true;
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid json");
+      return true;
+    }
+    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    if (!b.proof || typeof b.proof !== "object") {
+      sendError(res, 400, "proof is required (object)");
+      return true;
+    }
+    const proofShape = validateProofShape(b.proof);
+    if (typeof proofShape === "string") {
+      sendError(res, 400, proofShape);
+      return true;
+    }
+    await ctx.smtService.ensureReady();
+    const knownRoots = ctx.smtService.getKnownRoots(ctx.store.getCheckpointedRoots());
+    const result = ctx.smtService.verifyProofWithRoots(proofShape, knownRoots);
+    sendJson(res, 200, result);
+    return true;
   }
 
   // GET /api/smt/chain?conversationId=&tree=
   if (apiPath === "smt/chain" && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit smt is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const conversationId = url.searchParams.get("conversationId") ?? "";
-  if (!conversationId) {
-  sendError(res, 400, "conversationId is required");
-  return true;
-  }
-  const tree = url.searchParams.get("tree");
-  if (!tree) {
-  sendError(res, 400, "tree is required");
-  return true;
-  }
-  if (tooLongParam([conversationId, tree])) {
-  sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
-  return true;
-  }
-  await ctx.smtService.ensureReady();
-  const chain = ctx.smtService.getChain(tree, conversationId);
-  sendJson(res, 200, { tree, conversationId, chain });
-  return true;
+    if (denyIfGated(ctx, res, "smt")) return true;
+    const conversationId = url.searchParams.get("conversationId") ?? "";
+    if (!conversationId) {
+      sendError(res, 400, "conversationId is required");
+      return true;
+    }
+    const tree = url.searchParams.get("tree");
+    if (!tree) {
+      sendError(res, 400, "tree is required");
+      return true;
+    }
+    if (tooLongParam([conversationId, tree])) {
+      sendError(res, 400, `query parameter exceeds ${MAX_QUERY_PARAM_LEN} bytes`);
+      return true;
+    }
+    await ctx.smtService.ensureReady();
+    const chain = ctx.smtService.getChain(tree, conversationId);
+    sendJson(res, 200, { tree, conversationId, chain });
+    return true;
   }
 
   // GET /api/spend?by=&since=&until=&tz=&limit=
   if (apiPath === "spend" && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit spend is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const byParam = url.searchParams.get("by") ?? "model";
-  if (!(SPEND_GROUP_BY_VALUES as ReadonlyArray<string>).includes(byParam)) {
-  sendError(res, 400, `by must be one of ${SPEND_GROUP_BY_VALUES.join("|")}`);
-  return true;
-  }
-  const groupBy = byParam as SpendGroupBy;
-  const tzParam = url.searchParams.get("tz");
-  if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
-  sendError(res, 400, "tz must be 'local' or 'utc'");
-  return true;
-  }
-  const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
-  let window;
-  try {
-  window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
-  } catch (err) {
-  sendError(res, 400, err instanceof Error ? err.message : "invalid window");
-  return true;
-  }
-  const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), MAX_SPEND_LIMIT);
-  if (limitParam === "invalid") {
-  sendError(res, 400, `limit must be a positive integer in 1..${MAX_SPEND_LIMIT}`);
-  return true;
-  }
-  const limit = limitParam ?? DEFAULT_SPEND_LIMIT;
-  const rollup = buildSpendRollup(ctx.store, window, groupBy, { limit });
-  sendJson(res, 200, { ...rollup, degraded: ctx.store.isDegraded() });
-  return true;
+    if (denyIfGated(ctx, res, "spend")) return true;
+    const byParam = url.searchParams.get("by") ?? "model";
+    if (!(SPEND_GROUP_BY_VALUES as ReadonlyArray<string>).includes(byParam)) {
+      sendError(res, 400, `by must be one of ${SPEND_GROUP_BY_VALUES.join("|")}`);
+      return true;
+    }
+    const groupBy = byParam as SpendGroupBy;
+    const tzParam = url.searchParams.get("tz");
+    if (tzParam !== null && tzParam !== "local" && tzParam !== "utc") {
+      sendError(res, 400, "tz must be 'local' or 'utc'");
+      return true;
+    }
+    const tz: TimeZoneMode = tzParam === "local" ? "local" : "utc";
+    let window;
+    try {
+      window = parseSince(url.searchParams.get("since") ?? "24h", url.searchParams.get("until") ?? undefined, tz);
+    } catch (err) {
+      sendError(res, 400, err instanceof Error ? err.message : "invalid window");
+      return true;
+    }
+    const limitParam = parseOptPositiveInt(url.searchParams.get("limit"), MAX_SPEND_LIMIT);
+    if (limitParam === "invalid") {
+      sendError(res, 400, `limit must be a positive integer in 1..${MAX_SPEND_LIMIT}`);
+      return true;
+    }
+    const limit = limitParam ?? DEFAULT_SPEND_LIMIT;
+    const rollup = buildSpendRollup(ctx.store, window, groupBy, { limit });
+    sendJson(res, 200, { ...rollup, degraded: ctx.store.isDegraded() });
+    return true;
   }
 
   // GET /api/inventory?kind=summary|plugins|skills|tools|crons|workspace
   if (apiPath === "inventory" && req.method === "GET") {
-  if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-  sendError(
-  res,
-  403,
-  "audit inventory is disabled when the gateway binds beyond loopback. " +
-  "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-  );
-  return true;
-  }
-  const kindParam = url.searchParams.get("kind") ?? "summary";
-  if (kindParam !== "summary" && !(INVENTORY_KINDS as ReadonlyArray<string>).includes(kindParam)) {
-  sendError(res, 400, `kind must be summary|${INVENTORY_KINDS.join("|")}`);
-  return true;
-  }
-  const kind = kindParam as InventoryKind | "summary";
-  const report = collectInventory(ctx.store, kind, {
-  // Mirrors the CLI: when no openclawDir is configured the inventory
-  // reads from the empty string and skips filesystem-side discovery.
-  openclawDir: ctx.openclawDir ?? "",
-  projectRoot: process.cwd(),
-  });
-  sendJson(res, 200, { ...report, degraded: ctx.store.isDegraded() });
-  return true;
+    if (denyIfGated(ctx, res, "inventory")) return true;
+    const kindParam = url.searchParams.get("kind") ?? "summary";
+    if (kindParam !== "summary" && !(INVENTORY_KINDS as ReadonlyArray<string>).includes(kindParam)) {
+      sendError(res, 400, `kind must be summary|${INVENTORY_KINDS.join("|")}`);
+      return true;
+    }
+    const kind = kindParam as InventoryKind | "summary";
+    const report = collectInventory(ctx.store, kind, {
+      // Mirrors the CLI: when no openclawDir is configured the inventory
+      // reads from the empty string and skips filesystem-side discovery.
+      openclawDir: ctx.openclawDir ?? "",
+      projectRoot: process.cwd(),
+    });
+    sendJson(res, 200, { ...report, degraded: ctx.store.isDegraded() });
+    return true;
   }
 
   // GET /api/status
@@ -990,15 +984,7 @@ async function handleApi(
     // Same loopback gate as /api/report. The snapshot surfaces aggregate
     // anchor / retention / inventory metadata, including a recent
     // security-scan summary — same blast radius as a digest slice.
-    if (gateBlocked(ctx, ctx.allowExportOnNonLoopback)) {
-      sendError(
-        res,
-        403,
-        "audit status is disabled when the gateway binds beyond loopback. " +
-          "Set audit config 'allowExportOnNonLoopback: true' to opt in.",
-      );
-      return true;
-    }
+    if (denyIfGated(ctx, res, "status")) return true;
     if (!ctx.statusContext) {
       sendError(res, 503, "audit status is not configured on this plugin instance");
       return true;
@@ -1056,12 +1042,6 @@ function buildStatusFromContext(ctx: AuditUiContext): ReturnType<typeof buildSta
     // never appears on `config`. Mirrors cliStatusHandler.
     allowConversationAccess: readAllowConversationAccess(ctx.openclawDir ?? ""),
   });
-}
-
-function readHealth<T>(store: AuditStore, name: string): T | undefined {
-  const row = store.getServiceHealth(name);
-  if (!row) return undefined;
-  return row.payload as T;
 }
 
 function parseOptPositiveInt(v: string | null, max: number): number | undefined | "invalid" {

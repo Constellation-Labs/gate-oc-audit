@@ -326,6 +326,48 @@ describe("ui: per-event verify endpoint", () => {
   });
 });
 
+describe("ui: events endpoints loopback gate", () => {
+  it("returns 403 for all three events routes on a non-loopback bind without opt-in", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true });
+    try {
+      const ev = local.appendTracked(sampleInsert({ content: "secret body" }));
+      for (const path of ["api/events", `api/events/${ev.id}`, `api/events/${ev.id}/verify`]) {
+        const res = await fetch(`${local.baseUrl}/plugins/audit/${path}`);
+        assert.equal(res.status, 403, `${path} should be gated`);
+        const body = await res.json();
+        assert.match(body.error, /allowExportOnNonLoopback/);
+      }
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the events routes on a non-loopback bind when allowExportOnNonLoopback is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, allowExportOnNonLoopback: true });
+    try {
+      const ev = local.appendTracked(sampleInsert({ content: "secret body" }));
+      const list = await fetch(`${local.baseUrl}/plugins/audit/api/events`);
+      assert.equal(list.status, 200);
+      const detail = await fetch(`${local.baseUrl}/plugins/audit/api/events/${ev.id}`);
+      assert.equal(detail.status, 200);
+      const verify = await fetch(`${local.baseUrl}/plugins/audit/api/events/${ev.id}/verify`);
+      assert.equal(verify.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+
+  it("allows the events list on a non-loopback bind when requireGatewayAuth is set", async () => {
+    const local = await createUiRig({ isNonLoopback: () => true, requireGatewayAuth: true });
+    try {
+      const res = await fetch(`${local.baseUrl}/plugins/audit/api/events`);
+      assert.equal(res.status, 200);
+    } finally {
+      await local.destroy();
+    }
+  });
+});
+
 describe("ui: trees and checkpoints endpoints", () => {
   let rig: UiRig;
   before(async () => { rig = await createUiRig({ deBaseUrl: "https://digitalevidence.example" }); });
@@ -1726,6 +1768,29 @@ describe("ui: /api/smt power tools", () => {
         body: JSON.stringify({}),
       });
       assert.equal(res.status, 400);
+    } finally {
+      await rig.destroy();
+    }
+  });
+
+  it("smt/verify-proof rejects a proof with wrong-typed/oversize fields with 400", async () => {
+    const rig = await createUiRig();
+    try {
+      const bad: Record<string, unknown>[] = [
+        { root: 123, siblings: [], entry: [], membership: true },
+        { root: "r", siblings: "nope", entry: [], membership: true },
+        { root: "r", siblings: [], entry: [], membership: "yes" },
+        { root: "r", siblings: Array(257).fill("s"), entry: [], membership: true },
+        { root: "r", siblings: [1, 2], entry: [], membership: true },
+      ];
+      for (const proof of bad) {
+        const res = await fetch(`${rig.baseUrl}/plugins/audit/api/smt/verify-proof`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ proof }),
+        });
+        assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(proof)}`);
+      }
     } finally {
       await rig.destroy();
     }

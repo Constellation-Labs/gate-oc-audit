@@ -1,36 +1,10 @@
 import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { getCronRollup, type CronRollup, type CronRollupRow, type ConfiguredCron } from "../api.ts";
-
-function fmtCronSchedule(c: ConfiguredCron | null): string {
-  if (!c) return "—";
-  const s = c.schedule;
-  switch (s.kind) {
-    case "at": return `at ${s.at}`;
-    case "every": return `every ${s.everyMs} ms`;
-    case "cron": return `cron ${s.expr}${s.tz ? ` (${s.tz})` : ""}`;
-    case "unknown": return `unknown (${s.raw})`;
-  }
-}
-
-function fmtDuration(ms: number | null): string {
-  if (ms === null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
-  return `${(ms / 3_600_000).toFixed(1)}h`;
-}
-
-function fmtTimestamp(iso: string | null): string {
-  if (!iso) return "—";
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
-}
+import { getCronRollup, type CronRollup, type CronRollupRow } from "../api.ts";
+import { fmtCronSchedule, fmtDuration, fmtTimestamp, hashQuery } from "../format.ts";
 
 function parseHashParams(): { jobId?: string; last?: string } {
-  const hash = window.location.hash;
-  const qIdx = hash.indexOf("?");
-  if (qIdx < 0) return {};
-  const params = new URLSearchParams(hash.slice(qIdx + 1));
+  const params = hashQuery();
   return {
     jobId: params.get("jobId") ?? undefined,
     last: params.get("last") ?? undefined,

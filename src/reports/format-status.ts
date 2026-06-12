@@ -5,14 +5,14 @@
  */
 
 import type { StatusSnapshot } from "./status-snapshot.js";
-import { padRight as pad } from "./text-utils.js";
+import { padRight } from "./text-utils.js";
 
 const LABEL_WIDTH = 18;
 
 export function formatStatusText(s: StatusSnapshot): string {
   const lines: string[] = [];
   const row = (label: string, value: string): void => {
-    lines.push(`  ${pad(label, LABEL_WIDTH)}${value}`);
+    lines.push(`  ${padRight(label, LABEL_WIDTH)}${value}`);
   };
 
   // Header
@@ -34,7 +34,7 @@ export function formatStatusText(s: StatusSnapshot): string {
   const dbPct = s.storage.maxSizeMb > 0 ? (s.storage.dbSizeMb / s.storage.maxSizeMb) * 100 : 0;
   row("DB", `${s.storage.dbSizeMb.toFixed(1)} MB of ${s.storage.maxSizeMb} MB cap     [${dbBar}] ${dbPct.toFixed(1)}%`);
   const ageStr = s.storage.oldestEventAt
-    ? `(oldest ${s.storage.oldestEventAt.slice(0, 10)}, ${s.storage.oldestEventAgeDays ?? 0} days)`
+    ? `(oldest ${s.storage.oldestEventAt.slice(0, 10)}, ${s.storage.oldestEventAgeDays == null ? "age unknown" : `${s.storage.oldestEventAgeDays} days`})`
     : "(no events)";
   row("Events", `${s.storage.eventCount.toLocaleString()}   ${ageStr}`);
   const nextPrune = s.storage.nextPruneAt

@@ -1,11 +1,7 @@
 import { LitElement, html, css, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { getInventory, INVENTORY_KINDS, type InventoryReport, type InventoryItem, type InventoryKind } from "../api.ts";
-
-function fmtTimestamp(iso?: string): string {
-  if (!iso) return "—";
-  return iso.replace(/\.\d+Z$/, "Z").replace("T", " ");
-}
+import { fmtTimestamp, hashQuery } from "../format.ts";
 
 type ViewKind = InventoryKind | "summary";
 
@@ -99,10 +95,7 @@ export class InventoryView extends LitElement {
   };
 
   private applyHash(): void {
-    const hash = window.location.hash;
-    const qIdx = hash.indexOf("?");
-    if (qIdx < 0) return;
-    const params = new URLSearchParams(hash.slice(qIdx + 1));
+    const params = hashQuery();
     const k = params.get("kind");
     if (k === "summary" || (INVENTORY_KINDS as ReadonlyArray<string>).includes(k ?? "")) {
       this.kind = k as ViewKind;

@@ -14,7 +14,8 @@ export interface PostResult {
   error?: string;
 }
 
-import { validateHttpTargetUrl } from "./network-policy.js";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { assertResolvedAddressAllowed, validateHttpTargetUrl } from "./network-policy.js";
 
 /**
  * Returns a reason if the URL isn't safe to POST to, or undefined if it
@@ -23,9 +24,9 @@ import { validateHttpTargetUrl } from "./network-policy.js";
  * time.
  *
  * Trust model: URLs originate from the plugin's config file. We gate them
- * through a shared SSRF policy — `http://`
- * only to loopback, no userinfo, no numeric IP encoding tricks, and
- * private/link-local hosts only when the caller explicitly opts in via
+ * through a shared SSRF policy — `http://` only to loopback, no userinfo,
+ * no numeric IP encoding tricks, and private/link-local hosts only when
+ * the caller explicitly opts in via
  * `allowPrivateHost: true`. Operators who legitimately need to POST to
  * an intranet recipient flip the corresponding `*AllowPrivateHost` config
  * flag; everyone else gets defense in depth against a copy-pasted bad URL.
@@ -52,13 +53,36 @@ function sanitize(s: string | undefined): string | undefined {
  * surfaced through the returned `PostResult` so callers can decide retry
  * vs. give-up uniformly. The URL is never logged here; the caller logs
  * status/error if it wants to surface them.
+ *
+ * Send-time SSRF re-check: before each `fetch`, the hostname is resolved
+ * (`dns.lookup`, all addresses) and every resolved IP is re-classified against
+ * the shared policy (see network-policy.ts `assertResolvedAddressAllowed`).
+ * This closes the gap where the host string passed config-time validation
+ * (`validateHttpTargetUrl`) but the name resolves to a private/loopback/
+ * link-local address, and re-runs on every send rather than once at startup —
+ * so a DNS record flipped after config load is caught too. A resolution
+ * failure is treated as "do not send" (fail-safe). `allowPrivateHost` mirrors
+ * the config-time flag so loopback dev webhooks and operator-opted-in intranet
+ * targets keep working.
+ *
+ * NOTE: a small TOCTOU window remains between this lookup and the actual
+ * connect inside `fetch` (true IP-pinning would need a custom undici
+ * dispatcher); documented as a known limitation in network-policy.ts.
  */
 export async function postJsonWebhook(
   url: string,
   body: unknown,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; allowPrivateHost?: boolean } = {},
 ): Promise<PostResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const resolved = await assertResolvedAddressAllowed(
+    url,
+    (host) => dnsLookup(host, { all: true }),
+    { allowPrivateHost: opts.allowPrivateHost === true },
+  );
+  if (!resolved.ok) {
+    return { ok: false, error: sanitize(`blocked by SSRF policy: ${resolved.reason}`) };
+  }
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -66,9 +90,8 @@ export async function postJsonWebhook(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
       // Reject redirects rather than following them. A hostile or
-      // misconfigured webhook that returns 302 could otherwise steer
-      // the POST  to an
-      // unintended host. Treat any 3xx as a transport failure.
+      // misconfigured webhook that returns 302 could otherwise steer the
+      // POST to an unintended host. Treat any 3xx as a transport failure.
       redirect: "manual",
     });
     if (!response.ok) {

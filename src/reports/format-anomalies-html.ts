@@ -1,5 +1,6 @@
 import type { AnomalyView } from "./anomalies-view.js";
 import { escapeHtml as escape, REPORT_BASE_CSS } from "./html-utils.js";
+import { hasIntegrityFindings } from "./text-utils.js";
 
 /**
  * Self-contained HTML rendering of an AnomalyView. Same visual conventions
@@ -107,7 +108,7 @@ function renderBody(v: AnomalyView): string {
   }
 
   const iv = a.integrityViolations;
-  if (iv.notFoundOnDe.length > 0 || iv.tamperedEvents.length > 0 || iv.note !== null) {
+  if (hasIntegrityFindings(iv)) {
     sections.push(`<h2>Integrity violations</h2>`);
     if (iv.note !== null) {
       sections.push(`<p class="empty">${escape(iv.note)}</p>`);

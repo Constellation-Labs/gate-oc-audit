@@ -3,14 +3,14 @@ import { chmodSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { constants, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { uuidv7 } from "uuidv7";
 
-import { createRequire } from "module";
 import type { AuditEvent, AuditEventInsert, EventType, EventCategory } from "../types/events.js";
 import { initializeSchema, runInTransaction } from "./schema.js";
 import type { SpendGroupBy } from "../reports/spend-rollup.js";
 import { getMachineId } from "../util/machine-id.js";
-import {log} from "../util/logger.js";
+import { log } from "../util/logger.js";
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
@@ -238,6 +238,10 @@ export class AuditStore {
     distinctToolNames: StatementSync;
     reportFooterLastEvent: StatementSync;
     cronRollupRows: StatementSync;
+    // getById has exactly two static SQL shapes (with/without content_gz);
+    // both are prepared once here and selected at call time.
+    getByIdNoContent: StatementSync;
+    getByIdWithContent: StatementSync;
   };
 
   constructor(dbPath = "~/.openclaw/audit.db", opts: { readOnly?: boolean } = {}) {
@@ -255,9 +259,14 @@ export class AuditStore {
     // Diagnostic ID for tracing concurrent-instance issues.
     _auditStoreInstances++;
     this.instanceId = `${process.pid}.${_auditStoreInstances}.${Math.random().toString(36).slice(2, 8)}`;
-    log.info(
-      `[store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
-    );
+    // Per-construction log is diagnostic clutter in normal operation; only
+    // emit it when GATE_OC_AUDIT_DEBUG is set. The instanceId is still
+    // computed above so it remains available for other log lines.
+    if (process.env.GATE_OC_AUDIT_DEBUG) {
+      log.info(
+        `[store=${this.instanceId}] AuditStore created — readOnly=${this.readOnly}, path=${resolvedPath}`,
+      );
+    }
 
     // Insert path is unused in read-only mode but the prepared statement is
     // a property; bind it to a no-op SELECT so the type stays satisfied
@@ -498,6 +507,23 @@ export class AuditStore {
         )
         ORDER BY c.sequence DESC
       `),
+
+      // getById's only dynamic axis is whether content_gz is selected, so
+      // cache both static variants and pick at call time.
+      getByIdNoContent: this.db.prepare(
+        `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
+                event_type, category, description, metadata,
+                content_hash, previous_hash,
+                created_at, received_at, synced_at
+         FROM audit_events WHERE id = @id`,
+      ),
+      getByIdWithContent: this.db.prepare(
+        `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
+                event_type, category, description, metadata, content_gz,
+                content_hash, previous_hash,
+                created_at, received_at, synced_at
+         FROM audit_events WHERE id = @id`,
+      ),
     };
   }
 
@@ -758,6 +784,11 @@ export class AuditStore {
 
     const wantContent = opts.includeContent || opts.contentPreview !== undefined;
     const contentCol = wantContent ? ", content_gz" : "";
+    // Intentional exception to the constructor's prepared-once `stmts`
+    // pattern: the SQL here is dynamic (the WHERE clause is assembled from a
+    // variable set of filters via buildWhere, plus a runtime ORDER BY
+    // direction and an optional content_gz column), so no single cached
+    // statement can serve every shape. Prepared per call instead.
     const rows = this.db
       .prepare(
         `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
@@ -780,17 +811,10 @@ export class AuditStore {
   }
 
   getById(id: string, opts: { includeContent?: boolean } = {}): AuditEvent | undefined {
-    const wantContent = opts.includeContent === true;
-    const contentCol = wantContent ? ", content_gz" : "";
-    const row = this.db
-      .prepare(
-        `SELECT id, sequence, source, machine_id, session_id, org_id, user_id,
-                event_type, category, description, metadata${contentCol},
-                content_hash, previous_hash,
-                created_at, received_at, synced_at
-         FROM audit_events WHERE id = @id`,
-      )
-      .get({ id }) as unknown as EventRow | undefined;
+    const stmt = opts.includeContent === true
+      ? this.stmts.getByIdWithContent
+      : this.stmts.getByIdNoContent;
+    const row = stmt.get({ id }) as unknown as EventRow | undefined;
     return row ? rowToEvent(row) : undefined;
   }
 
@@ -809,8 +833,16 @@ export class AuditStore {
         .run({ cutoff });
       totalDeleted += Number(unsyncedResult.changes);
 
-      // Size-based pruning — prefer synced events, then oldest overall
-      if (this.getDbSizeMb() > maxSizeMb) {
+      // Size-based pruning — prefer synced events, then oldest overall.
+      //
+      // The loop must measure *live* size (getLiveDbSizeMb), not file size
+      // (getDbSizeMb). Under `auto_vacuum = INCREMENTAL` a DELETE moves pages
+      // to the freelist but does not shrink `page_count` until the
+      // post-commit `incremental_vacuum` runs — so a file-size check here
+      // never falls below the cap and the loop would delete every row before
+      // terminating. Live size (page_count − freelist_count) drops as rows
+      // are deleted, so the loop converges and trims to the cap.
+      if (this.getLiveDbSizeMb() > maxSizeMb) {
         let deleted = 0;
         do {
           const result = this.db
@@ -822,20 +854,19 @@ export class AuditStore {
             .run({ batchSize: PRUNE_BATCH_SIZE });
           deleted = Number(result.changes);
           totalDeleted += deleted;
-        } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+        } while (deleted > 0 && this.getLiveDbSizeMb() > maxSizeMb);
 
-        if (this.getDbSizeMb() > maxSizeMb) {
-          do {
-            const result = this.db
-              .prepare(
-                `DELETE FROM audit_events WHERE id IN (
-                  SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
-                )`,
-              )
-              .run({ batchSize: PRUNE_BATCH_SIZE });
-            deleted = Number(result.changes);
-            totalDeleted += deleted;
-          } while (deleted > 0 && this.getDbSizeMb() > maxSizeMb);
+        while (this.getLiveDbSizeMb() > maxSizeMb) {
+          const result = this.db
+            .prepare(
+              `DELETE FROM audit_events WHERE id IN (
+                SELECT id FROM audit_events ORDER BY sequence ASC LIMIT @batchSize
+              )`,
+            )
+            .run({ batchSize: PRUNE_BATCH_SIZE });
+          deleted = Number(result.changes);
+          totalDeleted += deleted;
+          if (deleted === 0) break;
         }
       }
 
@@ -852,15 +883,21 @@ export class AuditStore {
           .get() as { seq: number } | undefined;
         const nextExpectedSeq = minAfter?.seq ?? (seqRow?.seq ?? 0) + 1;
 
+        // Archive any checkpoint with at least one pruned event — i.e.
+        // `sequence_start < nextExpectedSeq`, NOT `sequence_end <`. A
+        // checkpoint whose range straddles the new minimum (start pruned, end
+        // retained) can no longer be replayed in full, so leaving it active
+        // would make Verifier.verifyRange report a false events-missing /
+        // root-mismatch violation for events that were legitimately pruned.
         this.db.prepare(`
           INSERT OR IGNORE INTO checkpoint_archive
             (id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at, archived_at)
           SELECT id, sequence_start, sequence_end, smt_root, event_count, de_tx_hash, created_at, ?
           FROM integrity_checkpoints
-          WHERE sequence_end < ?
+          WHERE sequence_start < ?
         `).run(new Date().toISOString(), nextExpectedSeq);
         this.db.prepare(
-          "DELETE FROM integrity_checkpoints WHERE sequence_end < ?",
+          "DELETE FROM integrity_checkpoints WHERE sequence_start < ?",
         ).run(nextExpectedSeq);
       }
     });
@@ -877,6 +914,20 @@ export class AuditStore {
     const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
     const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
     return (pageSize * pageCount) / (1024 * 1024);
+  }
+
+  /**
+   * Live (in-use) DB size: file pages minus freelist pages. Unlike
+   * getDbSizeMb (raw file size), this shrinks as rows are deleted within a
+   * transaction under `auto_vacuum = INCREMENTAL` — before the freed pages are
+   * returned to the OS by `incremental_vacuum`. Used by the size-based prune
+   * loop so it converges on the cap instead of draining the table.
+   */
+  private getLiveDbSizeMb(): number {
+    const pageSize = (this.db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
+    const pageCount = (this.db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
+    const freeCount = (this.db.prepare("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count;
+    return (pageSize * Math.max(0, pageCount - freeCount)) / (1024 * 1024);
   }
 
   getOldestCreatedAt(): string | undefined {

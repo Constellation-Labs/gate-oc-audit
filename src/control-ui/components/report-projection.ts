@@ -3,9 +3,9 @@ import { customElement, property, state } from "lit/decorators.js";
 import {
   getReport,
   type AuditProjection,
-  type ConfiguredCron,
   type DuplicateOutboundFinding,
 } from "../api.ts";
+import { fmtNumber, fmtUsd, fmtCronSchedule, hashQuery } from "../format.ts";
 
 type Kind = "daily" | "weekly";
 
@@ -28,27 +28,6 @@ function isoWeekString(d: Date): string {
   const weekNumber = 1 + Math.ceil((firstThursday - target.valueOf()) / 604_800_000);
   const yearOfThursday = new Date(firstThursday).getUTCFullYear();
   return `${yearOfThursday}-W${String(weekNumber).padStart(2, "0")}`;
-}
-
-function fmtNumber(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return n.toLocaleString();
-}
-
-function fmtUsd(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  // 4-dp so per-call costs don't round to $0.00.
-  return `$${n.toFixed(4)}`;
-}
-
-function fmtCronSchedule(c: ConfiguredCron): string {
-  const s = c.schedule;
-  switch (s.kind) {
-    case "at": return `at ${s.at}`;
-    case "every": return `every ${s.everyMs} ms`;
-    case "cron": return `cron ${s.expr}${s.tz ? ` (${s.tz})` : ""}`;
-    case "unknown": return `unknown (${s.raw})`;
-  }
 }
 
 @customElement("report-projection")
@@ -173,10 +152,7 @@ export class ReportProjection extends LitElement {
   };
 
   private applyHashParams(): void {
-    const hash = window.location.hash;
-    const qIdx = hash.indexOf("?");
-    if (qIdx < 0) return;
-    const params = new URLSearchParams(hash.slice(qIdx + 1));
+    const params = hashQuery();
     const date = params.get("date");
     const week = params.get("week");
     const tz = params.get("tz");

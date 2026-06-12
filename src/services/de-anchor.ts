@@ -7,10 +7,18 @@ import type {NotificationService} from "./notifications.js";
 import type {SmtService} from "./smt-service.js";
 import {deAnchorLog} from "../util/logger.js";
 import {ANCHOR_NOT_FOUND_HEALTH_NAME} from "./health-keys.js";
+import {validateHttpTargetUrl, isLoopbackHost} from "../util/network-policy.js";
 
 const require2 = createRequire(import.meta.url);
 const dedCore = require2("@constellation-network/digital-evidence-sdk") as typeof import("@constellation-network/digital-evidence-sdk");
 const {DedClient, DedApiError} = require2("@constellation-network/digital-evidence-sdk/network") as typeof import("@constellation-network/digital-evidence-sdk/network");
+
+// The SDK ships DedApiError as a minified, opaquely-typed class, so an
+// `instanceof DedApiError` guard narrows to `any` and doesn't expose `status`.
+// Read the HTTP status through one named shape rather than an inline cast.
+interface DedApiErrorLike {
+  status: number;
+}
 
 const DEFAULT_EVENT_THRESHOLD = 100;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -41,19 +49,23 @@ export function isDeEnv(v: string): v is DeEnv {
  * Throws a descriptive Error on anything else.
  */
 export function validateTestUrl(url: string): void {
-    let parsed: URL;
-    try {
-        parsed = new URL(url);
-    } catch {
-        throw new Error(`${DE_TEST_URL_ENV_VAR} is not a valid URL: ${url}`);
+    // Route through the shared host policy first so the test path and the
+    // webhook path share one source of truth for malformed-URL, protocol,
+    // userinfo, and numeric-IP-encoding classification. `allowPrivateHost`
+    // is left false: test mode only ever talks to a local DE server.
+    const result = validateHttpTargetUrl(url, {allowPrivateHost: false});
+    if (!result.ok) {
+        // Surface the http(s)-protocol contract distinctly so callers (and the
+        // de-resolve tests) still see an "http" hint for non-http schemes.
+        if (result.reason.startsWith("disallowed protocol")) {
+            throw new Error(`${DE_TEST_URL_ENV_VAR} must use http:// or https:// (${result.reason})`);
+        }
+        throw new Error(`${DE_TEST_URL_ENV_VAR} is invalid: ${result.reason}`);
     }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error(`${DE_TEST_URL_ENV_VAR} must use http:// or https:// (got ${parsed.protocol})`);
-    }
-    const host = parsed.hostname;
-    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
-    if (!loopback) {
-        throw new Error(`${DE_TEST_URL_ENV_VAR} must point at loopback (localhost, 127.0.0.1, or [::1]); got ${host}`);
+    // Test mode is loopback-only: the shared policy permits public https hosts,
+    // but a DE_TEST_URL must point at a local server.
+    if (!isLoopbackHost(new URL(url).hostname)) {
+        throw new Error(`${DE_TEST_URL_ENV_VAR} must point at loopback (localhost, 127.0.0.1, or [::1]); got ${new URL(url).hostname}`);
     }
 }
 
@@ -388,7 +400,7 @@ class ActiveAnchorService implements AnchorService {
                             this.persistNotFoundCheckpointIds();
                         }
                     } catch (err) {
-                        if (err instanceof DedApiError && (err as {status: number}).status === 404) {
+                        if (err instanceof DedApiError && (err as DedApiErrorLike).status === 404) {
                             deAnchorLog.error(`Verification failed for checkpoint ${cp.id}: ${deTxHash} not found on DE`);
                             // Dedup the not-found notification across restarts via service_health,
                             // and leave verified_at NULL — marking verified on a 404 would lie about
@@ -445,8 +457,20 @@ class ActiveAnchorService implements AnchorService {
     private isCircuitOpen(): boolean {
         if (this.consecutiveFailures < CIRCUIT_BREAKER_THRESHOLD) return false;
         if (Date.now() >= this.circuitOpenUntil) {
-            // Allow one retry attempt — consecutiveFailures stays high so
-            // recordFailure can escalate circuitOpenCount if it fails again.
+            // Half-open: allow one probe. consecutiveFailures drops to
+            // THRESHOLD-1 (not 0) so a failing probe immediately re-trips the
+            // breaker via recordFailure and escalates circuitOpenCount, while a
+            // succeeding probe resets both counters in doAnchor.
+            //
+            // circuitOpenCount is intentionally NOT reset here: backoff only
+            // collapses to base on a *successful* anchor, not merely on the
+            // deadline elapsing. If the probe is skipped (e.g. eventCount <
+            // minEvents in doAnchor) the breaker is effectively closed and the
+            // next genuine failure restarts escalation from the retained
+            // circuitOpenCount — slightly conservative backoff, never an
+            // unbounded retry storm. anchorPromise serializes callers, so there
+            // is no concurrent-probe window (JS is single-threaded and
+            // anchorIfNeeded sets anchorPromise synchronously before awaiting).
             this.consecutiveFailures = CIRCUIT_BREAKER_THRESHOLD - 1;
             return false;
         }
@@ -470,7 +494,7 @@ class ActiveAnchorService implements AnchorService {
         const lastCheckpoint = this.store.getLastCheckpoint();
         const startOfDay = startOfUtcDayIso();
         const anchoredToday = this.store.countCheckpointsSince(startOfDay);
-        const pending = lastCheckpoint ? this.store.countSince(lastCheckpoint.sequenceEnd + 1) : 0;
+        const pending = lastCheckpoint ? this.store.countAndMaxSince(lastCheckpoint.sequenceEnd + 1).count : 0;
 
         return {
             isActive: true,
@@ -669,7 +693,12 @@ export function createDeAnchorService(
         if (deWalletKeyFile) {
             deAnchorLog.warn("Both deApiKey and deWalletKeyFile configured, API key takes precedence");
         }
-        return new ApiKeyAnchorService(store, config, notifier);
+        try {
+            return new ApiKeyAnchorService(store, config, notifier);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            return new NoOpAnchorService(`Failed to initialize API key anchor: ${msg}`);
+        }
     }
 
     if (deApiKey) {

@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { listEvents, type ApiEvent } from "../api.ts";
+import { fmtTimestamp, hashQuery } from "../format.ts";
 import "./event-filters.ts";
 import "./event-detail.ts";
 import type { FiltersValue } from "./event-filters.ts";
@@ -26,10 +27,7 @@ function parsePositiveInt(raw: string | null): number | undefined {
 }
 
 function readFocusFromHash(): FocusInfo | undefined {
-  const hash = window.location.hash;
-  const qIdx = hash.indexOf("?");
-  if (qIdx < 0) return undefined;
-  const params = new URLSearchParams(hash.slice(qIdx + 1));
+  const params = hashQuery();
   const seq = parsePositiveInt(params.get("focusSeq"));
   if (seq === undefined) return undefined;
   return {
@@ -329,10 +327,6 @@ export class EventTable extends LitElement {
     this.jumpToOffset(this.offset + delta * PAGE_SIZE);
   }
 
-  private fmtTime(iso: string): string {
-    return iso.replace("T", " ").replace(/\.\d+Z$/, "Z");
-  }
-
   private renderBadge(ev: ApiEvent) {
     const v = ev.verification;
     if (!v) return html`<span class="badge unknown" title="status unknown">—</span>`;
@@ -416,7 +410,7 @@ export class EventTable extends LitElement {
                   <tr class="row ${focus && ev.sequence >= focus.rangeStart && ev.sequence <= focus.rangeEnd ? "focused" : ""}" @click=${() => this.openDetail(ev.id)}>
                     <td class="seq">#${ev.sequence}</td>
                     <td class="status">${this.renderBadge(ev)}</td>
-                    <td class="time">${this.fmtTime(ev.createdAt)}</td>
+                    <td class="time">${fmtTimestamp(ev.createdAt)}</td>
                     <td class="type">${ev.eventType}</td>
                     <td class="cat">${ev.category}</td>
                     <td class="desc">

@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { getEvent, verifyEvent, type ApiEvent, type EventVerifyPayload } from "../api.ts";
+import { shortHash, explorerFingerprintUrl } from "../format.ts";
 
 @customElement("event-detail")
 export class EventDetail extends LitElement {
@@ -177,15 +178,10 @@ export class EventDetail extends LitElement {
     URL.revokeObjectURL(url);
   }
 
-  private shortHash(h: string): string {
-    return h.length <= 18 ? h : `${h.slice(0, 10)}…${h.slice(-6)}`;
-  }
-
   private renderDeTxLink(deTxHash: string, deBaseUrl: string | null) {
-    const short = this.shortHash(deTxHash);
-    if (!deBaseUrl) return html`${short}`;
-    const base = deBaseUrl.replace(/\/+$/, "");
-    const url = `${base}/explorer/fingerprint/${encodeURIComponent(deTxHash)}`;
+    const short = shortHash(deTxHash);
+    const url = explorerFingerprintUrl(deTxHash, deBaseUrl);
+    if (!url) return html`${short}`;
     return html`<a href=${url} target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">${short}</a>`;
   }
 
@@ -259,15 +255,15 @@ export class EventDetail extends LitElement {
         <div style="font-size:13px;margin-bottom:8px">${headingText}</div>
 
         <div class="row"><span class="k">raw hash</span>
-          <span class="v" title=${v.rawHash}>${this.shortHash(v.rawHash)}</span>
+          <span class="v" title=${v.rawHash}>${shortHash(v.rawHash)}</span>
         </div>
         <div class="row"><span class="k">censored hash</span>
-          <span class="v" title=${v.censoredHash}>${this.shortHash(v.censoredHash)}</span>
+          <span class="v" title=${v.censoredHash}>${shortHash(v.censoredHash)}</span>
         </div>
         ${v.proof
           ? html`
             <div class="row"><span class="k">tree root</span>
-              <span class="v" title=${v.proof.root}>${this.shortHash(v.proof.root)}</span>
+              <span class="v" title=${v.proof.root}>${shortHash(v.proof.root)}</span>
             </div>
             <div class="row"><span class="k">proof siblings</span>
               <span class="v">${v.proof.siblings.length}</span>
